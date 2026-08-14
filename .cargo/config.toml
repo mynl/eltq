@@ -1,0 +1,3 @@
+# Keep Rust build churn off the Synology-synced folder (see CLAUDE.md).
+[build]
+target-dir = "V:/dev/cargo-target/secondary-corrosion"

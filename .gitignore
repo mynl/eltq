@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+dist/
+*.egg-info/
+
+# Rust (target dir lives on V:\dev via .cargo/config.toml; belt and braces)
+target/
+
+# Wheels
+*.whl
+
+# Benchmark scratch (results history in benchmarks/results.json IS committed)
+benchmarks/scratch/
+
+# Data firewall: no data files except synthetic fixtures
+*.csv
+!fixtures/*.csv
+*.parquet
+*.feather
+*.npy
+*.npz
+!fixtures/golden/*.npz
+.env

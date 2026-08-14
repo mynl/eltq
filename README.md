@@ -1,0 +1,107 @@
+# eltq — ferociously fast ELT secondary-uncertainty quantization
+
+Converts a portfolio event loss table (ELT, ~1M rows) into two discrete, evenly
+spaced, rate-weighted loss-grid distributions:
+
+- **raw** — each event contributes an atom of rate λ at its conditional mean μ;
+- **secondary** — each event's conditional loss is modeled as a beta on
+  [0, M] matching (μ, σ² = σ_I² + σ_C²) and approximated by K equally weighted
+  midpoint quantiles x_k = M·Q(α, β; (k+½)/K).
+
+Both are mapped to the grid g_i = i·h by a linear deposit rule that preserves
+mass and first moment exactly. The mathematical contract is
+`secondary-uncertainty-mathematical-specification.md`; the implementation plan
+is `dev/plan-implementation.md`.
+
+## Status
+
+| Milestone | Version | State |
+| --- | --- | --- |
+| [reference] SciPy oracle, golden fixtures, acceptance suite | 1.0.0 | done |
+| [rust-core] eltq-core scalar path | 1.1.0 | planned |
+| [python] PyO3 bindings + CSV route | 1.2.0 | planned |
+| [memmap] quantize_into / quantize_to_npy | 1.3.0 | planned |
+| [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | planned |
+
+## Layout
+
+```
+crates/eltq-core/     pure Rust core (no PyO3/NumPy/CLI types)
+crates/eltq-python/   PyO3 + numpy bindings (from 1.2.0)
+python/eltq/          thin pure-Python conveniences
+tests/                pytest acceptance suite + SciPy reference oracle
+fixtures/             synthetic ELTs + golden outputs (never real data)
+benchmarks/           bench harness + machine-readable results history
+dev/                  plans (moved to dev/done when complete)
+```
+
+## Environment (Windows, uv, V:\dev)
+
+Build churn stays off the Synology-synced folder: the venv lives at
+`V:\dev\venvs\secondary-corrosion` (junction `.venv` in the repo) and the cargo
+target dir at `V:\dev\cargo-target\secondary-corrosion` (`.cargo/config.toml`).
+
+```powershell
+uv venv V:\dev\venvs\secondary-corrosion --python 3.13
+New-Item -ItemType Junction -Path .venv -Target V:\dev\venvs\secondary-corrosion
+uv sync
+```
+
+## Commands
+
+```powershell
+uv run pytest                                  # acceptance suite
+uv run python fixtures/generate_fixtures.py    # regenerate fixtures + goldens
+cargo test -p eltq-core                        # Rust unit + property tests (1.1.0)
+```
+
+## Input schema
+
+Canonical columns (CSV route allows a column-name mapping from 1.2.0):
+
+| column | symbol | meaning |
+| --- | --- | --- |
+| `event_id` | e | optional identifier (row index fallback), audit only |
+| `rate` | λ | annual event rate / nonnegative measure weight |
+| `max_loss` | M | beta upper bound (maximum possible loss) |
+| `mean_loss` | μ | conditional mean loss (or a rate on [0, 1] with `mean_is_loss_rate`) |
+| `sd_indep` | σ_I | independent std-dev component |
+| `sd_corr` | σ_C | correlated std-dev component |
+
+Admissibility: λ, M, σ_I, σ_C ≥ 0 and 0 ≤ μ ≤ M. Working variance
+σ² = σ_I² + σ_C².
+
+## Row handling and policies
+
+Structurally invalid rows are dropped and reported (never silently): nonfinite
+fields, negative fields, μ > M. Zero-rate rows carry no mass and are skipped.
+Degenerate rows (σ = 0, μ = 0, μ = M, or M = 0) contribute a single atom at μ.
+
+Rows with inadmissible beta variance (σ² ≥ μ(M − μ)) follow `variance_policy`:
+
+- `clamp` (default) — σ clamped to 0.999·√(μ(M − μ)), reported;
+- `error` — typed error;
+- `drop` — row dropped from both outputs, reported;
+- `atom` — collapsed to an atom at μ, reported.
+
+Diagnostics report per-category counts plus up to 10 representative event ids:
+`nonfinite`, `negative_field`, `mean_exceeds_max`, `zero_rate`,
+`degenerate_atom`, `sigma_clamped`, `variance_dropped`, `variance_atom`.
+
+Grid coverage requires (n − 1)·h ≥ max contributing M; with `grid_length=None`
+the length is auto-derived as ceil(max M / h) + 1. An insufficient explicit
+grid raises `GridOverflowError` — no silent truncation, no overflow bin.
+
+## Output
+
+Two length-n `float64` arrays (weights at losses i·h; rate-weighted by
+default, `normalize=True` divides both by the total contributing rate Λ) plus
+metadata: h, n, K, normalized flag, Λ, analytic AAL, both output masses and
+first moments, the quadrature secondary mean and its finite-K error vs the
+AAL, row counts, and the diagnostics above.
+
+## Open questions (spec §11)
+
+- Confirm the real file's exposure field is exactly the beta upper bound M.
+- `mean_is_loss_rate` scales only μ by M (per spec). If real ELTs give the
+  standard deviations as damage ratios too, that convention needs a decision.

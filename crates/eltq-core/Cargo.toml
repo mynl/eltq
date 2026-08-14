@@ -1,0 +1,8 @@
+[package]
+name = "eltq-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust core for ELT secondary-uncertainty quantization"
+
+[dependencies]

@@ -1,0 +1,22 @@
+[project]
+name = "eltq"
+version = "1.0.0"
+description = "Ferociously fast ELT secondary-uncertainty quantization"
+requires-python = ">=3.13"
+dependencies = ["numpy>=2.1"]
+
+# 1.0.0: pure-Python reference milestone; uv manages the environment only.
+# 1.2.0 switches to the maturin build backend for the Rust extension.
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "scipy>=1.14",
+    "pandas>=2.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
