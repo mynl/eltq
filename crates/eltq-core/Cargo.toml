@@ -6,6 +6,7 @@ license.workspace = true
 description = "Pure-Rust core for ELT secondary-uncertainty quantization"
 
 [dependencies]
+csv = { workspace = true }
 statrs = { workspace = true }
 thiserror = { workspace = true }
 

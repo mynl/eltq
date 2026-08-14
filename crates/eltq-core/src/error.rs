@@ -40,6 +40,10 @@ pub enum Error {
     },
     #[error("cannot normalize: total contributing rate is zero")]
     ZeroTotalRate,
+    #[error("CSV read failed: {0}")]
+    Csv(String),
+    #[error("CSV is missing required column {0:?}")]
+    MissingColumn(String),
     #[error(
         "beta quantile evaluation failed for row {row} \
          (alpha = {alpha}, beta = {beta})"

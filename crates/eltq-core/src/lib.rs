@@ -12,6 +12,7 @@
 
 pub mod beta;
 pub mod config;
+pub mod csv_input;
 pub mod deposit;
 pub mod diagnostics;
 pub mod error;

@@ -3,6 +3,37 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.2.0] - 2026-08-14
+
+### Added
+
+- [python] `eltq-python` PyO3 crate (abi3-py313, pyo3 0.29): zero-copy borrow
+  of contiguous float64 NumPy columns, compute detached from the interpreter
+  (`Python::detach`), results transferred `Vec<f64>` -> NumPy via
+  `IntoPyArray` with no completed-array copy, Rust errors translated to
+  `EltqError` / `VarianceError` / `GridOverflowError`.
+- CSV input route in `eltq-core` (`csv_input.rs`, Rust `csv` crate):
+  configurable column names over the strict canonical schema, optional
+  event-id column, unparseable numeric cells become NaN and surface in the
+  `nonfinite` diagnostic (structural CSV problems are hard typed errors).
+- Python package `eltq`: `quantize_arrays`, `quantize_csv` (event-id
+  diagnostic examples translated from the file), `quantize_dataframe`
+  convenience (pandas never a dependency of the extension), `Meta` /
+  `RowIssues` dataclasses matching the reference, numpy-style docstrings.
+- maturin build backend in pyproject (agreed deviation from hatchling), uv
+  cache-keys so `uv sync` rebuilds when Rust sources change; Windows wheel
+  builds via `uv sync`.
+- Acceptance and contract suites now run against both implementations
+  (reference + eltq); new `tests/test_python_api.py` covers the CSV route
+  (bitwise-equal to the array route), column mapping, error surface, and
+  version sync. 71 Python + 37 Rust tests green.
+
+### Changed
+
+- Fixture generation and tests parse CSVs with
+  `float_precision="round_trip"` so pandas-parsed inputs are bit-identical
+  to Rust's correctly rounded CSV parser; goldens regenerated accordingly.
+
 ## [1.1.0] - 2026-08-14
 
 ### Added

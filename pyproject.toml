@@ -1,20 +1,35 @@
 [project]
 name = "eltq"
-version = "1.1.0"
+version = "1.2.0"
 description = "Ferociously fast ELT secondary-uncertainty quantization"
 requires-python = ">=3.13"
 dependencies = ["numpy>=2.1"]
 
-# 1.0.0: pure-Python reference milestone; uv manages the environment only.
-# 1.2.0 switches to the maturin build backend for the Rust extension.
+# maturin (not hatchling): the package is a Rust extension; agreed in
+# dev/plan-implementation.md.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "crates/eltq-python/Cargo.toml"
+python-source = "python"
+module-name = "eltq._eltq"
+
 [tool.uv]
-package = false
+# Rebuild the extension when Rust sources change, not just pyproject.toml.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "crates/*/Cargo.toml" },
+    { file = "crates/*/src/**/*.rs" },
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "scipy>=1.14",
     "pandas>=2.2",
+    "maturin>=1.7,<2",
 ]
 
 [tool.pytest.ini_options]

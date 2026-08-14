@@ -1,15 +1,18 @@
 [workspace]
 resolver = "3"
-members = ["crates/eltq-core"]
+members = ["crates/eltq-core", "crates/eltq-python"]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 thiserror = "2"
 statrs = "0.18"
+csv = "1.4"
+pyo3 = "0.29"
+numpy = "0.29"
 
 [profile.release]
 lto = "thin"

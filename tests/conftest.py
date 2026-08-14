@@ -101,7 +101,9 @@ def elt(rows) -> dict:
 
 
 def load_fixture(name: str) -> pd.DataFrame:
-    return pd.read_csv(FIXTURES_DIR / f"{name}_elt.csv")
+    # round_trip: correctly rounded floats, bit-identical to Rust's parser.
+    return pd.read_csv(FIXTURES_DIR / f"{name}_elt.csv",
+                       float_precision="round_trip")
 
 
 def load_golden(name: str):

@@ -1,0 +1,15 @@
+[package]
+name = "eltq-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 bindings for eltq-core (conversion and error translation only)"
+
+[lib]
+name = "_eltq"
+crate-type = ["cdylib"]
+
+[dependencies]
+eltq-core = { path = "../eltq-core" }
+numpy = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py313"] }

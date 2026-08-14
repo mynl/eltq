@@ -19,7 +19,7 @@ is `dev/plan-implementation.md`.
 | --- | --- | --- |
 | [reference] SciPy oracle, golden fixtures, acceptance suite | 1.0.0 | done |
 | [rust-core] eltq-core scalar path | 1.1.0 | done |
-| [python] PyO3 bindings + CSV route | 1.2.0 | planned |
+| [python] PyO3 bindings + CSV route | 1.2.0 | done |
 | [memmap] quantize_into / quantize_to_npy | 1.3.0 | planned |
 | [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | planned |
 
@@ -50,10 +50,35 @@ uv sync
 ## Commands
 
 ```powershell
-uv run pytest                                  # acceptance suite
+uv sync                                        # build wheel (maturin) + deps;
+                                               # rebuilds when Rust sources change
+uv run pytest                                  # acceptance suite (reference + eltq)
 uv run python fixtures/generate_fixtures.py    # regenerate fixtures + goldens
-cargo test -p eltq-core                        # Rust unit + property tests (1.1.0)
+cargo test -p eltq-core                        # Rust unit + property tests
 ```
+
+## Python API
+
+```python
+import eltq
+
+raw, secondary, meta = eltq.quantize_arrays(
+    rate, max_loss, mean_loss, sd_indep, sd_corr,
+    *, bucket_size, grid_length=None, quadrature_points=32,
+    normalize=False, mean_is_loss_rate=False,
+    variance_policy="clamp", clamp_factor=0.999, event_ids=None)
+
+raw, secondary, meta = eltq.quantize_csv(path, *, bucket_size,
+    columns={"rate": "annual_rate"}, ...)      # optional column-name mapping
+
+raw, secondary, meta = eltq.quantize_dataframe(df, *, bucket_size, ...)
+```
+
+Arrays are borrowed zero-copy (contiguous float64; the wrapper converts
+explicitly otherwise), compute releases the interpreter, and results hand
+Rust-owned buffers to NumPy without a copy. Errors raise `eltq.EltqError` or
+its subclasses `VarianceError` / `GridOverflowError`. `meta` is a `Meta`
+dataclass with the fields listed under Output below.
 
 ## Input schema
 

@@ -155,7 +155,8 @@ def main() -> None:
     ):
         path = FIXTURES_DIR / f"{name}_elt.csv"
         df.to_csv(path, index=False)
-        reread = pd.read_csv(path)
+        # round_trip parsing: bit-identical to what the Rust CSV route sees.
+        reread = pd.read_csv(path, float_precision="round_trip")
         write_golden(reread, name, params)
 
 
