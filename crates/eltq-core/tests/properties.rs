@@ -107,6 +107,28 @@ proptest! {
     }
 
     #[test]
+    fn batched_kernel_agrees_with_reference(
+        log_alpha in -3.0_f64..3.0,
+        log_beta in -3.0_f64..3.0,
+        k in prop_oneof![Just(1_usize), Just(7), Just(32)],
+    ) {
+        let alpha = 10.0_f64.powf(log_alpha);
+        let beta = 10.0_f64.powf(log_beta);
+        let mut got = vec![0.0; k];
+        let mut want = vec![0.0; k];
+        eltq_core::batched::beta_midpoint_quantiles(alpha, beta, &mut got).unwrap();
+        eltq_core::kernel::midpoint_quantiles_reference(alpha, beta, &mut want).unwrap();
+        let moderate = (0.1..=100.0).contains(&alpha) && (0.1..=100.0).contains(&beta);
+        let tolerance = if moderate { 1e-13 } else { 1e-10 };
+        for (g, w) in got.iter().zip(&want) {
+            prop_assert!(
+                (g - w).abs() <= tolerance,
+                "alpha={alpha} beta={beta} k={k}: {g} vs {w}"
+            );
+        }
+    }
+
+    #[test]
     fn beta_params_round_trip(
         m in 1e-9_f64..1e12,
         p in 1e-6_f64..=0.999999,

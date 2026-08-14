@@ -1,11 +1,22 @@
-//! Single-pass streaming quantization driver (scalar; parallel in 1.4.0).
+//! Streaming quantization driver: parallel fixed chunks with a
+//! bitwise-deterministic in-order fold.
+//!
+//! Rows are processed in fixed chunks of `config.chunk_rows`. Each chunk
+//! produces private raw and secondary partial histograms plus compensated
+//! partial totals (no locks, no atomics in the hot loop); partials are folded
+//! sequentially in chunk-index order, so the result is bitwise identical for
+//! any thread count and any work-stealing schedule. Chunks run in bounded
+//! waves (2x the worker count), keeping peak memory at
+//! `waves * 2 * grid_length * 8` bytes regardless of input size.
 
+use rayon::prelude::*;
+
+use crate::batched::beta_midpoint_quantiles;
 use crate::beta::beta_params;
 use crate::config::Config;
 use crate::deposit::deposit;
 use crate::diagnostics::{Diagnostics, Meta, QuantizeResult};
 use crate::error::Error;
-use crate::kernel::midpoint_quantiles_reference;
 use crate::sum::{Neumaier, grid_moment, sum};
 use crate::validate::{RowKind, classify_row};
 
@@ -39,6 +50,16 @@ impl EltInput<'_> {
         }
         Ok(expected)
     }
+}
+
+/// Private per-chunk partial result.
+struct ChunkPartial {
+    raw: Vec<f64>,
+    secondary: Vec<f64>,
+    rate: f64,
+    aal: f64,
+    quadrature: f64,
+    valid_rows: usize,
 }
 
 /// Quantize an ELT onto the even loss grid; both histograms in one pass.
@@ -102,43 +123,105 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
         }
     };
 
-    // Pass 2: deposits plus compensated reference totals. The K quantiles for
-    // each event live in one reused buffer; no N x K array ever exists.
+    // Pass 2: chunked deposits. Each chunk owns private histograms and a
+    // reused K-quantile buffer; no N x K array ever exists.
     let inv_h = 1.0 / h;
+    let process_chunk = |chunk_index: usize| -> Result<ChunkPartial, Error> {
+        let start = chunk_index * config.chunk_rows;
+        let end = (start + config.chunk_rows).min(n_rows);
+        let mut partial = ChunkPartial {
+            raw: vec![0.0; n],
+            secondary: vec![0.0; n],
+            rate: 0.0,
+            aal: 0.0,
+            quadrature: 0.0,
+            valid_rows: 0,
+        };
+        let mut quantiles = vec![0.0_f64; k];
+        let mut rate_acc = Neumaier::default();
+        let mut aal_acc = Neumaier::default();
+        let mut quad_acc = Neumaier::default();
+        for row in start..end {
+            if kinds[row] == RowKind::Drop {
+                continue;
+            }
+            partial.valid_rows += 1;
+            let lam = input.rate[row];
+            let m = input.max_loss[row];
+            let mu = mu_eff[row];
+            rate_acc.add(lam);
+            aal_acc.add(lam * mu);
+            deposit(&mut partial.raw, mu, lam, inv_h);
+            if kinds[row] == RowKind::Atom {
+                deposit(&mut partial.secondary, mu, lam, inv_h);
+                quad_acc.add(lam * mu);
+            } else {
+                let (alpha, beta) = beta_params(m, mu, var_eff[row]);
+                beta_midpoint_quantiles(alpha, beta, &mut quantiles)
+                    .map_err(|_| Error::KernelFailure { row, alpha, beta })?;
+                let w = lam / k as f64;
+                let mut row_sum = Neumaier::default();
+                for &q in &quantiles {
+                    let x = m * q;
+                    deposit(&mut partial.secondary, x, w, inv_h);
+                    row_sum.add(x);
+                }
+                quad_acc.add(w * row_sum.value());
+            }
+        }
+        partial.rate = rate_acc.value();
+        partial.aal = aal_acc.value();
+        partial.quadrature = quad_acc.value();
+        Ok(partial)
+    };
+
+    let n_chunks = n_rows.div_ceil(config.chunk_rows).max(1);
     let mut raw = vec![0.0_f64; n];
     let mut secondary = vec![0.0_f64; n];
-    let mut quantiles = vec![0.0_f64; k];
     let mut total_rate = Neumaier::default();
     let mut analytic_aal = Neumaier::default();
     let mut quadrature_mean = Neumaier::default();
     let mut valid_rows = 0_usize;
-    for row in 0..n_rows {
-        if kinds[row] == RowKind::Drop {
-            continue;
-        }
-        valid_rows += 1;
-        let lam = input.rate[row];
-        let m = input.max_loss[row];
-        let mu = mu_eff[row];
-        total_rate.add(lam);
-        analytic_aal.add(lam * mu);
-        deposit(&mut raw, mu, lam, inv_h);
-        if kinds[row] == RowKind::Atom {
-            deposit(&mut secondary, mu, lam, inv_h);
-            quadrature_mean.add(lam * mu);
-        } else {
-            let (alpha, beta) = beta_params(m, mu, var_eff[row]);
-            midpoint_quantiles_reference(alpha, beta, &mut quantiles)
-                .map_err(|_| Error::KernelFailure { row, alpha, beta })?;
-            let w = lam / k as f64;
-            let mut row_sum = Neumaier::default();
-            for &q in &quantiles {
-                let x = m * q;
-                deposit(&mut secondary, x, w, inv_h);
-                row_sum.add(x);
+    let mut fold = |partials: Vec<Result<ChunkPartial, Error>>| -> Result<(), Error> {
+        // Sequential fold in chunk-index order: bitwise-deterministic
+        // regardless of which thread produced which partial.
+        for partial in partials {
+            let partial = partial?;
+            for (dst, src) in raw.iter_mut().zip(&partial.raw) {
+                *dst += src;
             }
-            quadrature_mean.add(w * row_sum.value());
+            for (dst, src) in secondary.iter_mut().zip(&partial.secondary) {
+                *dst += src;
+            }
+            total_rate.add(partial.rate);
+            analytic_aal.add(partial.aal);
+            quadrature_mean.add(partial.quadrature);
+            valid_rows += partial.valid_rows;
         }
+        Ok(())
+    };
+    let run_waves = |fold: &mut dyn FnMut(Vec<Result<ChunkPartial, Error>>) -> Result<(), Error>|
+     -> Result<(), Error> {
+        let wave = rayon::current_num_threads().max(1) * 2;
+        let mut next = 0_usize;
+        while next < n_chunks {
+            let end = (next + wave).min(n_chunks);
+            let partials: Vec<Result<ChunkPartial, Error>> =
+                (next..end).into_par_iter().map(process_chunk).collect();
+            fold(partials)?;
+            next = end;
+        }
+        Ok(())
+    };
+    match config.threads {
+        Some(threads) => {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .map_err(|e| Error::ThreadPool(e.to_string()))?;
+            pool.install(|| run_waves(&mut fold))?;
+        }
+        None => run_waves(&mut fold)?,
     }
 
     let total_rate = total_rate.value();
@@ -306,5 +389,30 @@ mod tests {
         assert_eq!(result.meta.grid_length, 1);
         assert_eq!(result.meta.valid_rows, 0);
         assert_eq!(result.raw, vec![0.0]);
+    }
+
+    #[test]
+    fn thread_count_and_chunking_are_bitwise_invariant() {
+        // 300 mixed rows across several chunks; sweep threads and chunk size.
+        let rows: Vec<[f64; 5]> = (0..300)
+            .map(|i| {
+                let m = 100.0 + i as f64;
+                let mu = 0.3 * m;
+                [1e-3 + i as f64 * 1e-5, m, mu, 0.4 * mu, 0.1 * mu]
+            })
+            .collect();
+        let cols = columns(&rows);
+        let mut config = Config::new(2.0);
+        config.chunk_rows = 64;
+        let base = quantize(&input(&cols), &config).unwrap();
+        for threads in [1, 2, 3, 7] {
+            config.threads = Some(threads);
+            let other = quantize(&input(&cols), &config).unwrap();
+            assert_eq!(base.raw, other.raw, "threads={threads}");
+            assert_eq!(base.secondary, other.secondary, "threads={threads}");
+            assert_eq!(base.meta.total_rate, other.meta.total_rate);
+            assert_eq!(base.meta.quadrature_secondary_mean,
+                other.meta.quadrature_secondary_mean);
+        }
     }
 }

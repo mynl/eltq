@@ -40,6 +40,12 @@ pub enum Error {
     },
     #[error("cannot normalize: total contributing rate is zero")]
     ZeroTotalRate,
+    #[error("chunk_rows must be >= 1, got {0}")]
+    BadChunkRows(usize),
+    #[error("threads must be >= 1 when given, got {0}")]
+    BadThreads(usize),
+    #[error("failed to build worker thread pool: {0}")]
+    ThreadPool(String),
     #[error("CSV read failed: {0}")]
     Csv(String),
     #[error("CSV is missing required column {0:?}")]

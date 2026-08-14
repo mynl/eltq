@@ -27,7 +27,7 @@ from eltq._eltq import (
     quantize_csv as _quantize_csv,
 )
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = [
     "EltqError",
@@ -110,6 +110,8 @@ def quantize_arrays(
     mean_is_loss_rate=False,
     variance_policy="clamp",
     clamp_factor=0.999,
+    threads=None,
+    chunk_rows=None,
     event_ids=None,
 ):
     """Quantize ELT columns; return ``(raw, secondary, meta)``.
@@ -133,6 +135,12 @@ def quantize_arrays(
         Treatment of rows with inadmissible beta variance.
     clamp_factor : float, default 0.999
         Clamp target as a fraction of the admissible sigma bound.
+    threads : int, optional
+        Worker threads; None uses all cores. Results are bitwise identical
+        for any thread count (deterministic in-order chunk fold).
+    chunk_rows : int, optional
+        Rows per parallel chunk (default 65536). Part of the deterministic
+        contract: fixed (input, config) gives bitwise-reproducible output.
     event_ids : sequence, optional
         Per-row identifiers used in diagnostic examples (audit only).
 
@@ -155,6 +163,8 @@ def quantize_arrays(
         mean_is_loss_rate=mean_is_loss_rate,
         variance_policy=variance_policy,
         clamp_factor=clamp_factor,
+        threads=threads,
+        chunk_rows=chunk_rows,
     )
     ids = list(event_ids) if event_ids is not None else None
     return raw, secondary, _build_meta(meta_dict, ids)
@@ -170,6 +180,8 @@ def quantize_csv(
     mean_is_loss_rate=False,
     variance_policy="clamp",
     clamp_factor=0.999,
+    threads=None,
+    chunk_rows=None,
     columns: dict[str, str] | None = None,
 ):
     """Quantize an ELT CSV file; return ``(raw, secondary, meta)``.
@@ -190,6 +202,8 @@ def quantize_csv(
         mean_is_loss_rate=mean_is_loss_rate,
         variance_policy=variance_policy,
         clamp_factor=clamp_factor,
+        threads=threads,
+        chunk_rows=chunk_rows,
         columns=columns,
     )
     return raw, secondary, _build_meta(meta_dict)

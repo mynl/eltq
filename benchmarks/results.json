@@ -1,0 +1,450 @@
+[
+  {
+    "timestamp": "2026-08-14T20:51:36+00:00",
+    "rows": 1000000,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.4.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "runs": [
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 5.3017,
+        "rows_per_s": 188620,
+        "beta_rows": 889534,
+        "quantiles_per_s": 5369074,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 50.0,
+        "grid_length": 100000,
+        "elapsed_s": 5.3776,
+        "rows_per_s": 185955,
+        "beta_rows": 889534,
+        "quantiles_per_s": 5293236,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 8,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 1.8459,
+        "rows_per_s": 541739,
+        "beta_rows": 889534,
+        "quantiles_per_s": 3855159,
+        "mass_error": 0.0,
+        "secondary_mean_error": -1779948.5078977346
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 128,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 14.3387,
+        "rows_per_s": 69741,
+        "beta_rows": 889534,
+        "quantiles_per_s": 7940766,
+        "mass_error": 0.0,
+        "secondary_mean_error": -388.26921141147614
+      },
+      {
+        "kind": "non_kernel_overhead",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 0.0223
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 1,
+        "elapsed_s": 31.8975,
+        "rows_per_s": 31350
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 2,
+        "elapsed_s": 16.9502,
+        "rows_per_s": 58996
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 4,
+        "elapsed_s": 8.7634,
+        "rows_per_s": 114111
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 8,
+        "elapsed_s": 5.6039,
+        "rows_per_s": 178447
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": null,
+        "elapsed_s": 5.4437,
+        "rows_per_s": 183699
+      },
+      {
+        "kind": "csv_route",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 6.1126,
+        "rows_per_s": 163597,
+        "csv_bytes": 94348261
+      },
+      {
+        "kind": "npy_output",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 5.5438
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "scipy_reference": {
+      "subsample_rows": 20000,
+      "rows_per_s": 4579,
+      "extrapolated_s_for_full_input": 218.4
+    },
+    "speedup_vs_scipy": 41.2,
+    "peak_working_set_mb": null
+  },
+  {
+    "timestamp": "2026-08-14T20:57:05+00:00",
+    "rows": 1000000,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.4.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "runs": [
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 5.581,
+        "rows_per_s": 179180,
+        "beta_rows": 889534,
+        "quantiles_per_s": 5100368,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "non_kernel_overhead",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 0.0222
+      }
+    ],
+    "scipy_reference": {
+      "subsample_rows": 20000,
+      "rows_per_s": 4810,
+      "extrapolated_s_for_full_input": 207.9
+    },
+    "speedup_vs_scipy": 37.2,
+    "peak_working_set_mb": null
+  },
+  {
+    "timestamp": "2026-08-14T20:57:49+00:00",
+    "rows": 1000000,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.4.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "runs": [
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 4.5039,
+        "rows_per_s": 222031,
+        "beta_rows": 889534,
+        "quantiles_per_s": 6320134,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "non_kernel_overhead",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 0.0218
+      }
+    ],
+    "scipy_reference": {
+      "subsample_rows": 20000,
+      "rows_per_s": 5137,
+      "extrapolated_s_for_full_input": 194.7
+    },
+    "speedup_vs_scipy": 43.2,
+    "peak_working_set_mb": null
+  },
+  {
+    "timestamp": "2026-08-14T20:58:26+00:00",
+    "rows": 1000000,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.4.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "runs": [
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 4.3453,
+        "rows_per_s": 230135,
+        "beta_rows": 889534,
+        "quantiles_per_s": 6550807,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 50.0,
+        "grid_length": 100000,
+        "elapsed_s": 4.4524,
+        "rows_per_s": 224600,
+        "beta_rows": 889534,
+        "quantiles_per_s": 6393269,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 8,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 1.7215,
+        "rows_per_s": 580890,
+        "beta_rows": 889534,
+        "quantiles_per_s": 4133770,
+        "mass_error": 0.0,
+        "secondary_mean_error": -1779948.5078977346
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 128,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 12.139,
+        "rows_per_s": 82379,
+        "beta_rows": 889534,
+        "quantiles_per_s": 9379720,
+        "mass_error": 0.0,
+        "secondary_mean_error": -388.26921141147614
+      },
+      {
+        "kind": "non_kernel_overhead",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 0.0241
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 1,
+        "elapsed_s": 26.0102,
+        "rows_per_s": 38446
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 2,
+        "elapsed_s": 13.9317,
+        "rows_per_s": 71779
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 4,
+        "elapsed_s": 7.3858,
+        "rows_per_s": 135394
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 8,
+        "elapsed_s": 4.5708,
+        "rows_per_s": 218779
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": null,
+        "elapsed_s": 4.5915,
+        "rows_per_s": 217792
+      },
+      {
+        "kind": "csv_route",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 5.1539,
+        "rows_per_s": 194028,
+        "csv_bytes": 94348261
+      },
+      {
+        "kind": "npy_output",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 4.9356
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "scipy_reference": {
+      "subsample_rows": 20000,
+      "rows_per_s": 4870,
+      "extrapolated_s_for_full_input": 205.3
+    },
+    "speedup_vs_scipy": 47.3,
+    "peak_working_set_mb": null
+  },
+  {
+    "timestamp": "2026-08-14T21:10:46+00:00",
+    "rows": 1000000,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.4.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "runs": [
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 4.3448,
+        "rows_per_s": 230160,
+        "beta_rows": 889534,
+        "quantiles_per_s": 6551537,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 50.0,
+        "grid_length": 100000,
+        "elapsed_s": 4.3993,
+        "rows_per_s": 227309,
+        "beta_rows": 889534,
+        "quantiles_per_s": 6470359,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 8,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 1.598,
+        "rows_per_s": 625764,
+        "beta_rows": 889534,
+        "quantiles_per_s": 4453104,
+        "mass_error": 0.0,
+        "secondary_mean_error": -1779948.5078977346
+      },
+      {
+        "kind": "in_memory",
+        "quadrature_points": 128,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 12.4202,
+        "rows_per_s": 80514,
+        "beta_rows": 889534,
+        "quantiles_per_s": 9167385,
+        "mass_error": 0.0,
+        "secondary_mean_error": -388.26921141147614
+      },
+      {
+        "kind": "non_kernel_overhead",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 0.0228
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 1,
+        "elapsed_s": 25.2983,
+        "rows_per_s": 39528
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 2,
+        "elapsed_s": 13.6777,
+        "rows_per_s": 73112
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 4,
+        "elapsed_s": 7.3148,
+        "rows_per_s": 136709
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": 8,
+        "elapsed_s": 4.2629,
+        "rows_per_s": 234581
+      },
+      {
+        "kind": "thread_scaling",
+        "threads": null,
+        "elapsed_s": 4.2352,
+        "rows_per_s": 236115
+      },
+      {
+        "kind": "csv_route",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 4.8414,
+        "rows_per_s": 206551,
+        "csv_bytes": 94348261
+      },
+      {
+        "kind": "npy_output",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 4.2351
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "scipy_reference": {
+      "subsample_rows": 20000,
+      "rows_per_s": 5293,
+      "extrapolated_s_for_full_input": 188.9
+    },
+    "speedup_vs_scipy": 43.5,
+    "peak_working_set_mb": 147.5
+  }
+]

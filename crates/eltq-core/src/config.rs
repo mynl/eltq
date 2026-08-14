@@ -4,6 +4,7 @@ use crate::error::Error;
 
 pub const DEFAULT_CLAMP_FACTOR: f64 = 0.999;
 pub const DEFAULT_QUADRATURE_POINTS: usize = 32;
+pub const DEFAULT_CHUNK_ROWS: usize = 64 * 1024;
 
 /// Treatment of rows whose stated variance is inadmissible for a beta,
 /// i.e. sigma^2 >= mu (M - mu) with 0 < mu < M.
@@ -41,6 +42,12 @@ pub struct Config {
     /// Interpret mean_loss as a rate on [0, 1], scaled by max_loss.
     pub mean_is_loss_rate: bool,
     pub variance_policy: VariancePolicy,
+    /// Worker threads; None uses all cores. Results are bitwise identical
+    /// for any thread count (deterministic in-order chunk fold).
+    pub threads: Option<usize>,
+    /// Rows per parallel chunk. Part of the deterministic contract: results
+    /// are bitwise reproducible for a fixed (input, config) including this.
+    pub chunk_rows: usize,
 }
 
 impl Config {
@@ -52,6 +59,8 @@ impl Config {
             normalize: false,
             mean_is_loss_rate: false,
             variance_policy: VariancePolicy::default(),
+            threads: None,
+            chunk_rows: DEFAULT_CHUNK_ROWS,
         }
     }
 
@@ -71,6 +80,12 @@ impl Config {
             && !(factor.is_finite() && factor > 0.0 && factor < 1.0)
         {
             return Err(Error::BadClampFactor(factor));
+        }
+        if self.chunk_rows < 1 {
+            return Err(Error::BadChunkRows(self.chunk_rows));
+        }
+        if self.threads == Some(0) {
+            return Err(Error::BadThreads(0));
         }
         Ok(())
     }

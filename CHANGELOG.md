@@ -3,6 +3,50 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.4.0] - 2026-08-14
+
+### Added
+
+- [ferocious] Own regularized incomplete-beta CDF (`incbeta.rs`):
+  cephes/NR-style modified Lentz continued fraction with the symmetry switch
+  at x = (α + 1)/(α + β + 2); per-event constant ln B(α, β) computed once per
+  event. Cross-checked against statrs at 1e-13.
+- Batched per-event midpoint-quantile kernel (`batched.rs`), now the
+  production hot path: warm starts between successive quantiles via a
+  second-order Taylor predictor along the quantile ODE dQ/du = 1/f(Q),
+  refined by safeguarded Halley steps inside a maintained bracket with
+  log-space-Newton and bisection fallbacks (hard shapes cannot diverge), a
+  cubic-convergence early exit that skips the confirming CDF evaluation,
+  exact reflection for upper-half quantiles, and fast paths for uniform
+  (exact) and symmetric (solve half, mirror) shapes. Property-tested against
+  the statrs reference kernel (1e-13 moderate shapes, 1e-10 extreme).
+- Rayon chunk parallelism with a bitwise-deterministic sequential fold in
+  chunk-index order: private per-chunk histograms (no locks or atomics),
+  bounded waves (2x workers) capping peak partial-histogram memory, `threads`
+  and `chunk_rows` config exposed through Python. Results are bitwise
+  identical for any thread count; chunk_rows is part of the deterministic
+  contract. Determinism tests in Rust and Python.
+- Benchmarks: criterion kernel suite (`cargo bench -p eltq-core`: CDF by
+  regime, batched vs reference kernel, deposits, beta_params) and the Python
+  end-to-end harness `benchmarks/run_end_to_end.py` (seeded 1M-row mixture,
+  K/grid sweeps, thread scaling, CSV route, memmap output, SciPy-reference
+  speedup, bitwise determinism check, peak RSS, machine/compiler metadata)
+  appending to the committed machine-readable `benchmarks/results.json`.
+- 1M-row performance report: `benchmarks/report-1.4.0.md`. Headline on an
+  i7-7820HQ (4C/8T): 1M rows at K = 32 in ~4.3 s ≈ 230k rows/s ≈ 6.6M
+  beta quantiles/s, ~44x the SciPy reference; non-kernel overhead 0.02 s.
+
+### Changed
+
+- `quantize` now uses the batched kernel; the statrs Newton kernel remains as
+  the test oracle. Full suites stay green (48 Rust, 80 Python tests).
+
+### Notes
+
+- Deferred with profiling justification required (1.5.0+ candidates): SIMD,
+  U-shape closed-form starts, CSV parse/compute overlap, relaxed
+  grid-tolerance stopping, GPU spike, large-n per-worker histogram fallback.
+
 ## [1.3.0] - 2026-08-14
 
 ### Added

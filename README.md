@@ -21,7 +21,7 @@ is `dev/plan-implementation.md`.
 | [rust-core] eltq-core scalar path | 1.1.0 | done |
 | [python] PyO3 bindings + CSV route | 1.2.0 | done |
 | [memmap] quantize_into / quantize_to_npy | 1.3.0 | done |
-| [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | planned |
+| [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | done |
 
 ## Layout
 
@@ -55,7 +55,23 @@ uv sync                                        # build wheel (maturin) + deps;
 uv run pytest                                  # acceptance suite (reference + eltq)
 uv run python fixtures/generate_fixtures.py    # regenerate fixtures + goldens
 cargo test -p eltq-core                        # Rust unit + property tests
+cargo bench -p eltq-core                       # criterion kernel benchmarks
+uv run python benchmarks/run_end_to_end.py     # 1M-row end-to-end benchmark;
+                                               # appends benchmarks/results.json
 ```
+
+## Performance
+
+Headline (i7-7820HQ 4C/8T, Windows 11, see `benchmarks/report-1.4.0.md`):
+one million mixed-regime rows at K = 32 quantized in ~4.3 s — ~230k rows/s,
+~6.6M beta quantiles/s, ~44x the SciPy reference — with bitwise-identical
+results for any thread count. Non-kernel overhead (validation + deposits +
+reduction) is ~0.02 s; the inverse-beta kernel is everything.
+
+Determinism contract: for a fixed input, config (including `chunk_rows`,
+default 65536) and build, output arrays are bitwise reproducible regardless
+of `threads` and work stealing. Reordering input rows changes results only
+within floating-point summation tolerance.
 
 ## Python API
 

@@ -50,6 +50,8 @@ fn build_config(
     mean_is_loss_rate: bool,
     variance_policy: &str,
     clamp_factor: f64,
+    threads: Option<usize>,
+    chunk_rows: Option<usize>,
 ) -> PyResult<Config> {
     let variance_policy = match variance_policy {
         "clamp" => VariancePolicy::ClampSigma {
@@ -70,6 +72,10 @@ fn build_config(
     config.normalize = normalize;
     config.mean_is_loss_rate = mean_is_loss_rate;
     config.variance_policy = variance_policy;
+    config.threads = threads;
+    if let Some(chunk_rows) = chunk_rows {
+        config.chunk_rows = chunk_rows;
+    }
     Ok(config)
 }
 
@@ -133,7 +139,8 @@ fn contiguous<'a>(name: &str, array: &'a PyReadonlyArray1<'_, f64>) -> PyResult<
 #[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *,
     bucket_size, grid_length=None, quadrature_points=32, normalize=false,
     mean_is_loss_rate=false, variance_policy="clamp",
-    clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR))]
+    clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
+    chunk_rows=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantize_arrays<'py>(
     py: Python<'py>,
@@ -149,6 +156,8 @@ fn quantize_arrays<'py>(
     mean_is_loss_rate: bool,
     variance_policy: &str,
     clamp_factor: f64,
+    threads: Option<usize>,
+    chunk_rows: Option<usize>,
 ) -> PyResult<QuantizeReturn<'py>> {
     let config = build_config(
         bucket_size,
@@ -158,6 +167,8 @@ fn quantize_arrays<'py>(
         mean_is_loss_rate,
         variance_policy,
         clamp_factor,
+        threads,
+        chunk_rows,
     )?;
     let input = EltInput {
         rate: contiguous("rate", &rate)?,
@@ -181,7 +192,7 @@ fn quantize_arrays<'py>(
 #[pyo3(signature = (path, *, bucket_size, grid_length=None,
     quadrature_points=32, normalize=false, mean_is_loss_rate=false,
     variance_policy="clamp", clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR,
-    columns=None))]
+    threads=None, chunk_rows=None, columns=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantize_csv<'py>(
     py: Python<'py>,
@@ -193,6 +204,8 @@ fn quantize_csv<'py>(
     mean_is_loss_rate: bool,
     variance_policy: &str,
     clamp_factor: f64,
+    threads: Option<usize>,
+    chunk_rows: Option<usize>,
     columns: Option<HashMap<String, String>>,
 ) -> PyResult<QuantizeReturn<'py>> {
     let config = build_config(
@@ -203,6 +216,8 @@ fn quantize_csv<'py>(
         mean_is_loss_rate,
         variance_policy,
         clamp_factor,
+        threads,
+        chunk_rows,
     )?;
     let mut csv_columns = CsvColumns::default();
     if let Some(mapping) = columns {
