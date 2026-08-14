@@ -18,7 +18,7 @@ is `dev/plan-implementation.md`.
 | Milestone | Version | State |
 | --- | --- | --- |
 | [reference] SciPy oracle, golden fixtures, acceptance suite | 1.0.0 | done |
-| [rust-core] eltq-core scalar path | 1.1.0 | planned |
+| [rust-core] eltq-core scalar path | 1.1.0 | done |
 | [python] PyO3 bindings + CSV route | 1.2.0 | planned |
 | [memmap] quantize_into / quantize_to_npy | 1.3.0 | planned |
 | [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | planned |

@@ -132,6 +132,10 @@ def write_golden(df: pd.DataFrame, name: str, params: dict) -> None:
     golden_dir = FIXTURES_DIR / "golden"
     golden_dir.mkdir(exist_ok=True)
     np.savez(golden_dir / f"{name}.npz", raw=raw, secondary=secondary)
+    # Full-precision text twin of the arrays for the Rust golden tests.
+    np.savetxt(golden_dir / f"{name}.arrays.csv",
+               np.column_stack([raw, secondary]), fmt="%.17g", delimiter=",",
+               header="raw,secondary", comments="")
     meta_dict = dataclasses.asdict(meta)
     meta_dict["params"] = params
     (golden_dir / f"{name}.meta.json").write_text(

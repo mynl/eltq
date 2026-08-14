@@ -6,3 +6,9 @@ license.workspace = true
 description = "Pure-Rust core for ELT secondary-uncertainty quantization"
 
 [dependencies]
+statrs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"

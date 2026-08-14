@@ -18,6 +18,7 @@ benchmarks/scratch/
 # Data firewall: no data files except synthetic fixtures
 *.csv
 !fixtures/*.csv
+!fixtures/golden/*.csv
 *.parquet
 *.feather
 *.npy

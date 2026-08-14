@@ -3,6 +3,32 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.1.0] - 2026-08-14
+
+### Added
+
+- [rust-core] `eltq-core` scalar computational core: `Config` /
+  `VariancePolicy` with validation, typed `Error` enum (thiserror), row
+  classification mirroring the reference (`validate.rs`), beta
+  parameterization via κ = μ(M − μ)/σ² − 1, linear mass- and mean-preserving
+  grid deposit with explicit exact-node and top-endpoint handling, Neumaier
+  compensated reference totals, per-category diagnostics with bounded example
+  row indices, and the single-pass streaming `quantize` driver (upfront grid
+  coverage check, reused K-quantile buffer, never an N×K allocation).
+- Reference inverse-beta kernel (`kernel.rs`): statrs regularized
+  incomplete-beta CDF/PDF driven by a safeguarded Newton solve with
+  log-space fallback and bisection inside a maintained bracket; upper-half
+  quantiles solved by exact reflection. Full-precision across the admissible
+  shape domain, including extreme clamp-policy U-shapes; stays available as
+  the test oracle for the 1.4.0 batched kernel.
+- Rust test suite (33 tests green): unit tests per module, proptest
+  properties (deposit mass/moment preservation, quantize mass/mean
+  conservation, bitwise dyadic scale invariance, beta round trip), and
+  golden-fixture agreement with the SciPy reference at 1e-9 relative
+  tolerance (`tests/golden.rs`, reading the new full-precision
+  `fixtures/golden/*.arrays.csv` text twins).
+- `[profile.test] opt-level = 2` so the numerical suites run fast.
+
 ## [1.0.0] - 2026-08-14
 
 ### Added

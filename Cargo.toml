@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/eltq-core"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 license = "MIT"
 
@@ -14,3 +14,7 @@ statrs = "0.18"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Numerical tests hammer the inverse-beta kernel; unoptimized they crawl.
+[profile.test]
+opt-level = 2
