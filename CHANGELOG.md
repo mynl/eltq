@@ -3,6 +3,25 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.3.0] - 2026-08-14
+
+### Added
+
+- [memmap] `eltq.quantize_into(source, *, raw_out, secondary_out, ...)`:
+  computes into caller-provided writable, C-contiguous float64 arrays —
+  including `numpy.memmap` — validating dtype/shape/contiguity/writability
+  upfront; the grid length is defined by the output arrays. Computation stays
+  in Rust-owned buffers with one final copy into the borrowed memory under
+  the interpreter lock (no protection released around borrowed writable
+  memory).
+- [memmap] `eltq.quantize_to_npy(source, path, ...)`: writes a `(2, n)`
+  float64 `.npy` (row 0 raw, row 1 secondary) plus adjacent
+  `<stem>.meta.json`, both transactionally (temp file + atomic replace);
+  reopen with `np.load(path, mmap_mode="r")`.
+- Both accept a CSV path, a DataFrame with canonical columns, or a 5-tuple
+  of column arrays as `source`. New `tests/test_memmap.py` (7 tests; 78
+  Python tests green).
+
 ## [1.2.0] - 2026-08-14
 
 ### Added

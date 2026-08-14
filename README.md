@@ -20,7 +20,7 @@ is `dev/plan-implementation.md`.
 | [reference] SciPy oracle, golden fixtures, acceptance suite | 1.0.0 | done |
 | [rust-core] eltq-core scalar path | 1.1.0 | done |
 | [python] PyO3 bindings + CSV route | 1.2.0 | done |
-| [memmap] quantize_into / quantize_to_npy | 1.3.0 | planned |
+| [memmap] quantize_into / quantize_to_npy | 1.3.0 | done |
 | [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | planned |
 
 ## Layout
@@ -72,7 +72,16 @@ raw, secondary, meta = eltq.quantize_csv(path, *, bucket_size,
     columns={"rate": "annual_rate"}, ...)      # optional column-name mapping
 
 raw, secondary, meta = eltq.quantize_dataframe(df, *, bucket_size, ...)
+
+meta = eltq.quantize_into(source, *, raw_out, secondary_out, ...)
+    # writable float64 arrays incl. np.memmap; their length defines the grid
+
+meta = eltq.quantize_to_npy(source, "grids.npy", *, bucket_size, ...)
+    # transactional (2, n) .npy + grids.meta.json; np.load(..., mmap_mode="r")
 ```
+
+`source` for the last two: a CSV path, a DataFrame with canonical columns, or
+a `(rate, max_loss, mean_loss, sd_indep, sd_corr)` tuple.
 
 Arrays are borrowed zero-copy (contiguous float64; the wrapper converts
 explicitly otherwise), compute releases the interpreter, and results hand

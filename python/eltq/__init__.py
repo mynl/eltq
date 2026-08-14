@@ -27,7 +27,7 @@ from eltq._eltq import (
     quantize_csv as _quantize_csv,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "EltqError",
@@ -38,6 +38,8 @@ __all__ = [
     "quantize_arrays",
     "quantize_csv",
     "quantize_dataframe",
+    "quantize_into",
+    "quantize_to_npy",
 ]
 
 
@@ -191,6 +193,97 @@ def quantize_csv(
         columns=columns,
     )
     return raw, secondary, _build_meta(meta_dict)
+
+
+def _quantize_source(source, options):
+    """Dispatch a source (CSV path, DataFrame-like, or 5-tuple of columns)."""
+    if isinstance(source, (str, PathLike)):
+        return quantize_csv(source, **options)
+    if hasattr(source, "columns"):
+        return quantize_dataframe(source, **options)
+    if isinstance(source, (tuple, list)) and len(source) == 5:
+        return quantize_arrays(*source, **options)
+    raise EltqError(
+        "source must be a CSV path, a DataFrame with canonical columns, or a "
+        "(rate, max_loss, mean_loss, sd_indep, sd_corr) tuple"
+    )
+
+
+def _check_output(name: str, array) -> None:
+    if not isinstance(array, np.ndarray):
+        raise EltqError(f"{name} must be a numpy.ndarray (or memmap), "
+                        f"got {type(array).__name__}")
+    if array.dtype != np.float64:
+        raise EltqError(f"{name} must have dtype float64, got {array.dtype}")
+    if array.ndim != 1:
+        raise EltqError(f"{name} must be one-dimensional, got shape {array.shape}")
+    if not array.flags.c_contiguous:
+        raise EltqError(f"{name} must be C-contiguous")
+    if not array.flags.writeable:
+        raise EltqError(f"{name} must be writable")
+
+
+def quantize_into(source, *, raw_out, secondary_out, grid_length=None, **options):
+    """Quantize into caller-provided writable arrays; return ``Meta``.
+
+    ``raw_out`` and ``secondary_out`` must be writable, C-contiguous float64
+    one-dimensional arrays of equal length — including ``numpy.memmap``
+    instances — and their length defines the grid (``grid_length``, if also
+    given, must match). Computation happens in Rust-owned buffers; the results
+    are copied into the borrowed arrays in one final assignment. Memmap
+    callers flush/close as usual.
+    """
+    _check_output("raw_out", raw_out)
+    _check_output("secondary_out", secondary_out)
+    if raw_out.size != secondary_out.size:
+        raise EltqError(
+            f"raw_out has {raw_out.size} elements but secondary_out has "
+            f"{secondary_out.size}; they must match"
+        )
+    if grid_length is not None and grid_length != raw_out.size:
+        raise EltqError(
+            f"grid_length {grid_length} conflicts with output length {raw_out.size}"
+        )
+    raw, secondary, meta = _quantize_source(
+        source, {**options, "grid_length": raw_out.size}
+    )
+    raw_out[:] = raw
+    secondary_out[:] = secondary
+    return meta
+
+
+def quantize_to_npy(source, path, **options):
+    """Quantize and write a ``(2, n)`` float64 ``.npy`` file; return ``Meta``.
+
+    Row 0 is the raw distribution, row 1 the secondary; reopen with
+    ``np.load(path, mmap_mode="r")``. Metadata is written to an adjacent
+    ``<stem>.meta.json``. Both files are written transactionally (temp file
+    then atomic replace), so an interruption cannot leave a completed-looking
+    partial result.
+    """
+    import dataclasses
+    import json
+    import os
+    from pathlib import Path
+
+    path = Path(path)
+    raw, secondary, meta = _quantize_source(source, options)
+    stacked = np.stack([raw, secondary])
+    tmp_npy = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    meta_path = path.with_name(f"{path.stem}.meta.json")
+    tmp_meta = meta_path.with_name(f"{meta_path.name}.tmp-{os.getpid()}")
+    try:
+        with open(tmp_npy, "wb") as handle:
+            np.save(handle, stacked)
+        tmp_meta.write_text(
+            json.dumps(dataclasses.asdict(meta), indent=2), encoding="utf-8"
+        )
+        os.replace(tmp_npy, path)
+        os.replace(tmp_meta, meta_path)
+    finally:
+        tmp_npy.unlink(missing_ok=True)
+        tmp_meta.unlink(missing_ok=True)
+    return meta
 
 
 def quantize_dataframe(df, *, event_id_column: str = "event_id", **options):

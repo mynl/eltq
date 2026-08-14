@@ -1,6 +1,6 @@
 [project]
 name = "eltq"
-version = "1.2.0"
+version = "1.3.0"
 description = "Ferociously fast ELT secondary-uncertainty quantization"
 requires-python = ">=3.13"
 dependencies = ["numpy>=2.1"]
@@ -20,6 +20,7 @@ module-name = "eltq._eltq"
 # Rebuild the extension when Rust sources change, not just pyproject.toml.
 cache-keys = [
     { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
     { file = "crates/*/Cargo.toml" },
     { file = "crates/*/src/**/*.rs" },
 ]
