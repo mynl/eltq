@@ -40,7 +40,6 @@ import numpy as np
 
 import eltq
 
-REPO_ROOT = Path(__file__).parent.parent
 RESULTS_PATH = Path(__file__).parent / "results.json"
 SEED = 20260814
 
@@ -177,8 +176,7 @@ def machine_info() -> dict:
 
 def scipy_reference_rate(cols: dict, subsample: int, params: dict) -> float:
     """SciPy reference rows/s measured on a subsample."""
-    sys.path.insert(0, str(REPO_ROOT / "tests"))
-    from reference import quantize_reference
+    from eltq.reference import quantize_reference
 
     sub = {k: v[:subsample] for k, v in cols.items()}
     elapsed, _ = timed(lambda: quantize_reference(*cols_tuple(sub), **params))

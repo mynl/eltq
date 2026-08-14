@@ -25,7 +25,7 @@ GOLDEN_DIR = FIXTURES_DIR / "golden"
 
 sys.path.insert(0, str(TESTS_DIR))
 
-import reference  # noqa: E402
+from eltq import reference  # noqa: E402  (also the eltq fallback backend)
 
 
 @dataclass

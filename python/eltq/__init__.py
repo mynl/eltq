@@ -3,33 +3,57 @@
 Converts a portfolio event loss table into two evenly spaced, rate-weighted
 loss-grid distributions (``raw`` and ``secondary``) via a mass- and
 mean-preserving linear deposit rule. The mathematical contract lives in
-``secondary-uncertainty-mathematical-specification.md``; computation happens
-in the Rust extension ``eltq._eltq``.
+``secondary-uncertainty-mathematical-specification.md``.
+
+Backends: computation normally happens in the Rust extension ``eltq._eltq``
+(``BACKEND == "rust"``). When the compiled extension is not importable, the
+same API is served by the pure-Python SciPy reference implementation
+(``eltq.reference``, ``BACKEND == "reference"``) — identical mathematics,
+roughly forty times slower. The reference backend ignores ``threads`` and
+``chunk_rows`` (it is single-threaded and exactly summed).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from os import PathLike
 
 import numpy as np
 
-from eltq._eltq import (
-    EltqError,
-    GridOverflowError,
-    VarianceError,
-    __rust_version__,
-)
-from eltq._eltq import (
-    quantize_arrays as _quantize_arrays,
-)
-from eltq._eltq import (
-    quantize_csv as _quantize_csv,
-)
+from eltq._meta import Meta, RowIssues
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
+
+try:
+    from eltq._eltq import (
+        EltqError,
+        GridOverflowError,
+        VarianceError,
+        __rust_version__,
+    )
+    from eltq._eltq import (
+        quantize_arrays as _rust_quantize_arrays,
+    )
+    from eltq._eltq import (
+        quantize_csv as _rust_quantize_csv,
+    )
+
+    BACKEND = "rust"
+except ImportError:
+    try:
+        from eltq.reference import EltqError, GridOverflowError, VarianceError
+        from eltq import reference as _reference
+    except ImportError as scipy_missing:
+        raise ImportError(
+            "the compiled eltq._eltq extension is unavailable and the SciPy "
+            "fallback backend could not load; install scipy to use the "
+            "pure-Python reference backend"
+        ) from scipy_missing
+
+    BACKEND = "reference"
+    __rust_version__ = None
 
 __all__ = [
+    "BACKEND",
     "EltqError",
     "GridOverflowError",
     "Meta",
@@ -42,44 +66,11 @@ __all__ = [
     "quantize_to_npy",
 ]
 
-
-@dataclass
-class RowIssues:
-    """Count plus a bounded set of representative event ids for one category."""
-
-    count: int = 0
-    examples: list = field(default_factory=list)
-
-
-@dataclass
-class Meta:
-    """Metadata and diagnostics accompanying the two grid distributions.
-
-    Masses and means describe the arrays actually returned (normalized when
-    ``normalized``); ``total_rate``, ``analytic_aal``,
-    ``quadrature_secondary_mean`` and ``secondary_mean_error`` are always in
-    rate-weighted units. Diagnostic examples are event ids when available,
-    0-based row indices otherwise.
-    """
-
-    bucket_size: float
-    grid_length: int
-    quadrature_points: int
-    normalized: bool
-    total_rate: float
-    analytic_aal: float
-    raw_mass: float
-    raw_mean: float
-    secondary_mass: float
-    secondary_mean: float
-    quadrature_secondary_mean: float
-    secondary_mean_error: float
-    input_rows: int
-    valid_rows: int
-    diagnostics: dict[str, RowIssues]
+_CANONICAL_COLUMNS = ("rate", "max_loss", "mean_loss", "sd_indep", "sd_corr")
 
 
 def _build_meta(meta_dict: dict, event_ids=None) -> Meta:
+    """Convert the Rust extension's metadata dict into the Meta dataclass."""
     diagnostics = {}
     for category, entry in meta_dict.pop("diagnostics").items():
         examples = entry["examples"]
@@ -94,6 +85,48 @@ def _column(name: str, values) -> np.ndarray:
     if array.ndim != 1:
         raise EltqError(f"{name} must be one-dimensional, got shape {array.shape}")
     return array
+
+
+def _read_csv_fallback(path, columns):
+    """Stdlib CSV reader mirroring the Rust route's behavior: unparseable or
+    empty numeric cells become NaN (reported under ``nonfinite``); missing
+    columns and unknown mapping keys are hard errors."""
+    import csv
+
+    mapping = {key: key for key in ("event_id", *_CANONICAL_COLUMNS)}
+    if columns:
+        for key, value in columns.items():
+            if key not in mapping:
+                raise EltqError(f"unknown column key {key!r} in columns mapping")
+            mapping[key] = value
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        if header is None:
+            raise EltqError(f"CSV read failed: {path} is empty")
+        index = {name: i for i, name in enumerate(header)}
+        column_index = {}
+        for key in _CANONICAL_COLUMNS:
+            name = mapping[key]
+            if name not in index:
+                raise EltqError(f"CSV is missing required column {name!r}")
+            column_index[key] = index[name]
+        id_index = index.get(mapping["event_id"])
+        data = {key: [] for key in _CANONICAL_COLUMNS}
+        ids = [] if id_index is not None else None
+        for row in reader:
+            if not row:
+                continue
+            for key, i in column_index.items():
+                try:
+                    value = float(row[i])
+                except (ValueError, IndexError):
+                    value = float("nan")
+                data[key].append(value)
+            if ids is not None:
+                ids.append(row[id_index] if id_index < len(row) else "")
+    arrays = {k: np.asarray(v, dtype=np.float64) for k, v in data.items()}
+    return arrays, ids
 
 
 def quantize_arrays(
@@ -137,10 +170,10 @@ def quantize_arrays(
         Clamp target as a fraction of the admissible sigma bound.
     threads : int, optional
         Worker threads; None uses all cores. Results are bitwise identical
-        for any thread count (deterministic in-order chunk fold).
+        for any thread count. Ignored by the reference backend.
     chunk_rows : int, optional
-        Rows per parallel chunk (default 65536). Part of the deterministic
-        contract: fixed (input, config) gives bitwise-reproducible output.
+        Rows per parallel chunk (default 65536); part of the deterministic
+        contract. Ignored by the reference backend.
     event_ids : sequence, optional
         Per-row identifiers used in diagnostic examples (audit only).
 
@@ -150,24 +183,28 @@ def quantize_arrays(
         Length-n float64 rate-weight arrays; the loss at element i is i * h.
     meta : Meta
     """
-    raw, secondary, meta_dict = _quantize_arrays(
-        _column("rate", rate),
-        _column("max_loss", max_loss),
-        _column("mean_loss", mean_loss),
-        _column("sd_indep", sd_indep),
-        _column("sd_corr", sd_corr),
-        bucket_size=bucket_size,
-        grid_length=grid_length,
-        quadrature_points=quadrature_points,
-        normalize=normalize,
-        mean_is_loss_rate=mean_is_loss_rate,
-        variance_policy=variance_policy,
-        clamp_factor=clamp_factor,
-        threads=threads,
-        chunk_rows=chunk_rows,
+    cols = tuple(
+        _column(name, values)
+        for name, values in zip(
+            _CANONICAL_COLUMNS, (rate, max_loss, mean_loss, sd_indep, sd_corr)
+        )
     )
     ids = list(event_ids) if event_ids is not None else None
-    return raw, secondary, _build_meta(meta_dict, ids)
+    common = {
+        "bucket_size": bucket_size,
+        "grid_length": grid_length,
+        "quadrature_points": quadrature_points,
+        "normalize": normalize,
+        "mean_is_loss_rate": mean_is_loss_rate,
+        "variance_policy": variance_policy,
+        "clamp_factor": clamp_factor,
+    }
+    if BACKEND == "rust":
+        raw, secondary, meta_dict = _rust_quantize_arrays(
+            *cols, **common, threads=threads, chunk_rows=chunk_rows
+        )
+        return raw, secondary, _build_meta(meta_dict, ids)
+    return _reference.quantize_reference(*cols, **common, event_ids=ids)
 
 
 def quantize_csv(
@@ -190,23 +227,28 @@ def quantize_csv(
     ``event_id, rate, max_loss, mean_loss, sd_indep, sd_corr`` (``event_id``
     optional); ``columns`` maps canonical names to the actual header names,
     e.g. ``{"rate": "annual_rate"}``. Unparseable numeric cells become NaN
-    and surface in the ``nonfinite`` diagnostic category. Parsing and
-    computation both run in Rust.
+    and surface in the ``nonfinite`` diagnostic category. On the Rust backend
+    parsing and computation both run in Rust.
     """
-    raw, secondary, meta_dict = _quantize_csv(
-        path,
-        bucket_size=bucket_size,
-        grid_length=grid_length,
-        quadrature_points=quadrature_points,
-        normalize=normalize,
-        mean_is_loss_rate=mean_is_loss_rate,
-        variance_policy=variance_policy,
-        clamp_factor=clamp_factor,
-        threads=threads,
-        chunk_rows=chunk_rows,
-        columns=columns,
+    common = {
+        "bucket_size": bucket_size,
+        "grid_length": grid_length,
+        "quadrature_points": quadrature_points,
+        "normalize": normalize,
+        "mean_is_loss_rate": mean_is_loss_rate,
+        "variance_policy": variance_policy,
+        "clamp_factor": clamp_factor,
+    }
+    if BACKEND == "rust":
+        raw, secondary, meta_dict = _rust_quantize_csv(
+            path, **common, threads=threads, chunk_rows=chunk_rows,
+            columns=columns,
+        )
+        return raw, secondary, _build_meta(meta_dict)
+    data, ids = _read_csv_fallback(path, columns)
+    return _reference.quantize_reference(
+        *(data[key] for key in _CANONICAL_COLUMNS), **common, event_ids=ids
     )
-    return raw, secondary, _build_meta(meta_dict)
 
 
 def _quantize_source(source, options):
@@ -243,9 +285,9 @@ def quantize_into(source, *, raw_out, secondary_out, grid_length=None, **options
     ``raw_out`` and ``secondary_out`` must be writable, C-contiguous float64
     one-dimensional arrays of equal length — including ``numpy.memmap``
     instances — and their length defines the grid (``grid_length``, if also
-    given, must match). Computation happens in Rust-owned buffers; the results
-    are copied into the borrowed arrays in one final assignment. Memmap
-    callers flush/close as usual.
+    given, must match). Computation happens in backend-owned buffers; the
+    results are copied into the borrowed arrays in one final assignment.
+    Memmap callers flush/close as usual.
     """
     _check_output("raw_out", raw_out)
     _check_output("secondary_out", secondary_out)
@@ -311,11 +353,7 @@ def quantize_dataframe(df, *, event_id_column: str = "event_id", **options):
         list(df[event_id_column]) if event_id_column in df.columns else None
     )
     return quantize_arrays(
-        df["rate"],
-        df["max_loss"],
-        df["mean_loss"],
-        df["sd_indep"],
-        df["sd_corr"],
+        *(df[name] for name in _CANONICAL_COLUMNS),
         event_ids=event_ids,
         **options,
     )

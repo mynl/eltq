@@ -13,7 +13,8 @@ import math
 import numpy as np
 import pytest
 
-import reference
+from eltq import reference
+
 from conftest import diag_count, elt, grid_of, load_fixture, load_golden, run
 
 

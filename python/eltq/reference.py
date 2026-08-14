@@ -1,20 +1,25 @@
 """SciPy reference implementation of ELT secondary-uncertainty quantization.
 
-Transparent and accurate rather than fast. This module is the mathematical
-oracle for the Rust implementation (``eltq``): it follows the contract in
-``secondary-uncertainty-mathematical-specification.md`` row by row, and is used
-both by the acceptance suite and to generate the golden fixtures under
-``fixtures/``. Reference totals use exact summation (``math.fsum``) so oracle
-values are not polluted by summation-order noise.
+Transparent and accurate rather than fast. This module plays two roles:
+
+- the mathematical oracle for the Rust extension: it follows the contract in
+  ``secondary-uncertainty-mathematical-specification.md`` row by row, and the
+  acceptance suite runs both implementations against it (reference totals use
+  exact ``math.fsum`` summation, so oracle values carry no summation-order
+  noise);
+- the pure-Python fallback backend: when the compiled ``eltq._eltq``
+  extension is not importable, the package API is served by this module
+  (``eltq.BACKEND == "reference"``). Requires SciPy.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.stats import beta as beta_dist
+
+from eltq._meta import Meta, RowIssues
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -51,44 +56,11 @@ class GridOverflowError(EltqError):
         self.examples = examples or []
 
 
-@dataclass
-class RowIssues:
-    """Count plus a bounded set of representative event ids for one category."""
-
-    count: int = 0
-    examples: list = field(default_factory=list)
-
-    def add(self, event_id) -> None:
-        self.count += 1
-        if len(self.examples) < MAX_EXAMPLES:
-            self.examples.append(event_id)
-
-
-@dataclass
-class QuantizeMeta:
-    """Metadata and diagnostics accompanying the two grid distributions.
-
-    Masses and means describe the arrays actually returned (so they are
-    normalized when ``normalize=True``); ``total_rate``, ``analytic_aal``,
-    ``quadrature_secondary_mean`` and ``secondary_mean_error`` are always in
-    rate-weighted units.
-    """
-
-    bucket_size: float
-    grid_length: int
-    quadrature_points: int
-    normalized: bool
-    total_rate: float
-    analytic_aal: float
-    raw_mass: float
-    raw_mean: float
-    secondary_mass: float
-    secondary_mean: float
-    quadrature_secondary_mean: float
-    secondary_mean_error: float
-    input_rows: int
-    valid_rows: int
-    diagnostics: dict[str, RowIssues]
+def _note(diagnostics: dict, category: str, event_id) -> None:
+    issues = diagnostics.setdefault(category, RowIssues())
+    issues.count += 1
+    if len(issues.examples) < MAX_EXAMPLES:
+        issues.examples.append(event_id)
 
 
 # Row classification kinds (internal).
@@ -172,9 +144,6 @@ def quantize_reference(
 
     diagnostics: dict[str, RowIssues] = {}
 
-    def note(category, event_id):
-        diagnostics.setdefault(category, RowIssues()).add(event_id)
-
     # Pass 1: classify every row; only then is the grid coverage requirement
     # (max contributing M) known, and dropped rows never touch either output.
     kinds = np.empty(n_rows, dtype=np.int8)
@@ -186,26 +155,26 @@ def quantize_reference(
                                 sd_indep[j], sd_corr[j])
         kinds[j] = _DROP
         if not all(map(math.isfinite, (lam, m, mu, s_i, s_c))):
-            note("nonfinite", event_ids[j])
+            _note(diagnostics, "nonfinite", event_ids[j])
             continue
         if lam < 0.0 or m < 0.0 or mu < 0.0 or s_i < 0.0 or s_c < 0.0:
-            note("negative_field", event_ids[j])
+            _note(diagnostics, "negative_field", event_ids[j])
             continue
         mu = mu * m if mean_is_loss_rate else mu
         if mu > m:
-            note("mean_exceeds_max", event_ids[j])
+            _note(diagnostics, "mean_exceeds_max", event_ids[j])
             continue
         if lam == 0.0:
-            note("zero_rate", event_ids[j])
+            _note(diagnostics, "zero_rate", event_ids[j])
             continue
         sigma2 = s_i * s_i + s_c * s_c
         mu_eff[j] = mu
         if m == 0.0 or sigma2 == 0.0 or mu == 0.0 or mu == m:
-            # Boundary/degenerate treatment: a single atom at mu. (For mu at a
-            # boundary with sigma > 0 the variance is formally inadmissible;
-            # the specified degenerate treatment is the resolution.)
+            # Boundary/degenerate treatment: a single atom at mu. (For a
+            # boundary mean with sigma > 0 the variance is formally
+            # inadmissible; the specified degenerate treatment resolves it.)
             kinds[j] = _ATOM
-            note("degenerate_atom", event_ids[j])
+            _note(diagnostics, "degenerate_atom", event_ids[j])
         else:
             v_max = mu * (m - mu)
             if sigma2 >= v_max:
@@ -215,15 +184,15 @@ def quantize_reference(
                         f"mu (M - mu) = {v_max} is inadmissible for a beta"
                     )
                 if variance_policy == "drop":
-                    note("variance_dropped", event_ids[j])
+                    _note(diagnostics, "variance_dropped", event_ids[j])
                     continue
                 if variance_policy == "atom":
                     kinds[j] = _ATOM
-                    note("variance_atom", event_ids[j])
+                    _note(diagnostics, "variance_atom", event_ids[j])
                 else:  # clamp
                     sigma2 = clamp_factor * clamp_factor * v_max
                     kinds[j] = _BETA
-                    note("sigma_clamped", event_ids[j])
+                    _note(diagnostics, "sigma_clamped", event_ids[j])
             else:
                 kinds[j] = _BETA
             var_eff[j] = sigma2
@@ -288,7 +257,7 @@ def quantize_reference(
         secondary /= total_rate
 
     grid = h * np.arange(n, dtype=np.float64)
-    meta = QuantizeMeta(
+    meta = Meta(
         bucket_size=h,
         grid_length=n,
         quadrature_points=K,

@@ -18,16 +18,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-FIXTURES_DIR = Path(__file__).parent
-sys.path.insert(0, str(FIXTURES_DIR.parent / "tests"))
+from eltq.reference import quantize_reference
 
-from reference import quantize_reference  # noqa: E402
+FIXTURES_DIR = Path(__file__).parent
 
 COLUMNS = ["event_id", "rate", "max_loss", "mean_loss", "sd_indep", "sd_corr"]
 SEED = 20260814

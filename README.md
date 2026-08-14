@@ -22,16 +22,18 @@ is `dev/plan-implementation.md`.
 | [python] PyO3 bindings + CSV route | 1.2.0 | done |
 | [memmap] quantize_into / quantize_to_npy | 1.3.0 | done |
 | [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | done |
+| [fallback] SciPy backend in-package + demo notebook | 1.5.0 | done |
 
 ## Layout
 
 ```
 crates/eltq-core/     pure Rust core (no PyO3/NumPy/CLI types)
-crates/eltq-python/   PyO3 + numpy bindings (from 1.2.0)
-python/eltq/          thin pure-Python conveniences
-tests/                pytest acceptance suite + SciPy reference oracle
+crates/eltq-python/   PyO3 + numpy bindings
+python/eltq/          pure-Python layer: API wrappers + SciPy reference/fallback
+tests/                pytest acceptance suite (runs both backends)
 fixtures/             synthetic ELTs + golden outputs (never real data)
 benchmarks/           bench harness + machine-readable results history
+notebooks/            demo notebook (eltq_demo.ipynb)
 dev/                  plans (moved to dev/done when complete)
 ```
 
@@ -58,6 +60,8 @@ cargo test -p eltq-core                        # Rust unit + property tests
 cargo bench -p eltq-core                       # criterion kernel benchmarks
 uv run python benchmarks/run_end_to_end.py     # 1M-row end-to-end benchmark;
                                                # appends benchmarks/results.json
+uv run --with jupyter --with matplotlib jupyter lab
+                                               # demo: notebooks/eltq_demo.ipynb
 ```
 
 ## Performance
@@ -66,7 +70,9 @@ Headline (i7-7820HQ 4C/8T, Windows 11, see `benchmarks/report-1.4.0.md`):
 one million mixed-regime rows at K = 32 quantized in ~4.3 s — ~230k rows/s,
 ~6.6M beta quantiles/s, ~44x the SciPy reference — with bitwise-identical
 results for any thread count. Non-kernel overhead (validation + deposits +
-reduction) is ~0.02 s; the inverse-beta kernel is everything.
+reduction) is ~0.02 s; the inverse-beta kernel is everything. Grid length is
+irrelevant to throughput (each deposit touches two nodes whatever n is):
+n = 1,001, n = 65,536 (2^16) and n = 100,000 all run at the same speed.
 
 Determinism contract: for a fixed input, config (including `chunk_rows`,
 default 65536) and build, output arrays are bitwise reproducible regardless
@@ -104,6 +110,13 @@ explicitly otherwise), compute releases the interpreter, and results hand
 Rust-owned buffers to NumPy without a copy. Errors raise `eltq.EltqError` or
 its subclasses `VarianceError` / `GridOverflowError`. `meta` is a `Meta`
 dataclass with the fields listed under Output below.
+
+**Backends.** `eltq.BACKEND` reports which implementation serves the API:
+`"rust"` (the compiled extension) or `"reference"` — the pure-Python SciPy
+implementation in `eltq.reference`, used automatically when the extension is
+not importable (requires scipy; ~40x slower; ignores `threads`/`chunk_rows`).
+`eltq.reference.quantize_reference` is also importable directly as the
+independent oracle the acceptance suite tests both backends against.
 
 ## Input schema
 

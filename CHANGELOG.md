@@ -3,6 +3,30 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.5.0] - 2026-08-14
+
+### Added
+
+- [fallback] The SciPy reference implementation now ships inside the package
+  as `eltq.reference` and serves the full public API automatically when the
+  compiled extension is not importable (`eltq.BACKEND` reports `"rust"` or
+  `"reference"`); the fallback ignores `threads`/`chunk_rows` and includes a
+  stdlib-csv route mirroring the Rust parser's NaN semantics. Shared `Meta` /
+  `RowIssues` dataclasses moved to `eltq._meta`; `tests/reference.py` removed
+  in favor of the packaged module (goldens byte-identical). New subprocess
+  test exercises the fallback path end to end (81 Python tests green).
+- [demo] `notebooks/eltq_demo.ipynb`: single-event intuition plot, CSV-route
+  portfolio run with diagnostics, eltq vs SciPy reference comparison
+  (agreement + timing), 1M rows on an exactly 2^16-node grid, bitwise
+  determinism check, and memory-mapped output. Launch with
+  `uv run --with jupyter --with matplotlib jupyter lab` from the repo root.
+
+### Fixed
+
+- `.gitignore`: ignore `*.pyd` in-tree (maturin editable builds compile the
+  extension into `python/eltq/`; previously only covered by a global excludes
+  file) and `.ipynb_checkpoints/`; `.venv` junction entry retained.
+
 ## [1.4.0] - 2026-08-14
 
 ### Added
