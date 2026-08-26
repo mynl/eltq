@@ -15,9 +15,9 @@ roughly forty times slower. The reference backend ignores ``threads`` and
 Multi-unit route (1.7.0): ``multiunit_views`` accumulates the total event
 severity by view (ground_up, gross, ceded, net) for event x unit rows with
 DecL-style unit terms, and ``joint_two_units`` returns the exact bucketed
-bivariate pmf of one event across two units. ``joint_two_units`` runs on the
-Rust extension from 1.8.0; ``multiunit_views`` is served by the SciPy
-reference ``eltq.reference_multiunit`` until the Rust engine lands (1.10.0).
+bivariate pmf of one event across two units. Both run on the Rust extension
+(``joint_two_units`` from 1.8.0, ``multiunit_views`` from 1.10.0) and on the
+SciPy reference ``eltq.reference_multiunit`` otherwise.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import numpy as np
 from eltq._meta import JointMeta, Meta, MultiMeta, RowIssues
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 try:
     from eltq._eltq import (
@@ -49,6 +49,10 @@ try:
         from eltq._eltq import joint_two_units as _rust_joint_two_units
     except ImportError:  # extension older than 1.8.0
         _rust_joint_two_units = None
+    try:
+        from eltq._eltq import multiunit_views as _rust_multiunit_views
+    except ImportError:  # extension older than 1.10.0
+        _rust_multiunit_views = None
 
     BACKEND = "rust"
 except ImportError:
@@ -65,12 +69,17 @@ except ImportError:
     BACKEND = "reference"
     __rust_version__ = None
     _rust_joint_two_units = None
+    _rust_multiunit_views = None
 
 if BACKEND == "rust":
+    try:
+        from eltq._eltq import MultiUnitError
+    except ImportError:  # extension older than 1.10.0
 
-    class MultiUnitError(EltqError):
-        """Structural problem in a multi-unit ELT: events not contiguous, a
-        rate varying within an event, or a unit repeated within an event."""
+        class MultiUnitError(EltqError):
+            """Structural problem in a multi-unit ELT: events not contiguous,
+            a rate varying within an event, or a unit repeated within an
+            event."""
 
 else:
     from eltq.reference_multiunit import MultiUnitError
@@ -91,6 +100,7 @@ __all__ = [
     "joint_two_units",
     "multiunit_views",
     "multiunit_views_dataframe",
+    "multiunit_views_into",
     "parse_terms",
     "TermsError",
     "UnitTerms",
@@ -431,6 +441,86 @@ def _via_reference(function, *args, **kwargs):
         raise EltqError(str(error)) from None
 
 
+def _factorize(values):
+    """Return ``(codes, uniques)``: dense int64 codes by first appearance and
+    the distinct values in that order. Integer arrays pass through as their
+    own codes (uniques still in first-seen order)."""
+    array = np.asarray(values)
+    if array.ndim != 1:
+        raise EltqError(f"identifier columns must be one-dimensional, got shape {array.shape}")
+    try:
+        import pandas as pd
+
+        codes, uniques = pd.factorize(array, sort=False)
+        return np.ascontiguousarray(codes, dtype=np.int64), list(uniques)
+    except ImportError:
+        pass
+    table: dict = {}
+    uniques: list = []
+    codes = np.empty(array.size, dtype=np.int64)
+    for i, value in enumerate(array.tolist()):
+        code = table.get(value)
+        if code is None:
+            code = len(uniques)
+            table[value] = code
+            uniques.append(value)
+        codes[i] = code
+    return codes, uniques
+
+
+def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_length, views,
+                    z_nodes, z_rule, normalize, variance_policy, clamp_factor, threads,
+                    chunk_rows, roll_up_diagnostic, convolution):
+    """Run the Rust engine on factorized identifiers; build ``MultiMeta``."""
+    from eltq.terms import check_grid_alignment
+
+    event_codes, event_uniques = _factorize(event_id)
+    unit_codes, unit_uniques = _factorize(unit_id)
+    unit_ids = [str(u) for u in unit_uniques]
+    try:
+        parsed = parse_terms(terms)
+        for unit_terms in parsed.values():
+            check_grid_alignment(unit_terms, float(bucket_size))
+    except TermsError as error:
+        raise EltqError(str(error)) from error
+    spec = []
+    for uid in unit_ids:
+        t = parsed.get(uid)
+        if t is None:
+            spec.append((uid, float("inf"), 0.0, []))
+        else:
+            spec.append((uid, float(t.limit), float(t.ded),
+                         [(c.share, c.limit, c.attach) for c in t.clauses]))
+    views_out, meta_dict = _rust_multiunit_views(
+        event_codes, unit_codes, *columns, terms=spec, bucket_size=float(bucket_size),
+        grid_length=grid_length, z_nodes=int(z_nodes), z_rule=z_rule,
+        views=list(views), normalize=normalize, variance_policy=variance_policy,
+        clamp_factor=clamp_factor, threads=threads, chunk_rows=chunk_rows,
+        roll_up_diagnostic=roll_up_diagnostic, convolution=convolution,
+    )
+    event_labels = np.asarray(event_id)
+    unit_labels = np.asarray(unit_id)
+    diagnostics = {}
+    for category, entry in meta_dict.pop("diagnostics").items():
+        examples = [f"{event_labels[row]}/{unit_labels[row]}" for row in entry["examples"]]
+        diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
+    roll_up = meta_dict.pop("roll_up")
+    if roll_up is not None:
+        for entry in roll_up:
+            entry["event_id"] = event_labels[entry.pop("event_row")]
+    meta = MultiMeta(
+        views=tuple(meta_dict.pop("views")),
+        unit_ids=tuple(unit_ids),
+        terms_echo={uid: t.text() for uid, t in parsed.items()},
+        unused_terms=tuple(uid for uid in parsed if uid not in set(unit_ids)),
+        diagnostics=diagnostics,
+        roll_up=roll_up,
+        **meta_dict,
+    )
+    del event_uniques
+    return views_out, meta
+
+
 def multiunit_views(
     event_id,
     unit_id,
@@ -449,7 +539,10 @@ def multiunit_views(
     normalize=False,
     variance_policy="clamp",
     clamp_factor=0.999,
+    threads=None,
+    chunk_rows=None,
     roll_up_diagnostic=False,
+    convolution="auto",
 ):
     """Total event severity by view for a multi-unit ELT; return ``(views, meta)``.
 
@@ -492,10 +585,19 @@ def multiunit_views(
         Treatment of a unit row with inadmissible beta variance.
     clamp_factor : float, default 0.999
         Clamp target as a fraction of the admissible sigma bound.
+    threads : int, optional
+        Worker threads; None uses all cores. Results are bitwise identical
+        for any thread count. Ignored by the reference backend.
+    chunk_rows : int, optional
+        Rows per parallel chunk (rounded up to whole events; default 65536);
+        part of the deterministic contract. Ignored by the reference backend.
     roll_up_diagnostic : bool, default False
         Per event with two or more units, report the sd and 99th-percentile
         ratios of the exact ground-up total against the rolled single-row
         beta (``meta.roll_up``).
+    convolution : {"auto", "direct", "fft"}, default "auto"
+        How units are convolved across an event on the Rust backend: by
+        estimated cost, or forced. Ignored by the reference backend.
 
     Returns
     -------
@@ -504,6 +606,20 @@ def multiunit_views(
         i is i * h.
     meta : MultiMeta
     """
+    if _rust_multiunit_views is not None:
+        columns = tuple(
+            _column(name, values)
+            for name, values in zip(
+                _MULTI_COLUMNS[2:], (rate, mean_loss, sd_indep, sd_corr, max_loss)
+            )
+        )
+        return _rust_multiunit(
+            event_id, unit_id, columns, terms=terms, bucket_size=bucket_size,
+            grid_length=grid_length, views=views, z_nodes=z_nodes, z_rule=z_rule,
+            normalize=normalize, variance_policy=variance_policy,
+            clamp_factor=clamp_factor, threads=threads, chunk_rows=chunk_rows,
+            roll_up_diagnostic=roll_up_diagnostic, convolution=convolution,
+        )
     return _via_reference(
         lambda module: module.multiunit_views_reference,
         event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
@@ -519,6 +635,40 @@ def multiunit_views_dataframe(df, *, terms=None, **options):
     ``event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss``."""
     return multiunit_views(*(df[name] for name in _MULTI_COLUMNS), terms=terms,
                            **options)
+
+
+def multiunit_views_into(
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *, out,
+    grid_length=None, **options,
+):
+    """``multiunit_views`` into caller-provided writable arrays; return ``MultiMeta``.
+
+    ``out`` maps view names to writable, C-contiguous float64 one-dimensional
+    arrays of one common length (``numpy.memmap`` included); the views
+    computed are exactly ``out``'s keys and the arrays' length defines the
+    grid (``grid_length``, if also given, must match). Computation happens in
+    backend-owned buffers; results are copied into the borrowed arrays in one
+    final assignment per view.
+    """
+    if not out:
+        raise EltqError("out must map at least one view to an output array")
+    names = tuple(out)
+    length = None
+    for name in names:
+        _check_output(f"out[{name!r}]", out[name])
+        if length is None:
+            length = out[name].size
+        elif out[name].size != length:
+            raise EltqError("all output arrays must have the same length")
+    if grid_length is not None and grid_length != length:
+        raise EltqError(f"grid_length {grid_length} conflicts with output length {length}")
+    views, meta = multiunit_views(
+        event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+        views=names, grid_length=length, **options,
+    )
+    for name in names:
+        out[name][:] = views[name]
+    return meta
 
 
 def joint_two_units(

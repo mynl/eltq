@@ -98,3 +98,6 @@ class MultiMeta:
     unused_terms: tuple
     diagnostics: dict[str, RowIssues]
     roll_up: list | None = None
+    #: Rust engine statistics (max per-event mass error, convolution paths);
+    #: None on the reference backend.
+    engine: dict | None = None

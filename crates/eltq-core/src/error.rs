@@ -67,4 +67,12 @@ pub enum Error {
     BadJointPolicy,
     #[error("terms: {0}")]
     Terms(String),
+    #[error("multi-unit structure: {0}")]
+    MultiUnitStructure(String),
+    #[error("unit code {code} at row {row} has no terms entry (terms table has {available})")]
+    UnitCodeOutOfRange { row: usize, code: i64, available: usize },
+    #[error("at least one view is required")]
+    NoViews,
+    #[error("unknown convolution mode {0:?} (expected auto, direct, or fft)")]
+    BadConvolution(String),
 }

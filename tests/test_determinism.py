@@ -45,3 +45,33 @@ def test_thread_count_sweep_is_bitwise_identical():
         assert np.array_equal(base_sec, secondary), f"threads={threads}"
         assert base_meta.total_rate == meta.total_rate
         assert base_meta.secondary_mean == meta.secondary_mean
+
+
+def test_multiunit_views_bitwise_invariant_across_threads_and_paths():
+    """Multi-unit route (1.10.0): same input twice, a thread sweep, and both
+    chunk sizes give bitwise-identical views on the Rust backend."""
+    import eltq
+    from conftest import load_multi_fixture
+
+    if eltq.BACKEND != "rust":
+        pytest.skip("determinism contract is a property of the Rust engine")
+    df, terms = load_multi_fixture()
+    cols = [df[c] for c in ("event_id", "unit_id", "rate", "mean_loss", "sd_indep",
+                            "sd_corr", "max_loss")]
+    base, meta = eltq.multiunit_views(*cols, terms=terms, bucket_size=10.0, chunk_rows=3)
+    again, _ = eltq.multiunit_views(*cols, terms=terms, bucket_size=10.0, chunk_rows=3)
+    for view in meta.views:
+        assert np.array_equal(base[view], again[view])
+    for threads in (1, 2, 3):
+        other, other_meta = eltq.multiunit_views(*cols, terms=terms, bucket_size=10.0,
+                                                 chunk_rows=3, threads=threads)
+        for view in meta.views:
+            assert np.array_equal(base[view], other[view]), (view, threads)
+        assert other_meta.total_rate == meta.total_rate
+        assert other_meta.analytic_view_mean == meta.analytic_view_mean
+    # Direct and FFT convolution agree to floating-point tolerance.
+    direct, dm = eltq.multiunit_views(*cols, terms=terms, bucket_size=10.0, convolution="direct")
+    fft, fm = eltq.multiunit_views(*cols, terms=terms, bucket_size=10.0, convolution="fft")
+    assert dm.engine["fft_paths"] == 0 and fm.engine["direct_paths"] == 0
+    for view in meta.views:
+        assert np.allclose(direct[view], fft[view], rtol=0.0, atol=1e-14 * meta.total_rate)

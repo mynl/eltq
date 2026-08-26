@@ -18,6 +18,7 @@
 pub mod batched;
 pub mod beta;
 pub mod config;
+pub mod convolve;
 pub mod csv_input;
 pub mod deposit;
 pub mod incbeta;
@@ -31,6 +32,7 @@ pub mod quantize;
 pub mod sum;
 pub mod terms;
 pub mod validate;
+pub mod views;
 
 pub use config::{
     Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_QUADRATURE_POINTS, VariancePolicy,
@@ -41,3 +43,4 @@ pub use multiunit::{JointConfig, JointMeta, JointResult, UnitKind, UnitPlan, Uni
 pub use quadrature::{ZRule, z_quadrature};
 pub use quantize::{EltInput, quantize};
 pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};
+pub use views::{Convolution, MultiConfig, MultiInput, MultiMeta, MultiResult, RollUpEntry, multiunit_views};

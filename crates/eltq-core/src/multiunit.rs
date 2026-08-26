@@ -22,11 +22,13 @@ use crate::batched::beta_quantiles;
 use crate::beta::beta_params;
 use crate::config::VariancePolicy;
 use crate::deposit::deposit;
+use crate::diagnostics::{Category, Diagnostics};
 use crate::error::Error;
 use crate::incbeta::BetaFn;
 use crate::normal;
 use crate::quadrature::{ZRule, z_quadrature};
 use crate::sum::{Neumaier, sum};
+use crate::terms::{UnitTerms, View};
 
 /// Per-unit ELT fields in loss currency units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,6 +154,221 @@ pub fn prepare_unit(
     plan.w_indep = s_i / t;
     plan.kind = if s_i == 0.0 { UnitKind::Comonotone } else { UnitKind::Beta };
     Ok(plan)
+}
+
+/// Row classification for the multi-unit ELT route: the outcome of
+/// [`classify_unit_row`], enough to rebuild a [`UnitPlan`] in the hot pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowClass {
+    pub kind: UnitKind,
+    /// Effective mean.
+    pub mu: f64,
+    /// Effective total sd after any clamp.
+    pub sigma: f64,
+}
+
+const DROPPED: RowClass = RowClass {
+    kind: UnitKind::Drop,
+    mu: 0.0,
+    sigma: 0.0,
+};
+
+/// Classify one unit row, recording diagnostics under the one-unit
+/// categories (structural problems drop the row instead of erroring, as in
+/// `quantize`); only the strict variance policy can fail.
+pub fn classify_unit_row(
+    row: usize,
+    spec: &UnitSpec,
+    policy: VariancePolicy,
+    diagnostics: &mut Diagnostics,
+) -> Result<RowClass, Error> {
+    let UnitSpec {
+        mean_loss: mu,
+        sd_indep: s_i,
+        sd_corr: s_c,
+        max_loss: m,
+    } = *spec;
+    if !(mu.is_finite() && s_i.is_finite() && s_c.is_finite() && m.is_finite()) {
+        diagnostics.note(Category::Nonfinite, row);
+        return Ok(DROPPED);
+    }
+    if mu < 0.0 || s_i < 0.0 || s_c < 0.0 || m < 0.0 {
+        diagnostics.note(Category::NegativeField, row);
+        return Ok(DROPPED);
+    }
+    if mu > m {
+        diagnostics.note(Category::MeanExceedsMax, row);
+        return Ok(DROPPED);
+    }
+    let sigma = s_i + s_c;
+    if m == 0.0 || sigma == 0.0 || mu == 0.0 || mu == m {
+        diagnostics.note(Category::DegenerateAtom, row);
+        return Ok(RowClass {
+            kind: UnitKind::Atom,
+            mu,
+            sigma,
+        });
+    }
+    let v_max = mu * (m - mu);
+    let nondegenerate = if s_i == 0.0 { UnitKind::Comonotone } else { UnitKind::Beta };
+    if sigma * sigma >= v_max {
+        return match policy {
+            VariancePolicy::Error => Err(Error::InadmissibleVariance {
+                row,
+                sigma2: sigma * sigma,
+                v_max,
+            }),
+            VariancePolicy::Drop => {
+                diagnostics.note(Category::VarianceDropped, row);
+                Ok(DROPPED)
+            }
+            VariancePolicy::Atom => {
+                diagnostics.note(Category::VarianceAtom, row);
+                Ok(RowClass {
+                    kind: UnitKind::Atom,
+                    mu,
+                    sigma,
+                })
+            }
+            VariancePolicy::ClampSigma { factor } => {
+                diagnostics.note(Category::SigmaClamped, row);
+                Ok(RowClass {
+                    kind: nondegenerate,
+                    mu,
+                    sigma: factor * v_max.sqrt(),
+                })
+            }
+        };
+    }
+    Ok(RowClass {
+        kind: nondegenerate,
+        mu,
+        sigma,
+    })
+}
+
+impl UnitPlan {
+    /// Rebuild the plan of a classified row (beta parameters and copula
+    /// weights are cheap; only the classification is stored between passes).
+    pub fn from_row(class: &RowClass, spec: &UnitSpec) -> UnitPlan {
+        let mut plan = UnitPlan {
+            kind: class.kind,
+            mean_loss: class.mu,
+            max_loss: spec.max_loss,
+            alpha: f64::NAN,
+            beta: f64::NAN,
+            w_corr: 0.0,
+            w_indep: 0.0,
+            sigma_used: class.sigma,
+            notes: Vec::new(),
+        };
+        if matches!(class.kind, UnitKind::Beta | UnitKind::Comonotone) {
+            let (alpha, beta) = beta_params(spec.max_loss, class.mu, class.sigma * class.sigma);
+            plan.alpha = alpha;
+            plan.beta = beta;
+            let t = spec.sd_indep.hypot(spec.sd_corr);
+            plan.w_corr = spec.sd_corr / t;
+            plan.w_indep = spec.sd_indep / t;
+        }
+        plan
+    }
+}
+
+/// Unconditional bucket pmf of one unit: beta cdf differences at
+/// half-bucket edges, or the linear deposit of an atom.
+pub fn marginal_pmf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
+    let mut row = vec![0.0_f64; n];
+    if plan.kind == UnitKind::Atom {
+        deposit(&mut row, plan.mean_loss, 1.0, 1.0 / bucket_size);
+        return row;
+    }
+    if plan.kind == UnitKind::Drop {
+        return row;
+    }
+    let bf = BetaFn::new(plan.alpha, plan.beta);
+    let mut prev = 0.0;
+    for (k, slot) in row.iter_mut().enumerate() {
+        let edge = (k as f64 + 0.5) * bucket_size;
+        let next = bf.cdf(edge / plan.max_loss);
+        *slot = next - prev;
+        prev = next;
+    }
+    row
+}
+
+/// Analytic layer means of one unit's marginal (the LEV identity
+/// `E[min(Y, y)] = y (1 - I_y(a, b)) + a / (a + b) I_y(a + 1, b)`), with the
+/// two incomplete-beta bundles built once per unit.
+pub struct LayerMeans<'a> {
+    plan: &'a UnitPlan,
+    bf: Option<(BetaFn, BetaFn)>,
+}
+
+impl<'a> LayerMeans<'a> {
+    pub fn new(plan: &'a UnitPlan) -> Self {
+        let bf = if matches!(plan.kind, UnitKind::Beta | UnitKind::Comonotone) {
+            Some((
+                BetaFn::new(plan.alpha, plan.beta),
+                BetaFn::new(plan.alpha + 1.0, plan.beta),
+            ))
+        } else {
+            None
+        };
+        LayerMeans { plan, bf }
+    }
+
+    fn limited_mean(&self, y: f64) -> f64 {
+        let (bf, bf_plus) = self.bf.as_ref().expect("beta unit");
+        let mean = self.plan.alpha / (self.plan.alpha + self.plan.beta);
+        if y <= 0.0 {
+            0.0
+        } else if y >= 1.0 {
+            mean
+        } else {
+            y * (1.0 - bf.cdf(y)) + mean * bf_plus.cdf(y)
+        }
+    }
+
+    /// `E[min(max(X - attach, 0), limit)]`.
+    pub fn layer_mean(&self, attach: f64, limit: f64) -> f64 {
+        if limit <= 0.0 {
+            return 0.0;
+        }
+        match self.plan.kind {
+            UnitKind::Atom => (self.plan.mean_loss - attach).max(0.0).min(limit),
+            UnitKind::Drop => 0.0,
+            _ => {
+                let m = self.plan.max_loss;
+                m * (self.limited_mean((attach + limit) / m) - self.limited_mean(attach / m))
+            }
+        }
+    }
+
+    /// Analytic mean of a view of the unit's loss.
+    pub fn view_mean(&self, terms: &UnitTerms, view: View) -> f64 {
+        if view == View::GroundUp {
+            return self.plan.mean_loss;
+        }
+        let (ded, lim) = (terms.ded, terms.limit);
+        let gross = self.layer_mean(ded, lim.min(self.plan.support()));
+        if view == View::Gross {
+            return gross;
+        }
+        // A clause on gross is a layer on X: the attachment shifts by ded and
+        // the limit is cut by whatever of the policy limit remains above it.
+        let ceded: f64 = terms
+            .clauses
+            .iter()
+            .map(|c| {
+                let effective = c.limit.min((lim - c.attach).max(0.0));
+                c.share * self.layer_mean(ded + c.attach, effective)
+            })
+            .sum();
+        match view {
+            View::Ceded => ceded,
+            _ => gross - ceded,
+        }
+    }
 }
 
 /// Smallest grid length covering `max_loss`: ceil(M / h) + 1.

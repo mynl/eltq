@@ -13,8 +13,9 @@ use std::path::PathBuf;
 
 use eltq_core::csv_input::{CsvColumns, read_elt_csv};
 use eltq_core::{
-    Config, EltInput, Error as CoreError, JointConfig, Meta, UnitSpec, VariancePolicy, ZRule,
-    joint_two_units as core_joint_two_units, quantize,
+    Clause, Config, Convolution, EltInput, Error as CoreError, JointConfig, Meta, MultiConfig,
+    MultiInput, UnitSpec, UnitTerms, VariancePolicy, View, ZRule,
+    joint_two_units as core_joint_two_units, multiunit_views as core_multiunit_views, quantize,
 };
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::create_exception;
@@ -34,6 +35,13 @@ create_exception!(
     GridOverflowError,
     EltqError,
     "Grid does not cover the maximum contributing loss."
+);
+create_exception!(
+    _eltq,
+    MultiUnitError,
+    EltqError,
+    "Structural problem in a multi-unit ELT: events not contiguous, a rate \
+     varying within an event, or a unit repeated within an event."
 );
 
 fn to_py_err(py: Python<'_>, error: CoreError) -> PyErr {
@@ -55,6 +63,7 @@ fn to_py_err(py: Python<'_>, error: CoreError) -> PyErr {
             };
             build().unwrap_or_else(|_| GridOverflowError::new_err(error.to_string()))
         }
+        CoreError::MultiUnitStructure(_) => MultiUnitError::new_err(error.to_string()),
         _ => EltqError::new_err(error.to_string()),
     }
 }
@@ -344,6 +353,160 @@ fn joint_two_units<'py>(
     Ok((pmf, grid(n1).into_pyarray(py), grid(n2).into_pyarray(py), dict))
 }
 
+/// Structured terms as passed from Python: `(unit_id, limit, ded,
+/// [(share, limit, attach), ...])` per unit code.
+type TermsSpec = Vec<(String, f64, f64, Vec<(f64, f64, f64)>)>;
+
+/// Total event severity by view for a multi-unit ELT (1.10.0). Event and
+/// unit codes are integer codings (unit codes index `terms`); returns
+/// `(views_dict, meta_dict)` with diagnostics as 0-based row indices and
+/// roll-up entries keyed by event start row, translated by the wrapper.
+#[pyfunction]
+#[pyo3(signature = (event_code, unit_code, rate, mean_loss, sd_indep, sd_corr,
+    max_loss, *, terms, bucket_size, grid_length=None, z_nodes=32,
+    z_rule="midpoint", views=None, normalize=false, variance_policy="clamp",
+    clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
+    chunk_rows=None, roll_up_diagnostic=false, convolution="auto"))]
+#[allow(clippy::too_many_arguments)]
+fn multiunit_views<'py>(
+    py: Python<'py>,
+    event_code: PyReadonlyArray1<'py, i64>,
+    unit_code: PyReadonlyArray1<'py, i64>,
+    rate: PyReadonlyArray1<'py, f64>,
+    mean_loss: PyReadonlyArray1<'py, f64>,
+    sd_indep: PyReadonlyArray1<'py, f64>,
+    sd_corr: PyReadonlyArray1<'py, f64>,
+    max_loss: PyReadonlyArray1<'py, f64>,
+    terms: TermsSpec,
+    bucket_size: f64,
+    grid_length: Option<usize>,
+    z_nodes: usize,
+    z_rule: &str,
+    views: Option<Vec<String>>,
+    normalize: bool,
+    variance_policy: &str,
+    clamp_factor: f64,
+    threads: Option<usize>,
+    chunk_rows: Option<usize>,
+    roll_up_diagnostic: bool,
+    convolution: &str,
+) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+    let err = |e: CoreError| to_py_err(py, e);
+    let mut config = MultiConfig::new(bucket_size);
+    config.grid_length = grid_length;
+    config.z_nodes = z_nodes;
+    config.z_rule = ZRule::parse(z_rule).map_err(err)?;
+    if let Some(names) = views {
+        config.views = names
+            .iter()
+            .map(|name| View::parse(name).map_err(err))
+            .collect::<PyResult<Vec<_>>>()?;
+    }
+    config.normalize = normalize;
+    config.variance_policy = parse_variance_policy(variance_policy, clamp_factor)?;
+    config.threads = threads;
+    if let Some(chunk_rows) = chunk_rows {
+        config.chunk_rows = chunk_rows;
+    }
+    config.roll_up_diagnostic = roll_up_diagnostic;
+    config.convolution = Convolution::parse(convolution).map_err(err)?;
+    let terms: Vec<UnitTerms> = terms
+        .into_iter()
+        .map(|(unit_id, limit, ded, clauses)| {
+            let clauses = clauses
+                .into_iter()
+                .map(|(share, limit, attach)| Clause::new(share, limit, attach))
+                .collect::<Result<Vec<_>, _>>()?;
+            UnitTerms::new(&unit_id, limit, ded, clauses)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?;
+    let event_code = event_code
+        .as_slice()
+        .map_err(|_| EltqError::new_err("event_code array must be C-contiguous int64"))?;
+    let unit_code = unit_code
+        .as_slice()
+        .map_err(|_| EltqError::new_err("unit_code array must be C-contiguous int64"))?;
+    let input = MultiInput {
+        event_code,
+        unit_code,
+        rate: contiguous("rate", &rate)?,
+        mean_loss: contiguous("mean_loss", &mean_loss)?,
+        sd_indep: contiguous("sd_indep", &sd_indep)?,
+        sd_corr: contiguous("sd_corr", &sd_corr)?,
+        max_loss: contiguous("max_loss", &max_loss)?,
+    };
+    let result = py
+        .detach(|| core_multiunit_views(&input, &terms, &config))
+        .map_err(err)?;
+    let meta = &result.meta;
+    let names: Vec<&str> = meta.views.iter().map(|v| v.as_str()).collect();
+    let views_dict = PyDict::new(py);
+    for (name, array) in names.iter().zip(result.views) {
+        views_dict.set_item(name, array.into_pyarray(py))?;
+    }
+    let per_view = |values: &[f64]| -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        for (name, v) in names.iter().zip(values) {
+            d.set_item(name, *v)?;
+        }
+        Ok(d)
+    };
+    let dict = PyDict::new(py);
+    dict.set_item("bucket_size", meta.bucket_size)?;
+    dict.set_item("grid_length", meta.grid_length)?;
+    dict.set_item("z_nodes", meta.z_nodes)?;
+    dict.set_item("z_rule", meta.z_rule.as_str())?;
+    dict.set_item("views", names.clone())?;
+    dict.set_item("normalized", meta.normalized)?;
+    dict.set_item("total_rate", meta.total_rate)?;
+    dict.set_item("analytic_aal", meta.analytic_aal)?;
+    dict.set_item("view_mass", per_view(&meta.view_mass)?)?;
+    dict.set_item("view_mean", per_view(&meta.view_mean)?)?;
+    dict.set_item("analytic_view_mean", per_view(&meta.analytic_view_mean)?)?;
+    dict.set_item("view_mean_error", per_view(&meta.view_mean_error)?)?;
+    dict.set_item("input_rows", meta.input_rows)?;
+    dict.set_item("valid_rows", meta.valid_rows)?;
+    dict.set_item("events", meta.events)?;
+    dict.set_item("valid_events", meta.valid_events)?;
+    let diagnostics = PyDict::new(py);
+    for (category, issues) in meta.diagnostics.iter_nonzero() {
+        let entry = PyDict::new(py);
+        entry.set_item("count", issues.count)?;
+        entry.set_item("examples", issues.examples.clone())?;
+        diagnostics.set_item(category.as_str(), entry)?;
+    }
+    dict.set_item("diagnostics", diagnostics)?;
+    match &meta.roll_up {
+        None => dict.set_item("roll_up", py.None())?,
+        Some(entries) => {
+            let list: Vec<Bound<'py, PyDict>> = entries
+                .iter()
+                .map(|e| {
+                    let d = PyDict::new(py);
+                    d.set_item("event_row", e.event_row)?;
+                    d.set_item("units", e.units)?;
+                    d.set_item("sd_exact", e.sd_exact)?;
+                    d.set_item("sd_rolled", e.sd_rolled)?;
+                    d.set_item("sd_ratio", e.sd_ratio)?;
+                    d.set_item("q99_exact", e.q99_exact)?;
+                    d.set_item("q99_rolled", e.q99_rolled)?;
+                    d.set_item("q99_ratio", e.q99_ratio)?;
+                    Ok(d)
+                })
+                .collect::<PyResult<_>>()?;
+            dict.set_item("roll_up", list)?;
+        }
+    }
+    let engine = PyDict::new(py);
+    engine.set_item("max_mass_error", meta.max_mass_error)?;
+    engine.set_item("direct_paths", meta.direct_paths)?;
+    engine.set_item("fft_paths", meta.fft_paths)?;
+    engine.set_item("convolution", config.convolution.as_str())?;
+    dict.set_item("engine", engine)?;
+    Ok((views_dict, dict))
+}
+
 #[pymodule]
 fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -351,8 +514,10 @@ fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("EltqError", py.get_type::<EltqError>())?;
     m.add("VarianceError", py.get_type::<VarianceError>())?;
     m.add("GridOverflowError", py.get_type::<GridOverflowError>())?;
+    m.add("MultiUnitError", py.get_type::<MultiUnitError>())?;
     m.add_function(wrap_pyfunction!(quantize_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(quantize_csv, m)?)?;
     m.add_function(wrap_pyfunction!(joint_two_units, m)?)?;
+    m.add_function(wrap_pyfunction!(multiunit_views, m)?)?;
     Ok(())
 }

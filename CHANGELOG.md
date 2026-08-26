@@ -3,6 +3,51 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.10.0] - 2026-08-26
+
+### Added
+
+- [multiunit-views] The Rust per-event engine `eltq-core::views`
+  (`multiunit_views`): pass 1 validates structure (contiguous events,
+  constant rate, unique units, unit codes within the terms table),
+  classifies unit rows under the one-unit diagnostic categories, and sizes
+  the grid from the largest event support; pass 2 runs whole-event chunks
+  in parallel with the existing bitwise-deterministic in-order fold. Per
+  event: base conditional rows once per unit (Q rows for units that load on
+  the shared factor, one row for independent beta units and atoms), per-view
+  compiled maps (identity maps reuse the base rows; maps cached per worker),
+  the independent block convolved once, correlated units folded in per z
+  node by direct convolution or by FFT with the spectra accumulated over z
+  and a single inverse per view (`convolution="auto"` picks by estimated
+  cost; `direct` / `fft` force a path), then rate-weighted deposits into the
+  chunk's per-view histograms. Per-event mass exactness (`max_mass_error`),
+  analytic beta layer means (the LEV identity via the incomplete beta,
+  bundles built once per unit) reconciled per view, and the optional
+  roll-up diagnostic (exact ground-up total versus the rolled single-row
+  beta: sd and q99 ratios per event) all come out in `MultiMeta`.
+- `eltq-core::convolve`: direct convolution, rustfft plans cached per worker,
+  cost estimates. `Diagnostics::merge` for chunk folds. `multiunit`:
+  `classify_unit_row` / `UnitPlan::from_row` (classification stored between
+  passes, plans rebuilt in the hot pass), `marginal_pmf`, `LayerMeans`.
+- PyO3 `multiunit_views` binding (integer event/unit codes, structured terms
+  per unit code, zero-copy columns, compute detached) and the Python
+  dispatch: identifiers factorized (pandas when available, a dict pass
+  otherwise), terms parsed and grid-aligned in Python, diagnostics
+  translated to `event_id/unit_id` examples, roll-up entries keyed by event
+  id, `MultiMeta.engine` with the engine statistics. New
+  `eltq.multiunit_views_into(..., out={view: array})` following
+  `quantize_into` (memmap-capable; the arrays define the views and grid).
+  `multiunit_views` gains `threads`, `chunk_rows`, `convolution`.
+- Tests: Rust unit tests (atom event view values, independent event equals
+  direct convolution with mass = rate, direct and FFT paths agree with
+  masses, diagnostics and roll-up entries checked, bitwise invariance over
+  threads and chunking, structural / range / overflow / no-view /
+  misalignment errors) and `tests/multiunit_golden.rs` against
+  `fixtures/golden/multiunit_small.*`. The Python multi-unit suite's `eltq`
+  variant now runs the Rust engine end to end (views, semantics, policies,
+  structure errors, goldens); `test_determinism.py` adds the multi-unit
+  thread / chunk / repeat sweep and the direct-versus-FFT agreement.
+
 ## [1.9.0] - 2026-08-26
 
 ### Added

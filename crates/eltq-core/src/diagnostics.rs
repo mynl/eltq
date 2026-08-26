@@ -83,6 +83,20 @@ impl Diagnostics {
         &self.issues[category as usize]
     }
 
+    /// Fold `other` into `self` (counts add, examples extend up to the cap);
+    /// merging in a fixed order keeps the examples deterministic.
+    pub fn merge(&mut self, other: &Diagnostics) {
+        for (mine, theirs) in self.issues.iter_mut().zip(&other.issues) {
+            mine.count += theirs.count;
+            for &row in &theirs.examples {
+                if mine.examples.len() >= MAX_EXAMPLES {
+                    break;
+                }
+                mine.examples.push(row);
+            }
+        }
+    }
+
     /// Categories with at least one affected row, in canonical order.
     pub fn iter_nonzero(&self) -> impl Iterator<Item = (Category, &RowIssues)> {
         Category::ALL

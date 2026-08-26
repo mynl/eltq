@@ -28,7 +28,7 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
 | [reference-n-unit] n-unit reference, terms grammar, views | 1.7.0 | done |
 | [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | done |
 | [terms-grammar] Rust parser + view-map compiler | 1.9.0 | done |
-| [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | planned |
+| [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | done |
 | [ferocious-multiunit] own erf, real FFTs, 1M unit-row report | 1.11.0 | planned |
 
 ## Layout
@@ -169,10 +169,14 @@ the layer; a plain number is an amount of the layer limit (`100 po 400 xs
 100` cedes 25%). Breakpoints must be multiples of `bucket_size`. Units
 without a line get no terms. The shared factor is integrated by midpoint
 quantile nodes (default) or Gauss-Hermite; `benchmarks/z-convergence-1.7.0.md`
-records the convergence study behind the default. `joint_two_units` runs in
-Rust from 1.8.0 (conditional matrices plus one GEMM); `multiunit_views` runs
-on the SciPy reference `eltq.reference_multiunit` until the Rust engine lands
-(1.10.0).
+records the convergence study behind the default. Both functions run in Rust
+on the compiled backend (`joint_two_units`: conditional matrices plus one
+GEMM, 1.8.0; `multiunit_views`: the per-event engine of 1.10.0, whole-event
+chunks folded bitwise-deterministically like `quantize`, direct or FFT
+convolution across units chosen by cost or forced with `convolution=`) and
+on the SciPy reference `eltq.reference_multiunit` otherwise.
+`multiunit_views_into(..., out={view: array})` writes into caller-provided
+(memmap-capable) arrays, the keys selecting the views and the length the grid.
 
 ## Input schema
 
