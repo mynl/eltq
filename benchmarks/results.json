@@ -446,5 +446,254 @@
     },
     "speedup_vs_scipy": 43.5,
     "peak_working_set_mb": 147.5
+  },
+  {
+    "timestamp": "2026-08-26T01:24:31+00:00",
+    "rows": 1000000,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.11.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "runs": [
+      {
+        "kind": "in_memory",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "grid_length": 1001,
+        "elapsed_s": 7.4147,
+        "rows_per_s": 134867,
+        "beta_rows": 889534,
+        "quantiles_per_s": 3839007,
+        "mass_error": 0.0,
+        "secondary_mean_error": -96749.72314590216
+      },
+      {
+        "kind": "non_kernel_overhead",
+        "quadrature_points": 32,
+        "bucket_size": 5000.0,
+        "elapsed_s": 0.0337
+      }
+    ],
+    "scipy_reference": {
+      "subsample_rows": 20000,
+      "rows_per_s": 3897,
+      "extrapolated_s_for_full_input": 256.6
+    },
+    "speedup_vs_scipy": 34.6,
+    "peak_working_set_mb": 147.6
+  },
+  {
+    "suite": "multiunit",
+    "timestamp": "2026-08-26T01:28:54.121016+00:00",
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+      "logical_cores": 8,
+      "python": "3.13.13",
+      "numpy": "2.5.2",
+      "eltq": "1.11.0",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cpu_name": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz"
+    },
+    "events": 100000,
+    "units": 10,
+    "rows": 909937,
+    "bucket_size": 40000.0,
+    "runs": {
+      "all4 auto q32": {
+        "seconds": 22.46,
+        "rows_per_s": 40513,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {}
+      },
+      "ground_up only q32": {
+        "seconds": 15.237,
+        "rows_per_s": 59719,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {
+          "views": [
+            "ground_up"
+          ]
+        }
+      },
+      "all4 auto q8": {
+        "seconds": 7.911,
+        "rows_per_s": 115025,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 2.220446049250313e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.0004023334857372073,
+        "options": {
+          "z_nodes": 8
+        }
+      },
+      "all4 direct q32": {
+        "seconds": 23.052,
+        "rows_per_s": 39474,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "direct"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {
+          "convolution": "direct"
+        }
+      },
+      "all4 fft q32": {
+        "seconds": 38.035,
+        "rows_per_s": 23924,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 0,
+          "fft_paths": 97926,
+          "convolution": "fft"
+        },
+        "max_view_mean_rel_error": 0.00040669455449066,
+        "options": {
+          "convolution": "fft"
+        }
+      },
+      "all4 gauss_hermite q32": {
+        "seconds": 23.792,
+        "rows_per_s": 38245,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 2.220446049250313e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.0004066665335520426,
+        "options": {
+          "z_rule": "gauss_hermite"
+        }
+      },
+      "all4 auto threads=1": {
+        "seconds": 81.851,
+        "rows_per_s": 11117,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {
+          "threads": 1
+        }
+      },
+      "all4 auto threads=2": {
+        "seconds": 43.811,
+        "rows_per_s": 20769,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {
+          "threads": 2
+        }
+      },
+      "all4 auto threads=4": {
+        "seconds": 27.699,
+        "rows_per_s": 32851,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {
+          "threads": 4
+        }
+      },
+      "all4 auto threads=8": {
+        "seconds": 22.321,
+        "rows_per_s": 40766,
+        "grid_length": 874,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.9984014443252818e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040669455449085886,
+        "options": {
+          "threads": 8
+        }
+      }
+    },
+    "thread_scaling_seconds": {
+      "1": 81.851,
+      "2": 43.811,
+      "4": 27.699,
+      "8": 22.321
+    },
+    "deterministic_across_threads": true,
+    "joint_two_units": {
+      "1001": {
+        "seconds": 0.0099,
+        "mass": 1.0
+      },
+      "4001": {
+        "seconds": 0.0383,
+        "mass": 1.0
+      }
+    },
+    "peak_rss_mb": 230.9
   }
 ]

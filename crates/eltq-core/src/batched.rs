@@ -70,8 +70,10 @@ pub fn beta_midpoint_quantiles(alpha: f64, beta: f64, out: &mut [f64]) -> Result
     Ok(())
 }
 
-/// Fill `out[k] = Q(alpha, beta; targets[k])` for strictly ascending targets
-/// in [0, 1] (targets at the endpoints yield 0 and 1 exactly).
+/// Fill `out[k] = Q(alpha, beta; targets[k])` for ascending targets in
+/// [0, 1]: strictly ascending in the interior, with repeated 0 at the
+/// start and repeated 1 at the end allowed (Gauss-Hermite nodes push
+/// `Phi(w_c z)` to exactly 0 or 1); endpoint targets yield 0 and 1 exactly.
 ///
 /// Same machinery as the midpoint kernel: the lower half is walked
 /// directly and the upper half on the reflected distribution with exactly
@@ -84,7 +86,13 @@ pub fn beta_quantiles(alpha: f64, beta: f64, targets: &[f64], out: &mut [f64]) -
     if !(alpha > 0.0 && beta > 0.0 && alpha.is_finite() && beta.is_finite()) {
         return Err(KernelError);
     }
-    if targets.windows(2).any(|w| w[1] <= w[0]) || targets.iter().any(|u| !(0.0..=1.0).contains(u)) {
+    if targets.iter().any(|u| !(0.0..=1.0).contains(u)) {
+        return Err(KernelError);
+    }
+    if targets
+        .windows(2)
+        .any(|w| w[1] < w[0] || (w[1] == w[0] && w[0] > 0.0 && w[0] < 1.0))
+    {
         return Err(KernelError);
     }
     let lower = BetaFn::new(alpha, beta);
@@ -404,6 +412,13 @@ mod tests {
         assert_eq!(xs[0], 0.0);
         assert_eq!(xs[2], 1.0);
         assert!(beta_quantiles(2.0, 3.0, &[0.5, 0.4], &mut xs[..2]).is_err());
+        assert!(beta_quantiles(2.0, 3.0, &[0.4, 0.4], &mut xs[..2]).is_err());
+        // Repeated endpoints (Gauss-Hermite tails) are accepted.
+        let mut ys = [0.0; 6];
+        beta_quantiles(2.0, 1.5, &[0.0, 0.0, 1e-20, 0.5, 1.0, 1.0], &mut ys).unwrap();
+        assert_eq!(&ys[..2], &[0.0, 0.0]);
+        assert!(ys[2] > 0.0 && ys[2] < ys[3]);
+        assert_eq!(&ys[4..], &[1.0, 1.0]);
     }
 
     #[test]

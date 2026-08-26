@@ -1,6 +1,7 @@
-//! Convolution across units: direct (exact, small supports) and FFT
-//! (rustfft, complex transforms of real rows; real transforms and plan
-//! tuning are the 1.11.0 kernel item).
+//! Convolution across units: direct (exact, small supports) and FFT (real
+//! transforms via `realfft`: a real row of length n has an n / 2 + 1 point
+//! spectrum, halving the work of a complex transform; plans cached per
+//! worker per size).
 //!
 //! Both paths produce the same linear convolution; the engine picks per
 //! event and view by a cost estimate and tests hold them to agree within
@@ -9,8 +10,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
-use rustfft::{Fft, FftPlanner};
 
 /// `out = a * b` (linear convolution, length a + b - 1), direct O(|a| |b|).
 pub fn convolve_direct(a: &[f64], b: &[f64], out: &mut Vec<f64>) {
@@ -43,9 +44,9 @@ pub fn direct_cost(lengths: &[usize]) -> f64 {
     cost
 }
 
-/// Rough cost of one complex FFT of size n (5 n log2 n flops).
+/// Rough cost of one real FFT of size n (about 2.5 n log2 n flops).
 pub fn fft_cost(n: usize) -> f64 {
-    5.0 * n as f64 * (n as f64).log2().max(1.0)
+    2.5 * n as f64 * (n as f64).log2().max(1.0)
 }
 
 /// Next power of two at or above `n` (FFT size).
@@ -53,25 +54,30 @@ pub fn fft_size(n: usize) -> usize {
     n.next_power_of_two().max(2)
 }
 
-/// Per-worker FFT plans, cached by size.
+/// Per-worker real FFT plans, cached by size, plus the scratch the
+/// transforms need.
 pub struct FftCache {
-    planner: FftPlanner<f64>,
-    forward: HashMap<usize, Arc<dyn Fft<f64>>>,
-    inverse: HashMap<usize, Arc<dyn Fft<f64>>>,
+    planner: RealFftPlanner<f64>,
+    forward: HashMap<usize, Arc<dyn RealToComplex<f64>>>,
+    inverse: HashMap<usize, Arc<dyn ComplexToReal<f64>>>,
+    real: Vec<f64>,
+    scratch: Vec<Complex<f64>>,
 }
 
 impl Default for FftCache {
     fn default() -> Self {
         FftCache {
-            planner: FftPlanner::new(),
+            planner: RealFftPlanner::new(),
             forward: HashMap::new(),
             inverse: HashMap::new(),
+            real: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 }
 
 impl FftCache {
-    pub fn forward(&mut self, n: usize) -> Arc<dyn Fft<f64>> {
+    fn forward(&mut self, n: usize) -> Arc<dyn RealToComplex<f64>> {
         let planner = &mut self.planner;
         self.forward
             .entry(n)
@@ -79,7 +85,7 @@ impl FftCache {
             .clone()
     }
 
-    pub fn inverse(&mut self, n: usize) -> Arc<dyn Fft<f64>> {
+    fn inverse(&mut self, n: usize) -> Arc<dyn ComplexToReal<f64>> {
         let planner = &mut self.planner;
         self.inverse
             .entry(n)
@@ -87,24 +93,43 @@ impl FftCache {
             .clone()
     }
 
-    /// Forward transform of a real row zero-padded to `n` into `spectrum`.
-    pub fn spectrum(&mut self, row: &[f64], n: usize, spectrum: &mut Vec<Complex<f64>>) {
-        spectrum.clear();
-        spectrum.resize(n, Complex::new(0.0, 0.0));
-        for (s, &v) in spectrum.iter_mut().zip(row) {
-            s.re = v;
-        }
-        self.forward(n).process(spectrum);
+    /// Spectrum length of a real transform of size n.
+    pub fn spectrum_len(n: usize) -> usize {
+        n / 2 + 1
     }
 
-    /// Inverse transform of `spectrum` (consumed) into the first `len` real
-    /// values of `out`, normalized by n.
-    pub fn inverse_into(&mut self, spectrum: &mut [Complex<f64>], len: usize, out: &mut Vec<f64>) {
-        let n = spectrum.len();
-        self.inverse(n).process(spectrum);
+    /// Forward transform of a real row zero-padded to `n` into `spectrum`
+    /// (length n / 2 + 1).
+    pub fn spectrum(&mut self, row: &[f64], n: usize, spectrum: &mut Vec<Complex<f64>>) {
+        let plan = self.forward(n);
+        self.real.clear();
+        self.real.resize(n, 0.0);
+        self.real[..row.len()].copy_from_slice(row);
+        spectrum.clear();
+        spectrum.resize(Self::spectrum_len(n), Complex::new(0.0, 0.0));
+        self.scratch.resize(plan.get_scratch_len(), Complex::new(0.0, 0.0));
+        plan.process_with_scratch(&mut self.real, spectrum, &mut self.scratch)
+            .expect("real FFT sizes are consistent");
+    }
+
+    /// Inverse transform of `spectrum` (length n / 2 + 1 for size `n`,
+    /// consumed) into the first `len` real values of `out`, normalized by n.
+    pub fn inverse_into(&mut self, spectrum: &mut [Complex<f64>], n: usize, len: usize, out: &mut Vec<f64>) {
+        let plan = self.inverse(n);
+        self.real.clear();
+        self.real.resize(n, 0.0);
+        self.scratch.resize(plan.get_scratch_len(), Complex::new(0.0, 0.0));
+        // realfft requires the imaginary parts of the DC and Nyquist bins to
+        // vanish; rounding leaves them at ~1e-17 for real convolutions.
+        spectrum[0].im = 0.0;
+        if n % 2 == 0 {
+            spectrum[n / 2].im = 0.0;
+        }
+        plan.process_with_scratch(spectrum, &mut self.real, &mut self.scratch)
+            .expect("real FFT sizes are consistent");
         let scale = 1.0 / n as f64;
         out.clear();
-        out.extend(spectrum[..len].iter().map(|c| c.re * scale));
+        out.extend(self.real[..len].iter().map(|v| v * scale));
     }
 }
 
@@ -133,7 +158,7 @@ mod tests {
             *x *= y;
         }
         let mut back = Vec::new();
-        cache.inverse_into(&mut sa, 4, &mut back);
+        cache.inverse_into(&mut sa, n, 4, &mut back);
         for (o, w) in back.iter().zip(&want) {
             assert!((o - w).abs() < 1e-14);
         }

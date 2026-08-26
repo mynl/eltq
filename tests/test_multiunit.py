@@ -239,6 +239,21 @@ def test_gauss_hermite_reconciles_tightly_on_smooth_units(multi):
         assert abs(meta.view_mean_error[view]) <= 1e-3 * abs(meta.analytic_view_mean[view]), view
 
 
+def test_gauss_hermite_with_comonotone_units_at_large_q(multi):
+    # Gauss-Hermite nodes reach |z| ~ 10 at Q = 64, where Phi(w_c z) rounds
+    # to exactly 0 or 1: the comonotone quantile walk must accept repeated
+    # endpoint targets (1.11.0 regression).
+    df, terms = load_multi_fixture()
+    views, meta = run_multi(multi, df, terms=terms, bucket_size=10.0, z_nodes=64,
+                            z_rule="gauss_hermite")
+    for view in meta.views:
+        assert math.isclose(views[view].sum(), meta.total_rate, rel_tol=1e-12), view
+    como = rm.Unit(574.0, 0.0, 232.0, 1000.0)
+    pmf, _, _, _ = multi.joint(como, U2, bucket_size=H, n1=N1, n2=N2, n_z=64,
+                               z_rule="gauss_hermite")
+    assert math.isclose(pmf.sum(), 1.0, abs_tol=1e-12)
+
+
 def test_normalize(multi):
     rows = [("e1", "a", 0.02, 300.0, 40.0, 30.0, 1000.0), ("e2", "a", 0.03, 200.0, 20.0, 10.0, 1000.0)]
     views, meta = run_multi(multi, rows, bucket_size=10.0, normalize=True)

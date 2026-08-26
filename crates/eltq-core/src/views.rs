@@ -8,12 +8,19 @@
 //! 1. classifies the units (atom, comonotone, beta, or dropped) and builds
 //!    each unit's base conditional rows given the shared factor: Q rows for
 //!    correlated units, a single row for independent units and atoms;
-//! 2. per view, maps every unit's rows through its compiled [`ViewMap`]
-//!    (identity maps reuse the base rows), convolves the independent block
-//!    once, and folds the correlated units in per z node, either by direct
-//!    convolution or by FFT with the spectra accumulated over z so only one
-//!    inverse transform is needed per view (chosen by cost, or forced);
-//! 3. deposits the event's per-view pmf into the chunk's histograms weighted
+//! 2. materializes only the distinct row sets a unit's terms produce (base
+//!    for ground_up, gross after policy terms, ceded and net after
+//!    reinsurance; a unit without policy terms has gross = ground_up, one
+//!    without reinsurance has net = gross and a ceded atom at zero that
+//!    drops out of the ceded convolution entirely);
+//! 3. convolves across units per view, sharing work between views: bare
+//!    units (no terms at all) form one block convolved once per z node and
+//!    reused by ground_up, gross and net, and on the FFT path every (unit,
+//!    row set, z) spectrum is transformed once at one event-wide size and
+//!    multiplied into each view, with the spectra accumulated over z so one
+//!    inverse per view suffices. Direct or FFT is chosen per event from the
+//!    operations each path would actually run (or forced);
+//! 4. deposits the event's per-view pmf into the chunk's histograms weighted
 //!    by the event rate, reconciles the pipeline view means against the
 //!    analytic beta layer means, and (optionally) compares the exact
 //!    ground-up total against the rolled single-row beta.
@@ -29,8 +36,8 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 use rustfft::num_complex::Complex;
 
-use crate::config::{DEFAULT_CHUNK_ROWS, VariancePolicy};
-use crate::convolve::{FftCache, convolve_direct, direct_cost, fft_cost, fft_size};
+use crate::config::VariancePolicy;
+use crate::convolve::{FftCache, convolve_direct, fft_cost, fft_size};
 use crate::diagnostics::{Category, Diagnostics, MAX_EXAMPLES};
 use crate::error::Error;
 use crate::multiunit::{
@@ -40,6 +47,16 @@ use crate::multiunit::{
 use crate::quadrature::{ZRule, z_quadrature};
 use crate::sum::{Neumaier, grid_moment, sum};
 use crate::terms::{UnitTerms, View, ViewMap, check_grid_alignment};
+
+/// Default rows per parallel chunk for the multi-unit route: whole events,
+/// small enough that a 100k-row portfolio still spreads across every core.
+pub const DEFAULT_MULTI_CHUNK_ROWS: usize = 2048;
+
+/// Measured ratio of FFT-path wall time to its flop estimate relative to the
+/// direct path's (the vectorized axpy chains run near peak, the FFT path
+/// pays for scratch, complex products and plan dispatch); calibrated on the
+/// 1.11.0 benchmark so `Auto` tracks the faster path.
+const FFT_COST_FACTOR: f64 = 3.0;
 
 /// Structure-of-arrays multi-unit ELT. `unit_code` indexes the terms table;
 /// `event_code` only needs to be constant within an event and unique across
@@ -90,7 +107,7 @@ impl MultiInput<'_> {
 /// How units are convolved across an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Convolution {
-    /// Direct or FFT per event and view by estimated cost.
+    /// Direct or FFT per event by estimated cost.
     Auto,
     Direct,
     Fft,
@@ -145,7 +162,7 @@ impl MultiConfig {
             normalize: false,
             variance_policy: VariancePolicy::default(),
             threads: None,
-            chunk_rows: DEFAULT_CHUNK_ROWS,
+            chunk_rows: DEFAULT_MULTI_CHUNK_ROWS,
             roll_up_diagnostic: false,
             convolution: Convolution::Auto,
         }
@@ -221,7 +238,7 @@ pub struct MultiMeta {
     pub roll_up: Option<Vec<RollUpEntry>>,
     /// Largest |mass - 1| of any per-event view pmf (conditional exactness).
     pub max_mass_error: f64,
-    /// Event-views convolved by each path.
+    /// Events convolved by each path.
     pub direct_paths: usize,
     pub fft_paths: usize,
 }
@@ -247,25 +264,82 @@ struct ChunkPartial {
     fft_paths: usize,
 }
 
+/// Row-set ids: the distinct transformed rows a unit can need.
+const SET_BASE: usize = 0;
+const SET_GROSS: usize = 1;
+const SET_CEDED: usize = 2;
+const SET_NET: usize = 3;
+
+/// Row set a view uses for a unit with the given terms; None is the ceded
+/// atom at zero, which contributes nothing to the convolution.
+fn rowset_for(view: View, terms: &UnitTerms) -> Option<usize> {
+    match view {
+        View::GroundUp => Some(SET_BASE),
+        View::Gross => Some(if terms.has_policy_terms() { SET_GROSS } else { SET_BASE }),
+        View::Ceded => {
+            if terms.has_reinsurance() {
+                Some(SET_CEDED)
+            } else {
+                None
+            }
+        }
+        View::Net => Some(if terms.has_reinsurance() {
+            SET_NET
+        } else if terms.has_policy_terms() {
+            SET_GROSS
+        } else {
+            SET_BASE
+        }),
+    }
+}
+
+fn view_of_set(set: usize) -> View {
+    match set {
+        SET_GROSS => View::Gross,
+        SET_CEDED => View::Ceded,
+        SET_NET => View::Net,
+        _ => View::GroundUp,
+    }
+}
+
 /// One contributing unit of an event inside the worker.
 struct LiveUnit {
     row: usize,
+    code: usize,
     plan: UnitPlan,
-    /// Grid length of the unit's own support.
-    n: usize,
     /// Number of base rows: Q when the unit depends on the shared factor,
     /// 1 otherwise (independent beta units and atoms).
     rows: usize,
-    base: Vec<f64>,
-    /// Index of the unit's slot in the worker's view-row scratch.
-    slot: usize,
+    /// Row sets by id (base, gross, ceded, net); unused sets stay empty.
+    sets: [Vec<f64>; 4],
+    lens: [usize; 4],
+    /// No terms at all: identical rows in ground_up, gross and net.
+    bare: bool,
 }
 
-/// The current view's rows of a unit: its scratch slot when a map was
-/// applied, the base rows otherwise (identity map).
-fn rows_for<'u>(view_rows: &'u [Vec<f64>], unit: &'u LiveUnit) -> &'u [f64] {
-    let slot = &view_rows[unit.slot];
-    if slot.is_empty() { &unit.base } else { slot }
+impl LiveUnit {
+    fn set(&self, id: usize) -> &[f64] {
+        &self.sets[id]
+    }
+
+    fn row(&self, id: usize, zi: usize) -> &[f64] {
+        let len = self.lens[id];
+        let q = if self.rows == 1 { 0 } else { zi };
+        &self.sets[id][q * len..(q + 1) * len]
+    }
+}
+
+/// Spectra of a unit's row sets: `rows x spectrum_len` complex per set.
+#[derive(Default)]
+struct UnitSpectra {
+    sets: [Vec<Complex<f64>>; 4],
+}
+
+impl UnitSpectra {
+    fn row(&self, id: usize, rows: usize, zi: usize, len: usize) -> &[Complex<f64>] {
+        let q = if rows == 1 { 0 } else { zi };
+        &self.sets[id][q * len..(q + 1) * len]
+    }
 }
 
 /// Per-worker state: quadrature, FFT plans, compiled view maps, scratch.
@@ -275,115 +349,333 @@ struct Worker<'a> {
     h: f64,
     fft: FftCache,
     maps: HashMap<(usize, usize, View), ViewMap>,
-    convolution: Convolution,
-    // Scratch buffers reused across events.
-    view_rows: Vec<Vec<f64>>,
-    indep: Vec<f64>,
+    // Scratch reused across events.
     acc: Vec<f64>,
     tmp: Vec<f64>,
     pmf: Vec<f64>,
-    spec_indep: Vec<Complex<f64>>,
+    shared_indep: Vec<f64>,
+    shared_corr: Vec<Vec<f64>>,
+    spectra: Vec<UnitSpectra>,
+    shared_spec: Vec<Vec<Complex<f64>>>,
     spec_acc: Vec<Complex<f64>>,
     spec_prod: Vec<Complex<f64>>,
     spec_tmp: Vec<Complex<f64>>,
 }
 
+/// Cost of chaining direct convolutions over rows of the given lengths,
+/// starting from a row of length `start`; returns (cost, final length).
+fn chain_cost(start: usize, lengths: impl Iterator<Item = usize>) -> (f64, usize) {
+    let mut acc = start;
+    let mut cost = 0.0;
+    for len in lengths {
+        cost += (acc * len) as f64;
+        acc += len - 1;
+    }
+    (cost, acc)
+}
+
 impl Worker<'_> {
-    fn view_map(&mut self, unit_code: usize, terms: &UnitTerms, view: View, n: usize) -> &ViewMap {
+    fn view_map(&mut self, unit_code: usize, terms: &UnitTerms, view: View, n: usize) -> ViewMap {
         if self.maps.len() > 4096 {
             self.maps.clear();
         }
         self.maps
             .entry((unit_code, n, view))
             .or_insert_with(|| ViewMap::compile(terms, view, self.h, n))
+            .clone()
     }
 
-    /// Convolve the live units' view rows into `self.pmf` (length `total`),
-    /// averaging over the shared factor. Returns whether the FFT path ran.
-    fn convolve_event(&mut self, units: &[LiveUnit], lens: &[usize], total: usize) -> bool {
+    /// Materialize the row sets the computed views need for every unit.
+    fn materialize(&mut self, units: &mut [LiveUnit], terms: &[UnitTerms], computed: &[View]) {
+        for u in units.iter_mut() {
+            let t = &terms[u.code];
+            let mut needed = [false; 4];
+            for &view in computed {
+                if let Some(id) = rowset_for(view, t) {
+                    needed[id] = true;
+                }
+            }
+            for id in [SET_GROSS, SET_CEDED, SET_NET] {
+                if !needed[id] {
+                    u.sets[id].clear();
+                    u.lens[id] = 0;
+                    continue;
+                }
+                let map = self.view_map(u.code, t, view_of_set(id), u.lens[SET_BASE]);
+                let len = map.support_len;
+                u.lens[id] = len;
+                let n = u.lens[SET_BASE];
+                let (base, set) = {
+                    let (left, right) = u.sets.split_at_mut(id);
+                    (&left[SET_BASE], &mut right[0])
+                };
+                set.clear();
+                set.resize(u.rows * len, 0.0);
+                for (src, dst) in base.chunks_exact(n).zip(set.chunks_exact_mut(len)) {
+                    map.apply(src, dst);
+                }
+            }
+        }
+    }
+
+    /// Estimated multiply-add counts of the direct and FFT paths for the
+    /// computed views (mirrors the loops in `direct_views` / `fft_views`).
+    fn estimate(&self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View]) -> (f64, f64) {
         let q = self.z.len();
-        // The view-row scratch leaves `self` for the duration so the other
-        // scratch buffers can be borrowed mutably alongside it.
-        let view_rows = std::mem::take(&mut self.view_rows);
-        // Independent block: single-row units, convolved once.
-        self.indep.clear();
-        self.indep.push(1.0);
-        for (u, &len) in units.iter().zip(lens) {
-            if u.rows == 1 {
-                let row = &rows_for(&view_rows, u)[..len];
-                convolve_direct(&self.indep, row, &mut self.tmp);
-                std::mem::swap(&mut self.indep, &mut self.tmp);
+        let bare_exists = units.iter().any(|u| u.bare);
+        let mut direct = 0.0;
+        // Shared bare block.
+        let (c_ind, shared_ind_len) = chain_cost(
+            1,
+            units.iter().filter(|u| u.bare && u.rows == 1).map(|u| u.lens[SET_BASE]),
+        );
+        let (c_corr, shared_corr_len) = chain_cost(
+            1,
+            units.iter().filter(|u| u.bare && u.rows > 1).map(|u| u.lens[SET_BASE]),
+        );
+        direct += c_ind + q as f64 * c_corr;
+        let mut max_total = 1;
+        let mut forward = 0usize;
+        let mut products = 0.0;
+        for u in units {
+            let t = &terms[u.code];
+            let mut seen = [false; 4];
+            for &view in computed {
+                if let Some(id) = rowset_for(view, t)
+                    && !seen[id]
+                {
+                    seen[id] = true;
+                    forward += u.rows;
+                }
             }
         }
-        let correlated: Vec<usize> = (0..units.len()).filter(|&i| units[i].rows > 1).collect();
-        self.pmf.clear();
-        self.pmf.resize(total, 0.0);
-        if correlated.is_empty() {
-            self.pmf[..self.indep.len()].copy_from_slice(&self.indep);
-            self.view_rows = view_rows;
-            return false;
-        }
-        let use_fft = match self.convolution {
-            Convolution::Direct => false,
-            Convolution::Fft => true,
-            Convolution::Auto => {
-                let mut chain: Vec<usize> = correlated.iter().map(|&i| lens[i]).collect();
-                chain.push(self.indep.len());
-                let direct = q as f64 * direct_cost(&chain);
-                let n = fft_size(total);
-                let fft = fft_cost(n) * (q * correlated.len() + 2) as f64 + (q * n) as f64;
-                fft < direct
+        for &view in computed {
+            let uses_shared = bare_exists && view != View::Ceded;
+            let pairs: Vec<(usize, usize)> = units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| !u.bare)
+                .filter_map(|(i, u)| rowset_for(view, &terms[u.code]).map(|id| (i, id)))
+                .collect();
+            let total = pairs.iter().map(|&(i, id)| units[i].lens[id] - 1).sum::<usize>()
+                + if uses_shared { shared_ind_len - 1 + shared_corr_len - 1 } else { 0 }
+                + 1;
+            max_total = max_total.max(total);
+            let start = if uses_shared { shared_ind_len } else { 1 };
+            let (c, ind_len) =
+                chain_cost(start, pairs.iter().filter(|&&(i, _)| units[i].rows == 1).map(|&(i, id)| units[i].lens[id]));
+            direct += c;
+            let corr: Vec<usize> = pairs
+                .iter()
+                .filter(|&&(i, _)| units[i].rows > 1)
+                .map(|&(i, id)| units[i].lens[id])
+                .collect();
+            let any_corr = !corr.is_empty() || (uses_shared && shared_corr_len > 1);
+            if any_corr {
+                let (c1, l1) = chain_cost(1, corr.iter().cloned());
+                let mut per_z = c1;
+                let mut len = l1;
+                if uses_shared && shared_corr_len > 1 {
+                    per_z += (len * shared_corr_len) as f64;
+                    len += shared_corr_len - 1;
+                }
+                per_z += (len * ind_len) as f64;
+                direct += q as f64 * per_z;
+                products += (q * (pairs.len() + usize::from(uses_shared))) as f64;
+            } else {
+                products += (pairs.len() + usize::from(uses_shared)) as f64;
             }
+        }
+        let n = fft_size(max_total);
+        let half = (n / 2 + 1) as f64;
+        let shared_products = if bare_exists {
+            (units.iter().filter(|u| u.bare).count() * q) as f64
+        } else {
+            0.0
         };
-        if use_fft {
-            let n = fft_size(total);
-            self.fft.spectrum(&self.indep.clone(), n, &mut self.spec_indep);
-            self.spec_acc.clear();
-            self.spec_acc.resize(n, Complex::new(0.0, 0.0));
+        let fft = (forward + computed.len()) as f64 * fft_cost(n) + (products + shared_products) * half * 3.0;
+        (direct, fft)
+    }
+
+    /// Direct path: fill `pmfs[v]` for every computed view.
+    fn direct_views(&mut self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View], pmfs: &mut [Vec<f64>]) {
+        let q = self.z.len();
+        let bare_exists = units.iter().any(|u| u.bare);
+        // Shared bare block: independent part once, correlated part per z.
+        self.shared_indep.clear();
+        self.shared_indep.push(1.0);
+        for u in units.iter().filter(|u| u.bare && u.rows == 1) {
+            convolve_direct(&self.shared_indep, u.set(SET_BASE), &mut self.tmp);
+            std::mem::swap(&mut self.shared_indep, &mut self.tmp);
+        }
+        let shared_corr_units: Vec<usize> = (0..units.len()).filter(|&i| units[i].bare && units[i].rows > 1).collect();
+        self.shared_corr.resize_with(q, Vec::new);
+        if shared_corr_units.is_empty() {
+            for s in self.shared_corr.iter_mut() {
+                s.clear();
+            }
+        } else {
             for zi in 0..q {
-                self.spec_prod.clear();
-                self.spec_prod.extend_from_slice(&self.spec_indep);
-                for &i in &correlated {
-                    let len = lens[i];
-                    let row = &rows_for(&view_rows, &units[i])[zi * len..(zi + 1) * len];
-                    self.fft.spectrum(row, n, &mut self.spec_tmp);
-                    for (p, t) in self.spec_prod.iter_mut().zip(&self.spec_tmp) {
-                        *p *= t;
-                    }
+                self.acc.clear();
+                self.acc.push(1.0);
+                for &i in &shared_corr_units {
+                    convolve_direct(&self.acc, units[i].row(SET_BASE, zi), &mut self.tmp);
+                    std::mem::swap(&mut self.acc, &mut self.tmp);
+                }
+                std::mem::swap(&mut self.shared_corr[zi], &mut self.acc);
+            }
+        }
+        for (vi, &view) in computed.iter().enumerate() {
+            let uses_shared = bare_exists && view != View::Ceded;
+            let pairs: Vec<(usize, usize)> = units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| !u.bare)
+                .filter_map(|(i, u)| rowset_for(view, &terms[u.code]).map(|id| (i, id)))
+                .collect();
+            let total = pairs.iter().map(|&(i, id)| units[i].lens[id] - 1).sum::<usize>()
+                + if uses_shared {
+                    self.shared_indep.len() - 1 + self.shared_corr[0].len().max(1) - 1
+                } else {
+                    0
+                }
+                + 1;
+            // Independent chain once.
+            self.tmp.clear();
+            if uses_shared {
+                self.pmf.clear();
+                self.pmf.extend_from_slice(&self.shared_indep);
+            } else {
+                self.pmf.clear();
+                self.pmf.push(1.0);
+            }
+            for &(i, id) in pairs.iter().filter(|&&(i, _)| units[i].rows == 1) {
+                convolve_direct(&self.pmf, units[i].set(id), &mut self.tmp);
+                std::mem::swap(&mut self.pmf, &mut self.tmp);
+            }
+            let indep_len = self.pmf.len();
+            let corr: Vec<(usize, usize)> = pairs.iter().cloned().filter(|&(i, _)| units[i].rows > 1).collect();
+            let shared_corr_live = uses_shared && !shared_corr_units.is_empty();
+            let out = &mut pmfs[vi];
+            out.clear();
+            out.resize(total, 0.0);
+            if corr.is_empty() && !shared_corr_live {
+                out[..indep_len].copy_from_slice(&self.pmf);
+                continue;
+            }
+            for zi in 0..q {
+                self.acc.clear();
+                self.acc.push(1.0);
+                for &(i, id) in &corr {
+                    convolve_direct(&self.acc, units[i].row(id, zi), &mut self.tmp);
+                    std::mem::swap(&mut self.acc, &mut self.tmp);
+                }
+                if shared_corr_live {
+                    convolve_direct(&self.acc, &self.shared_corr[zi], &mut self.tmp);
+                    std::mem::swap(&mut self.acc, &mut self.tmp);
+                }
+                if indep_len > 1 {
+                    convolve_direct(&self.acc, &self.pmf, &mut self.tmp);
+                    std::mem::swap(&mut self.acc, &mut self.tmp);
                 }
                 let wq = self.w[zi];
+                for (o, a) in out.iter_mut().zip(&self.acc) {
+                    *o += wq * a;
+                }
+            }
+        }
+    }
+
+    /// FFT path: one event-wide size, every (unit, row set, z) spectrum
+    /// transformed once, spectra accumulated over z, one inverse per view.
+    fn fft_views(&mut self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View], pmfs: &mut [Vec<f64>]) {
+        let q = self.z.len();
+        let bare_exists = units.iter().any(|u| u.bare);
+        // Event-wide size from the largest view total.
+        let mut max_total = 1;
+        let mut totals = Vec::with_capacity(computed.len());
+        for &view in computed {
+            let total = units
+                .iter()
+                .filter_map(|u| rowset_for(view, &terms[u.code]).map(|id| u.lens[id] - 1))
+                .sum::<usize>()
+                + 1;
+            totals.push(total);
+            max_total = max_total.max(total);
+        }
+        let n = fft_size(max_total);
+        let half = FftCache::spectrum_len(n);
+        // Spectra of every needed row set.
+        self.spectra.resize_with(units.len(), UnitSpectra::default);
+        for (i, u) in units.iter().enumerate() {
+            let t = &terms[u.code];
+            let mut needed = [false; 4];
+            for &view in computed {
+                if let Some(id) = rowset_for(view, t) {
+                    needed[id] = true;
+                }
+            }
+            for id in 0..4 {
+                let set = &mut self.spectra[i].sets[id];
+                set.clear();
+                if !needed[id] {
+                    continue;
+                }
+                let len = u.lens[id];
+                for r in 0..u.rows {
+                    self.fft.spectrum(&u.sets[id][r * len..(r + 1) * len], n, &mut self.spec_tmp);
+                    set.extend_from_slice(&self.spec_tmp);
+                }
+            }
+        }
+        // Shared bare block spectrum per z.
+        let shared_rows = if units.iter().any(|u| u.bare && u.rows > 1) { q } else { 1 };
+        self.shared_spec.resize_with(shared_rows, Vec::new);
+        if bare_exists {
+            for zi in 0..shared_rows {
+                let s = &mut self.shared_spec[zi];
+                s.clear();
+                s.resize(half, Complex::new(1.0, 0.0));
+                for (i, u) in units.iter().enumerate().filter(|(_, u)| u.bare) {
+                    for (a, b) in s.iter_mut().zip(self.spectra[i].row(SET_BASE, u.rows, zi, half)) {
+                        *a *= b;
+                    }
+                }
+            }
+        }
+        for (vi, &view) in computed.iter().enumerate() {
+            let uses_shared = bare_exists && view != View::Ceded;
+            let pairs: Vec<(usize, usize)> = units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| !u.bare)
+                .filter_map(|(i, u)| rowset_for(view, &terms[u.code]).map(|id| (i, id)))
+                .collect();
+            let any_corr = pairs.iter().any(|&(i, _)| units[i].rows > 1) || (uses_shared && shared_rows > 1);
+            let nodes = if any_corr { q } else { 1 };
+            self.spec_acc.clear();
+            self.spec_acc.resize(half, Complex::new(0.0, 0.0));
+            for zi in 0..nodes {
+                self.spec_prod.clear();
+                if uses_shared {
+                    self.spec_prod.extend_from_slice(&self.shared_spec[if shared_rows > 1 { zi } else { 0 }]);
+                } else {
+                    self.spec_prod.resize(half, Complex::new(1.0, 0.0));
+                }
+                for &(i, id) in &pairs {
+                    for (a, b) in self.spec_prod.iter_mut().zip(self.spectra[i].row(id, units[i].rows, zi, half)) {
+                        *a *= b;
+                    }
+                }
+                let wq = if any_corr { self.w[zi] } else { 1.0 };
                 for (a, p) in self.spec_acc.iter_mut().zip(&self.spec_prod) {
                     *a += wq * p;
                 }
             }
             let mut spec = std::mem::take(&mut self.spec_acc);
-            self.fft.inverse_into(&mut spec, total, &mut self.pmf);
+            self.fft.inverse_into(&mut spec, n, totals[vi], &mut pmfs[vi]);
             self.spec_acc = spec;
-        } else {
-            for zi in 0..q {
-                let first = correlated[0];
-                let len = lens[first];
-                self.acc.clear();
-                self.acc
-                    .extend_from_slice(&rows_for(&view_rows, &units[first])[zi * len..(zi + 1) * len]);
-                for &i in &correlated[1..] {
-                    let len = lens[i];
-                    let row = &rows_for(&view_rows, &units[i])[zi * len..(zi + 1) * len];
-                    convolve_direct(&self.acc, row, &mut self.tmp);
-                    std::mem::swap(&mut self.acc, &mut self.tmp);
-                }
-                if self.indep.len() > 1 {
-                    convolve_direct(&self.acc, &self.indep, &mut self.tmp);
-                    std::mem::swap(&mut self.acc, &mut self.tmp);
-                }
-                let wq = self.w[zi];
-                for (p, a) in self.pmf.iter_mut().zip(&self.acc) {
-                    *p += wq * a;
-                }
-            }
         }
-        self.view_rows = view_rows;
-        use_fft
     }
 }
 
@@ -589,17 +881,19 @@ pub fn multiunit_views(
             h,
             fft: FftCache::default(),
             maps: HashMap::new(),
-            convolution: config.convolution,
-            view_rows: Vec::new(),
-            indep: Vec::new(),
             acc: Vec::new(),
             tmp: Vec::new(),
             pmf: Vec::new(),
-            spec_indep: Vec::new(),
+            shared_indep: Vec::new(),
+            shared_corr: Vec::new(),
+            spectra: Vec::new(),
+            shared_spec: Vec::new(),
             spec_acc: Vec::new(),
             spec_prod: Vec::new(),
             spec_tmp: Vec::new(),
         };
+        let mut pmfs: Vec<Vec<f64>> = (0..computed.len()).map(|_| Vec::new()).collect();
+        let mut units: Vec<LiveUnit> = Vec::new();
         for e in first..last {
             if !event_live[e] {
                 continue;
@@ -609,7 +903,7 @@ pub fn multiunit_views(
             partial.valid_events += 1;
             rate_acc.add(lam);
             // Live units with their base conditional rows.
-            let mut units: Vec<LiveUnit> = Vec::new();
+            units.clear();
             let mut mu_sum = 0.0;
             for row in start..end {
                 let class = classes[row];
@@ -628,53 +922,49 @@ pub fn multiunit_views(
                     beta: plan.beta,
                 })?;
                 mu_sum += plan.mean_loss;
+                let code = input.unit_code[row] as usize;
+                let t = &terms[code];
                 units.push(LiveUnit {
                     row,
+                    code,
                     plan,
-                    n: n_unit,
                     rows: nodes.len(),
-                    base,
-                    slot: units.len(),
+                    sets: [base, Vec::new(), Vec::new(), Vec::new()],
+                    lens: [n_unit, 0, 0, 0],
+                    bare: !t.has_policy_terms() && !t.has_reinsurance(),
                 });
             }
             partial.valid_rows += units.len();
             aal_acc.add(lam * mu_sum);
+            worker.materialize(&mut units, terms, &computed);
+            let use_fft = match config.convolution {
+                Convolution::Direct => false,
+                Convolution::Fft => true,
+                Convolution::Auto => {
+                    let (direct, fft) = worker.estimate(&units, terms, &computed);
+                    fft * FFT_COST_FACTOR < direct
+                }
+            };
+            if use_fft {
+                worker.fft_views(&units, terms, &computed, &mut pmfs);
+                partial.fft_paths += 1;
+            } else {
+                worker.direct_views(&units, terms, &computed, &mut pmfs);
+                partial.direct_paths += 1;
+            }
             let layer_means: Vec<LayerMeans> = units.iter().map(|u| LayerMeans::new(&u.plan)).collect();
-            worker.view_rows.resize_with(units.len(), Vec::new);
             for (vi, &view) in computed.iter().enumerate() {
-                // Transform base rows through the view maps; identity maps
-                // leave the slot empty so the base rows are used directly.
-                let mut lens = Vec::with_capacity(units.len());
-                for (i, u) in units.iter().enumerate() {
-                    let code = input.unit_code[u.row] as usize;
-                    let map = worker.view_map(code, &terms[code], view, u.n).clone();
-                    lens.push(map.support_len);
-                    let slot = &mut worker.view_rows[i];
-                    slot.clear();
-                    if !map.identity {
-                        slot.resize(u.rows * map.support_len, 0.0);
-                        for (r, dst) in u.base.chunks_exact(u.n).zip(slot.chunks_exact_mut(map.support_len)) {
-                            map.apply(r, dst);
-                        }
-                    }
-                }
-                let total = lens.iter().map(|l| l - 1).sum::<usize>() + 1;
-                let used_fft = worker.convolve_event(&units, &lens, total);
-                if used_fft {
-                    partial.fft_paths += 1;
-                } else {
-                    partial.direct_paths += 1;
-                }
-                let mass: f64 = worker.pmf.iter().sum();
+                let pmf = &pmfs[vi];
+                let mass: f64 = pmf.iter().sum();
                 partial.max_mass_error = partial.max_mass_error.max((mass - 1.0).abs());
                 if vi < n_views {
-                    for (dst, &p) in partial.views[vi].iter_mut().zip(&worker.pmf) {
+                    for (dst, &p) in partial.views[vi].iter_mut().zip(pmf) {
                         *dst += lam * p;
                     }
                     let analytic: f64 = units
                         .iter()
                         .zip(&layer_means)
-                        .map(|(u, lm)| lm.view_mean(&terms[input.unit_code[u.row] as usize], view))
+                        .map(|(u, lm)| lm.view_mean(&terms[u.code], view))
                         .sum();
                     analytic_acc[vi].add(lam * analytic);
                 }
@@ -690,10 +980,9 @@ pub fn multiunit_views(
                         max_loss: units.iter().map(|u| input.max_loss[u.row]).sum(),
                     };
                     let rolled_plan = prepare_unit(&rolled, "rolled", VariancePolicy::default())?;
-                    let rolled_pmf = marginal_pmf(&rolled_plan, h, total);
-                    let (sd_exact, sd_rolled) = (sd_of(&worker.pmf, h), sd_of(&rolled_pmf, h));
-                    let (q_exact, q_rolled) =
-                        (quantile_of(&worker.pmf, h, 0.99), quantile_of(&rolled_pmf, h, 0.99));
+                    let rolled_pmf = marginal_pmf(&rolled_plan, h, pmf.len());
+                    let (sd_exact, sd_rolled) = (sd_of(pmf, h), sd_of(&rolled_pmf, h));
+                    let (q_exact, q_rolled) = (quantile_of(pmf, h, 0.99), quantile_of(&rolled_pmf, h, 0.99));
                     partial.roll_up.push(RollUpEntry {
                         event_row: start,
                         units: units.len(),
@@ -884,8 +1173,13 @@ mod tests {
         config.views = vec![View::GroundUp];
         config.z_nodes = 4;
         let result = multiunit_views(&input(&r), &terms, &config).unwrap();
-        let p1 = marginal_pmf(&UnitPlan::from_row(&classify_unit_row(0, &input(&r).spec(0), VariancePolicy::default(), &mut Diagnostics::default()).unwrap(), &input(&r).spec(0)), 10.0, 101);
-        let p2 = marginal_pmf(&UnitPlan::from_row(&classify_unit_row(1, &input(&r).spec(1), VariancePolicy::default(), &mut Diagnostics::default()).unwrap(), &input(&r).spec(1)), 10.0, 201);
+        let plan = |row: usize| {
+            let spec = input(&r).spec(row);
+            let class = classify_unit_row(row, &spec, VariancePolicy::default(), &mut Diagnostics::default()).unwrap();
+            UnitPlan::from_row(&class, &spec)
+        };
+        let p1 = marginal_pmf(&plan(0), 10.0, 101);
+        let p2 = marginal_pmf(&plan(1), 10.0, 201);
         let mut want = Vec::new();
         convolve_direct(&p1, &p2, &mut want);
         assert_eq!(result.meta.grid_length, 301);
@@ -901,12 +1195,14 @@ mod tests {
             (1, 0, 0.010, 200.0, 100.0, 150.0, 1000.0),
             (1, 1, 0.010, 500.0, 300.0, 200.0, 2000.0),
             (1, 2, 0.010, 300.0, 50.0, 100.0, 800.0),
+            (1, 3, 0.010, 150.0, 40.0, 0.0, 600.0),
             (2, 0, 0.020, 250.0, 0.0, 200.0, 1000.0),
             (2, 2, 0.020, 100.0, 120.0, 0.0, 500.0),
             (3, 1, 0.005, 400.0, 80.0, 60.0, 1200.0),
             (4, 0, 0.003, 300.0, 0.0, 0.0, 1000.0),
             (4, 1, 0.003, 600.0, 500.0, 500.0, 2000.0), // 1000^2 >= 600 * 1400: clamped
             (4, 2, 0.003, 150.0, 60.0, 40.0, 600.0),
+            (4, 3, 0.003, 200.0, 30.0, 70.0, 700.0),
             (5, 0, 0.0, 200.0, 50.0, 50.0, 1000.0),
             (6, 2, 0.007, 700.0, 10.0, 10.0, 600.0),
             (6, 1, 0.007, 200.0, 40.0, 30.0, 900.0),
@@ -918,6 +1214,7 @@ mod tests {
             parse_terms_line(TOWER).unwrap(),
             parse_terms_line("unit b 1000 xs 0 occurrence net of 100 po 400 xs 100").unwrap(),
             UnitTerms::bare("c"),
+            UnitTerms::bare("d"),
         ]
     }
 
@@ -945,17 +1242,25 @@ mod tests {
             assert!((mass - total_rate).abs() < 1e-13);
         }
         assert!(meta.max_mass_error < 1e-12);
-        assert_eq!((meta.events, meta.valid_events, meta.valid_rows), (6, 5, 10));
+        assert_eq!((meta.events, meta.valid_events, meta.valid_rows), (6, 5, 12));
         assert_eq!(meta.diagnostics.get(Category::ZeroRate).count, 1);
         assert_eq!(meta.diagnostics.get(Category::MeanExceedsMax).count, 1);
         assert_eq!(meta.diagnostics.get(Category::SigmaClamped).count, 1);
         let roll_up = meta.roll_up.as_ref().unwrap();
-        assert_eq!(roll_up.iter().map(|e| e.event_row).collect::<Vec<_>>(), vec![0, 3, 6]);
+        assert_eq!(roll_up.iter().map(|e| e.event_row).collect::<Vec<_>>(), vec![0, 4, 7]);
         assert!(roll_up.iter().all(|e| e.sd_ratio.is_finite() && e.sd_ratio > 0.0));
         // Analytic means reconcile within the Q = 8 midpoint quadrature error.
         for vi in 0..4 {
             let rel = meta.view_mean_error[vi].abs() / meta.analytic_view_mean[vi].abs();
             assert!(rel < 5e-2, "view {vi}: {rel}");
+        }
+        // Auto picks one of the two and reproduces it.
+        config.convolution = Convolution::Auto;
+        let auto = multiunit_views(&input(&r), &terms, &config).unwrap();
+        for (a, d) in auto.views.iter().zip(&direct.views) {
+            for (x, y) in a.iter().zip(d) {
+                assert!((x - y).abs() < 1e-14);
+            }
         }
     }
 

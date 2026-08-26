@@ -11,8 +11,9 @@ spaced, rate-weighted loss-grid distributions:
 Both are mapped to the grid g_i = i·h by a linear deposit rule that preserves
 mass and first moment exactly. The mathematical contract is
 `secondary-uncertainty-mathematical-specification.md`; the implementation plans
-are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
-(1.6.0 onward: joint multi-unit secondary uncertainty, unit terms, view totals).
+are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and
+`dev/done/plan-multiunit.md` (1.6.0-1.11.0: joint multi-unit secondary
+uncertainty, unit terms, view totals).
 
 ## Status
 
@@ -29,7 +30,7 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
 | [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | done |
 | [terms-grammar] Rust parser + view-map compiler | 1.9.0 | done |
 | [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | done |
-| [ferocious-multiunit] own erf, real FFTs, 1M unit-row report | 1.11.0 | planned |
+| [ferocious-multiunit] own erf, real FFTs, cross-view sharing, 1M unit-row report | 1.11.0 | done |
 
 ## Layout
 
@@ -69,6 +70,9 @@ cargo test -p eltq-core                        # Rust unit + property tests
 cargo bench -p eltq-core                       # criterion kernel benchmarks
 uv run python benchmarks/run_end_to_end.py     # 1M-row end-to-end benchmark;
                                                # appends benchmarks/results.json
+uv run python benchmarks/run_multiunit.py      # 1M unit-row multi-unit benchmark
+                                               # (100k events x 10 units); appends
+uv run python benchmarks/z_convergence.py      # shared-factor quadrature study
 uv run --with jupyter --with matplotlib jupyter lab
                                                # demo: notebooks/eltq_demo.ipynb
 ```
@@ -87,6 +91,13 @@ Determinism contract: for a fixed input, config (including `chunk_rows`,
 default 65536) and build, output arrays are bitwise reproducible regardless
 of `threads` and work stealing. Reordering input rows changes results only
 within floating-point summation tolerance.
+
+Multi-unit route (`benchmarks/report-1.11.0.md`, same laptop): ~0.91M unit
+rows (100k events x 10 units, typical term sparsity) with all four views at
+Q = 32 in 22.5 s, ground_up only in 15.2 s, Q = 8 in 7.9 s; bitwise identical
+across thread counts (whole-event chunks, default 2048 rows); the two-unit
+joint at reference accuracy (Q = 1001) in 10 ms. The wheel is built with
+`target-cpu=native` (`.cargo/config.toml`), so rebuild after moving machines.
 
 ## Python API
 

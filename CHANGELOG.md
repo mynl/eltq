@@ -3,6 +3,74 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.0] - 2026-08-26
+
+### Added
+
+- [ferocious-multiunit] Own `erfc` / `erf` in `eltq-core::normal` (Cody's
+  rational Chebyshev approximations over the CALERF ranges, a straight
+  polynomial pipeline per range that vectorizes across a row of edge
+  scores), held to `libm::erfc` at 1e-15 relative over the full range by a
+  dense sweep including the range switch points.
+- Real FFTs: `convolve::FftCache` now plans `realfft` transforms (an n-point
+  real row has an n/2 + 1 point spectrum, halving the transform work),
+  cached per worker per size, with the transform scratch reused.
+- Cross-view sharing in the per-event engine (`views.rs` rewritten around
+  row sets): a unit materializes only the distinct row sets its terms
+  produce (base for ground_up; gross after policy terms; ceded and net
+  after reinsurance), so a unit without policy terms contributes its base
+  rows to gross and net, one without reinsurance has net = gross and a ceded
+  atom at zero that drops out of the ceded convolution entirely. Bare units
+  (no terms at all) form one shared block convolved once per z node and
+  reused by ground_up, gross and net; on the FFT path one event-wide size
+  lets every (unit, row set, z) spectrum be transformed once and multiplied
+  into each view, with the shared block's spectrum product formed once per
+  z. The direct / FFT choice is made per event from the operations each
+  path would actually run (`FFT_COST_FACTOR` calibrated on the benchmark so
+  `auto` tracks the faster path).
+- Whole-event chunks default to 2048 rows (`DEFAULT_MULTI_CHUNK_ROWS`)
+  instead of 65536, so a 100k-row portfolio spreads across every core.
+- `.cargo/config.toml` sets `target-cpu=native` (the wheel is built from
+  source on each machine by `uv sync`; the file is now a uv cache key so
+  changing it rebuilds). Per-element kernels vectorize without reordering
+  any reduction, so the determinism contract is untouched.
+- `benchmarks/run_multiunit.py`: the 1M unit-row harness (100k events x 10
+  units, mixed regimes and typical term sparsity): all four views by
+  convolution mode, ground_up only (the all-four delta), Q = 32 versus 8,
+  Gauss-Hermite, thread scaling, the two-unit joint at Q = 1001 and 4001,
+  bitwise determinism across thread counts, peak RSS; appends to
+  `benchmarks/results.json` under `"suite": "multiunit"`. Report:
+  `benchmarks/report-1.11.0.md`.
+
+### Changed
+
+- Plan `dev/plan-multiunit.md` completed and moved to `dev/done/`.
+
+### Fixed
+
+- `batched::beta_quantiles` accepts repeated endpoint targets (0 at the
+  start, 1 at the end): Gauss-Hermite nodes at Q >= 32 reach |z| ~ 10, where
+  `Phi(w_c z)` rounds to exactly 0 or 1 and the comonotone quantile walk
+  rejected the run with a kernel failure. Regression test on the fixture
+  (Q = 64 Gauss-Hermite) and the joint.
+
+### Notes
+
+- Performance (`benchmarks/report-1.11.0.md`, i7-7820HQ 4C/8T): ~0.91M unit
+  rows (100k events x 10 units, single-unit events thinned) with all four
+  views at Q = 32 in 22.5 s (40.5k rows/s); ground_up only 15.2 s; Q = 8
+  in 7.9 s; threads 1 / 2 / 4 / 8: 81.9 / 43.8 / 27.7 / 22.3 s; bitwise
+  identical across thread counts; the two-unit joint at Q = 1001 in 9.9 ms;
+  peak RSS 231 MiB. The 1.10.0 engine did the 100k-row probe in 15.8 s;
+  1.11.0 does it in 4.5 s (12.1 s single-threaded). The plan's single-digit
+  headline was for the Xeon workstation, which was not measured; ~85% of the
+  remaining time is the per-z convolution, so the next structural gain is
+  the optional Chebyshev interpolation across z.
+- The one-unit route measured 135k rows/s on this day against the 1.4.0
+  history's 180-230k; an A/B against the 1.5.0 build in a separate worktree
+  gave 112-124k rows/s on the same day, so the gap is machine state, not a
+  regression.
+
 ## [1.10.0] - 2026-08-26
 
 ### Added
@@ -199,7 +267,7 @@ All notable changes to this project are documented here, following
 
 ### Added
 
-- `dev/plan-multiunit.md`: the plan for 1.6.0-1.11.0 (joint multi-unit
+- `dev/done/plan-multiunit.md`: the plan for 1.6.0-1.11.0 (joint multi-unit
   secondary uncertainty, DecL-style unit terms, per-view totals), plus its
   mathematical companions `dev/secondary-uncertainty-additivity.md` and
   `dev/secondary_two_units_reference.py`.

@@ -228,7 +228,7 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "eltq-core"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "criterion",
  "csv",
@@ -236,6 +236,7 @@ dependencies = [
  "matrixmultiply",
  "proptest",
  "rayon",
+ "realfft",
  "rustfft",
  "serde_json",
  "statrs",
@@ -244,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "eltq-python"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "eltq-core",
  "numpy",
@@ -804,6 +805,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "realfft"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f821338fddb99d089116342c46e9f1fbf3828dba077674613e734e01d6ea8677"
+dependencies = [
+ "rustfft",
 ]
 
 [[package]]
