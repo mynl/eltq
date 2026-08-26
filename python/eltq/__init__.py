@@ -15,8 +15,9 @@ roughly forty times slower. The reference backend ignores ``threads`` and
 Multi-unit route (1.7.0): ``multiunit_views`` accumulates the total event
 severity by view (ground_up, gross, ceded, net) for event x unit rows with
 DecL-style unit terms, and ``joint_two_units`` returns the exact bucketed
-bivariate pmf of one event across two units. Both are served by the SciPy
-reference ``eltq.reference_multiunit`` until the Rust engine lands.
+bivariate pmf of one event across two units. ``joint_two_units`` runs on the
+Rust extension from 1.8.0; ``multiunit_views`` is served by the SciPy
+reference ``eltq.reference_multiunit`` until the Rust engine lands (1.10.0).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ import numpy as np
 from eltq._meta import JointMeta, Meta, MultiMeta, RowIssues
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 try:
     from eltq._eltq import (
@@ -44,6 +45,11 @@ try:
         quantize_csv as _rust_quantize_csv,
     )
 
+    try:
+        from eltq._eltq import joint_two_units as _rust_joint_two_units
+    except ImportError:  # extension older than 1.8.0
+        _rust_joint_two_units = None
+
     BACKEND = "rust"
 except ImportError:
     try:
@@ -58,6 +64,7 @@ except ImportError:
 
     BACKEND = "reference"
     __rust_version__ = None
+    _rust_joint_two_units = None
 
 if BACKEND == "rust":
 
@@ -537,6 +544,15 @@ def joint_two_units(
     nodes (``z_rule`` midpoint or gauss_hermite); marginals of the pmf agree
     with directly bucketing each beta up to quadrature error.
     """
+    if _rust_joint_two_units is not None:
+        pmf, x1, x2, meta_dict = _rust_joint_two_units(
+            tuple(float(v) for v in unit1), tuple(float(v) for v in unit2),
+            bucket_size=float(bucket_size), n1=int(n1), n2=int(n2),
+            z_nodes=int(z_nodes), z_rule=z_rule, variance_policy=variance_policy,
+            clamp_factor=clamp_factor,
+        )
+        meta_dict["notes"] = tuple(tuple(notes) for notes in meta_dict["notes"])
+        return pmf, x1, x2, JointMeta(**meta_dict)
     result = _via_reference(
         lambda module: module.secondary_two_units,
         [unit1, unit2], bucket_size, n1, n2, n_z=z_nodes, z_rule=z_rule,

@@ -72,7 +72,8 @@ def test_joint_independent_units_are_an_outer_product(multi):
     outer = np.outer(pmf.sum(axis=1), pmf.sum(axis=0))
     assert np.abs(pmf - outer).max() < 1e-15
     assert meta.copula_normal_correlation == 0.0
-    assert np.abs(pmf.sum(axis=1) - direct_marginal(a, N1)).max() < 1e-14
+    # Rust's own incomplete beta agrees with SciPy's to ~1e-13.
+    assert np.abs(pmf.sum(axis=1) - direct_marginal(a, N1)).max() < 5e-13
 
 
 def test_joint_comonotone_units(multi):

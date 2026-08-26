@@ -2,7 +2,7 @@
 
 Date: 2026-08-26
 Status: finalized 2026-08-26, the five open questions resolved (see Resolved
-decisions); in execution. Progress: 1.6.0 [sigma-rule] and 1.7.0 [reference-n-unit] done 2026-08-26.
+decisions); in execution. Progress: 1.6.0 [sigma-rule], 1.7.0 [reference-n-unit], 1.8.0 [joint-two-unit] done 2026-08-26.
 
 ## Context
 

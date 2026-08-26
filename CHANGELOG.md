@@ -3,6 +3,40 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.8.0] - 2026-08-26
+
+### Added
+
+- [joint-two-unit] Rust two-unit joint in `eltq-core::multiunit`: unit
+  preparation (`prepare_unit`: kinds atom / comonotone / beta, variance
+  policies, copula weights), edge scores `y_e = Phi^{-1}(I_{edge/M}(alpha,
+  beta))` computed once per unit, conditional matrices `(Q x n)` by adjacent
+  differences of `Phi((y_e - w_c z) / w_I)` (atoms and comonotone units by
+  linear deposits, the latter through the batched quantile walk at the
+  ascending targets `Phi(w_c z_q)`), and the joint `C_1^T diag(w) C_2` as
+  one `matrixmultiply::dgemm`. `JointMeta` mirrors the Python dataclass.
+- `eltq-core::normal`: normal cdf via `libm::erfc` (the fdlibm port, below
+  one ulp; statrs's erfc loses ~1e-11 relative in the tails, caught by the
+  edge-score round trip) and Wichura's AS241 quantile (~1e-16 relative).
+  `eltq-core::quadrature`: midpoint quantile nodes and Gauss-Hermite by
+  Golub-Welsch with a first-row-only implicit-shift QL (O(Q^2), stable at
+  any Q, symmetrized bitwise).
+- `batched::beta_quantiles(alpha, beta, ascending_targets, out)`: the
+  midpoint kernel's warm-started walk exposed for arbitrary ascending
+  targets (lower half direct, upper half on the reflected shape with exact
+  complements); the comonotone path is a sorted quantile walk, no FFT.
+- PyO3 `joint_two_units` binding (zero-copy `(n1, n2)` pmf, grids, meta
+  dict, compute detached from the interpreter); `eltq.joint_two_units` now
+  runs on Rust when the extension is present and on the reference otherwise.
+  `GridOverflowError` raised by the Rust backend now carries
+  `required_length` and `examples` like the reference's.
+- Tests: Rust unit tests for the normal functions, both quadrature rules
+  (moments exact, closed forms, symmetry), unit preparation and policies,
+  conditional rows as distributions, GEMM versus the naive triple loop,
+  independent units as an outer product, typed errors; `tests/joint_golden.rs`
+  against `fixtures/golden/joint_small.*` (rtol 1e-9). The Python multi-unit
+  suite's `eltq` variant of every joint test now exercises the Rust path.
+
 ## [1.7.0] - 2026-08-26
 
 ### Added

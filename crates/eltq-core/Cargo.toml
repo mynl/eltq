@@ -7,6 +7,8 @@ description = "Pure-Rust core for ELT secondary-uncertainty quantization"
 
 [dependencies]
 csv = { workspace = true }
+libm = "0.2"
+matrixmultiply = "0.3"
 rayon = { workspace = true }
 statrs = { workspace = true }
 thiserror = { workspace = true }

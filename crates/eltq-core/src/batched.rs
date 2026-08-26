@@ -70,6 +70,56 @@ pub fn beta_midpoint_quantiles(alpha: f64, beta: f64, out: &mut [f64]) -> Result
     Ok(())
 }
 
+/// Fill `out[k] = Q(alpha, beta; targets[k])` for strictly ascending targets
+/// in [0, 1] (targets at the endpoints yield 0 and 1 exactly).
+///
+/// Same machinery as the midpoint kernel: the lower half is walked
+/// directly and the upper half on the reflected distribution with exactly
+/// formed complements, so both tails keep full relative precision.
+pub fn beta_quantiles(alpha: f64, beta: f64, targets: &[f64], out: &mut [f64]) -> Result<(), KernelError> {
+    assert_eq!(targets.len(), out.len());
+    if targets.is_empty() {
+        return Ok(());
+    }
+    if !(alpha > 0.0 && beta > 0.0 && alpha.is_finite() && beta.is_finite()) {
+        return Err(KernelError);
+    }
+    if targets.windows(2).any(|w| w[1] <= w[0]) || targets.iter().any(|u| !(0.0..=1.0).contains(u)) {
+        return Err(KernelError);
+    }
+    let lower = BetaFn::new(alpha, beta);
+    let cdf_half = lower.cdf(0.5);
+    if !cdf_half.is_finite() {
+        return Err(KernelError);
+    }
+    let split = targets.partition_point(|&u| u <= cdf_half);
+    let interior = |u: f64| u > 0.0 && u < 1.0;
+    walk(
+        &lower,
+        (0..split).filter(|&i| interior(targets[i])).map(|i| (i, targets[i])),
+        out,
+    )?;
+    if split < targets.len() {
+        let upper = BetaFn::new(beta, alpha);
+        walk_map(
+            &upper,
+            (split..targets.len())
+                .rev()
+                .filter(|&j| interior(targets[j]))
+                .map(|j| (j, 1.0 - targets[j])),
+            |j, y| out[j] = 1.0 - y,
+        )?;
+    }
+    for (slot, &u) in out.iter_mut().zip(targets) {
+        if u == 0.0 {
+            *slot = 0.0;
+        } else if u == 1.0 {
+            *slot = 1.0;
+        }
+    }
+    Ok(())
+}
+
 /// Walk ascending targets writing `out[idx] = x` directly.
 fn walk<I>(bf: &BetaFn, targets: I, out: &mut [f64]) -> Result<(), KernelError>
 where
@@ -322,6 +372,38 @@ mod tests {
                 assert!(pair[1] >= pair[0] - 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn arbitrary_targets_agree_with_midpoint_kernel() {
+        for (a, b) in [(2.5, 7.5), (0.5, 0.5), (300.0, 100.0), (40.0, 2.0)] {
+            let k = 32;
+            let targets: Vec<f64> = (0..k).map(|i| (i as f64 + 0.5) / k as f64).collect();
+            let mut got = vec![0.0; k];
+            beta_quantiles(a, b, &targets, &mut got).unwrap();
+            let want = batched(a, b, k);
+            for (g, w) in got.iter().zip(&want) {
+                assert!((g - w).abs() <= 1e-13, "a={a} b={b}: {g} vs {w}");
+            }
+            // Irregular ascending targets round-trip through the cdf.
+            let bf = BetaFn::new(a, b);
+            // Upper targets stop where 1 - x stays representable for every
+            // shape (Beta(0.5, 0.5) at u = 1 - 1e-9 rounds to exactly 1).
+            let irregular = [1e-9, 0.01, 0.2, 0.5, 0.9, 0.999, 0.999_999];
+            let mut xs = vec![0.0; irregular.len()];
+            beta_quantiles(a, b, &irregular, &mut xs).unwrap();
+            for (x, u) in xs.iter().zip(&irregular) {
+                // One ulp of x moves the cdf by pdf(x) ulp(x): steep tails
+                // (Beta(0.5, 0.5) near 1) cannot round-trip tighter than that.
+                let tolerance = 1e-12 * u.max(1e-3) + 8.0 * f64::EPSILON * x * bf.pdf(*x);
+                assert!((bf.cdf(*x) - u).abs() <= tolerance, "a={a} b={b} u={u} x={x}");
+            }
+        }
+        let mut xs = [0.0; 3];
+        beta_quantiles(2.0, 3.0, &[0.0, 0.5, 1.0], &mut xs).unwrap();
+        assert_eq!(xs[0], 0.0);
+        assert_eq!(xs[2], 1.0);
+        assert!(beta_quantiles(2.0, 3.0, &[0.5, 0.4], &mut xs[..2]).is_err());
     }
 
     #[test]

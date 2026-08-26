@@ -26,7 +26,7 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
 | [fallback] SciPy backend in-package + demo notebook | 1.5.0 | done |
 | [sigma-rule] total sd = σ_I + σ_C (Burke 2016), outright | 1.6.0 | done |
 | [reference-n-unit] n-unit reference, terms grammar, views | 1.7.0 | done |
-| [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | planned |
+| [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | done |
 | [terms-grammar] Rust parser + view-map compiler | 1.9.0 | planned |
 | [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | planned |
 | [ferocious-multiunit] own erf, real FFTs, 1M unit-row report | 1.11.0 | planned |
@@ -169,9 +169,10 @@ the layer; a plain number is an amount of the layer limit (`100 po 400 xs
 100` cedes 25%). Breakpoints must be multiples of `bucket_size`. Units
 without a line get no terms. The shared factor is integrated by midpoint
 quantile nodes (default) or Gauss-Hermite; `benchmarks/z-convergence-1.7.0.md`
-records the convergence study behind the default. Until the Rust engine
-lands (1.10.0) both functions run on the SciPy reference
-`eltq.reference_multiunit`.
+records the convergence study behind the default. `joint_two_units` runs in
+Rust from 1.8.0 (conditional matrices plus one GEMM); `multiunit_views` runs
+on the SciPy reference `eltq.reference_multiunit` until the Rust engine lands
+(1.10.0).
 
 ## Input schema
 

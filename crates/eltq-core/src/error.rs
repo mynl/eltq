@@ -55,4 +55,14 @@ pub enum Error {
          (alpha = {alpha}, beta = {beta})"
     )]
     KernelFailure { row: usize, alpha: f64, beta: f64 },
+    #[error("z_nodes must be >= 1, got {0}")]
+    BadZNodes(usize),
+    #[error("unknown z_rule {0:?} (expected midpoint or gauss_hermite)")]
+    BadZRule(String),
+    #[error("{unit}: {message}")]
+    UnitInvalid { unit: String, message: String },
+    #[error("{unit}: sigma^2 = {sigma2} >= mu (M - mu) = {v_max} is inadmissible for a beta")]
+    UnitInadmissibleVariance { unit: String, sigma2: f64, v_max: f64 },
+    #[error("the drop variance policy is not available for the two-unit joint")]
+    BadJointPolicy,
 }
