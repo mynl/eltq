@@ -1,0 +1,706 @@
+---
+title: Bivariate severity across two units
+subtitle: eltq 1.11.0 — `joint_two_units`, with and without secondary uncertainty
+date: '2026-08-26'
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    embed-resources: true
+    fig-width: 8
+    fig-height: 4.5
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.19.5
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+## What this shows
+
+An event loss table gives, per event and per unit, four numbers: a mean loss
+`mean_loss`, two standard deviations `sd_indep` and `sd_corr`, and a maximum
+loss `max_loss`. **Secondary uncertainty** is the statement that those standard
+deviations mean something — that a unit's loss given the event is a random
+variable around `mean_loss`, not the number itself.
+
+For one unit that is a one-dimensional question, and `eltq.quantize_arrays`
+answers it. For **two** units it is a two-dimensional question, because the
+losses are not independent: they are driven by the same storm.
+`eltq.joint_two_units` answers that one, returning the full bucketed bivariate
+pmf for one event.
+
+This notebook builds the picture three times over:
+
+1. **one event**, two units — the joint pmf, and what the shared factor does to it;
+2. **a 10-event portfolio** — the rate-weighted bivariate severity, with and
+   without secondary uncertainty, side by side;
+3. **a 1000-event portfolio** — the same thing at a size where you would
+   actually use the fast route, cross-checked against `eltq.multiunit_views`.
+
+### The model in one page
+
+Event $e$ happens at rate $\lambda_e$. Given that it happens, unit $u$ loses
+
+$$X_{eu} = M_{eu}\,Y_{eu}, \qquad Y_{eu}\sim\mathrm{Beta}(\alpha,\beta),$$
+
+with the beta matched to mean $\mu_{eu}/M_{eu}$ and standard deviation
+$\sigma_{eu}/M_{eu}$, where the **total** standard deviation is the *sum*
+
+$$\sigma_{eu} = \sigma^{I}_{eu} + \sigma^{C}_{eu}$$
+
+(the vendor convention — Burke, Rau-Chaplin and Varghese 2016 — adopted
+outright in 1.6.0).
+
+The two units of one event are tied together by a one-factor Gaussian copula.
+Draw one shared standard normal $Z$ for the event and one idiosyncratic
+standard normal $\varepsilon_u$ per unit, and set
+
+$$Y_{eu} = F^{-1}_{\alpha,\beta}\!\big(\Phi(w^{C}_{eu} Z + w^{I}_{eu}\varepsilon_u)\big),
+\qquad w^{C} = \frac{\sigma^{C}}{\sqrt{(\sigma^{I})^2 + (\sigma^{C})^2}},\;\;
+w^{I} = \frac{\sigma^{I}}{\sqrt{(\sigma^{I})^2 + (\sigma^{C})^2}} .$$
+
+Note the asymmetry, which is deliberate and is the crux of the specification:
+**the components enter the marginal standard deviation arithmetically, while
+the copula weights normalize in quadrature.** The latent stays standard normal,
+so each unit's marginal is exactly the beta above; the correlation of the two
+latents is $\rho_Z = w^{C}_{e1} w^{C}_{e2}$.
+
+`joint_two_units` integrates $Z$ out by quadrature — `z_nodes` nodes, midpoint
+or Gauss-Hermite — and buckets each conditional beta onto a common grid of
+spacing $h$ by exact CDF differences. The result is a matrix `pmf[j, k]` =
+P(unit 1 in bucket $j$, unit 2 in bucket $k$), given the event.
+
+**Without** secondary uncertainty there is nothing to integrate: unit $u$ loses
+exactly $\mu_{eu}$, so the bivariate "distribution" for the event is a single
+atom at $(\mu_{e1},\mu_{e2})$. Across a portfolio it is a scatter of atoms, one
+per event, weighted by rate. That is the comparison drawn throughout.
+
+## Setup
+
+Run this notebook from the project environment so that `import eltq` picks up
+the compiled extension:
+
+```powershell
+uv run --with jupyter --with jupytext --with matplotlib jupyter lab dev/demo-bivariate-severity.qmd
+```
+
+then right-click the file in the JupyterLab browser and choose
+**Open With → Notebook** (jupytext reads `.qmd` directly). To render it to HTML
+instead: `uv run quarto render dev/demo-bivariate-severity.qmd`, or
+`quarto preview` if Quarto is on the PATH.
+
+```{python}
+import time
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
+
+import eltq
+
+print(f"eltq {eltq.__version__}, backend {eltq.BACKEND}")
+
+# The notebook runs with its own directory as cwd under both Jupyter and
+# Quarto; tolerate being run from the repository root too.
+FEATURES = next(p for p in (Path.cwd() / "features", Path.cwd() / "dev" / "features")
+                if p.is_dir())
+
+H = 20.0                              # grid spacing, loss currency units
+UNITS = ("coastal", "inland")         # unit 1, unit 2
+Z_EXACT = 1001                        # shared-factor nodes for the small runs
+Z_FAST = 256                          # ... and for the 1000-event portfolio
+```
+
+Chart styling: one sequential blue ramp for magnitude (the pmf heatmaps), and a
+fixed categorical order — blue, orange, aqua — for the series in the line
+charts. Colors are never cycled and never encode rank.
+
+```{python}
+SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
+SERIES = ("#2a78d6", "#eb6834", "#1baf7a")     # slot 1, 2, 3 — fixed order
+LOSS_CMAP = LinearSegmentedColormap.from_list(
+    "eltq_blue",
+    ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"],
+)
+LOSS_CMAP.set_bad(SURFACE)                     # zero probability = bare surface
+
+plt.rcParams.update({
+    "figure.facecolor": SURFACE, "axes.facecolor": SURFACE,
+    "savefig.facecolor": SURFACE, "figure.dpi": 120,
+    "axes.edgecolor": "#d8d7d2", "axes.labelcolor": INK_2, "text.color": INK,
+    "xtick.color": INK_2, "ytick.color": INK_2,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "axes.grid": True, "grid.color": "#e8e7e3", "grid.linewidth": 0.8,
+    "lines.linewidth": 2.0, "font.size": 9, "axes.titlesize": 10,
+    "legend.frameon": False,
+})
+```
+
+### Helpers
+
+A handful of small functions carry the whole notebook. The only piece of real
+machinery outside `eltq` is `deposit`, the one-dimensional linear deposit rule
+the package uses internally to place an atom on the grid: an atom at $v$ splits
+between the two neighboring nodes in proportion, preserving both mass and mean
+exactly. Its outer product places a *bivariate* atom, preserving mass and both
+means — that is how the "without secondary uncertainty" picture gets onto the
+same grid as the other one.
+
+```{python}
+def read_elt(name: str) -> pd.DataFrame:
+    """Read a two-unit ELT sample and check it has exactly our two units."""
+    elt = pd.read_csv(FEATURES / name)
+    assert set(elt.unit_id) == set(UNITS), f"expected units {UNITS}"
+    return elt
+
+
+def by_unit(elt: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Split an event x unit ELT into one event-indexed frame per unit."""
+    return {u: elt[elt.unit_id == u].set_index("event_id") for u in UNITS}
+
+
+def grid_lengths(elt: pd.DataFrame, h: float = H) -> tuple[int, int]:
+    """Nodes needed per unit to cover its largest maximum loss."""
+    frames = by_unit(elt)
+    return tuple(int(np.ceil(frames[u].max_loss.max() / h)) + 1 for u in UNITS)
+
+
+def unit_tuple(row) -> tuple[float, float, float, float]:
+    """The (mean, sd_indep, sd_corr, max) tuple `joint_two_units` expects."""
+    return (row.mean_loss, row.sd_indep, row.sd_corr, row.max_loss)
+
+
+def deposit(value: float, h: float, n: int) -> np.ndarray:
+    """Mass- and mean-preserving linear deposit of a unit atom at ``value``."""
+    weights = np.zeros(n)
+    t = value / h
+    i = int(np.floor(t))
+    if i >= n - 1:                     # at or past the last node
+        weights[n - 1] = 1.0
+        return weights
+    weights[i] += 1.0 - (t - i)
+    weights[i + 1] += t - i
+    return weights
+
+
+def portfolio_joint(elt, n1, n2, *, z_nodes=Z_EXACT, secondary=True, h=H):
+    """Rate-weighted bivariate severity over every event in ``elt``.
+
+    With ``secondary=True`` each event contributes its full joint pmf from
+    ``eltq.joint_two_units``; with ``secondary=False`` it contributes a single
+    bivariate atom at ``(mean_loss_1, mean_loss_2)``. Returns the accumulated
+    ``(n1, n2)`` array in rate units — it sums to the total event rate.
+    """
+    frames = by_unit(elt)
+    total = np.zeros((n1, n2))
+    for event_id in frames[UNITS[0]].index:
+        row1, row2 = (frames[u].loc[event_id] for u in UNITS)
+        if secondary:
+            block, _, _, _ = eltq.joint_two_units(
+                unit_tuple(row1), unit_tuple(row2),
+                bucket_size=h, n1=n1, n2=n2, z_nodes=z_nodes)
+        else:
+            block = np.outer(deposit(row1.mean_loss, h, n1),
+                             deposit(row2.mean_loss, h, n2))
+        total += float(row1.rate) * block
+    return total
+
+
+def total_loss(joint: np.ndarray, h: float = H):
+    """``(losses, weights)`` for the total X1 + X2 given the joint.
+
+    Exact: the two units share one bucket size, so bucket indices add and the
+    anti-diagonals of the joint accumulate directly.
+    """
+    n1, n2 = joint.shape
+    index = np.add.outer(np.arange(n1), np.arange(n2))
+    weights = np.bincount(index.ravel(), weights=joint.ravel(),
+                          minlength=n1 + n2 - 1)
+    return h * np.arange(n1 + n2 - 1), weights
+
+
+def moments(joint: np.ndarray, x1: np.ndarray, x2: np.ndarray) -> dict:
+    """Severity moments of a rate-weighted joint (conditional on an event)."""
+    p = joint / joint.sum()
+    p1, p2 = p.sum(axis=1), p.sum(axis=0)
+    m1, m2 = p1 @ x1, p2 @ x2
+    s1 = np.sqrt(max(p1 @ x1**2 - m1**2, 0.0))
+    s2 = np.sqrt(max(p2 @ x2**2 - m2**2, 0.0))
+    covariance = x1 @ p @ x2 - m1 * m2
+    return {"mean 1": m1, "mean 2": m2, "sd 1": s1, "sd 2": s2,
+            "correlation": covariance / (s1 * s2) if s1 > 0 and s2 > 0 else np.nan}
+```
+
+```{python}
+def heatmap(ax, joint, x1, x2, *, title, floor=1e-6, h=H):
+    """Log-scaled pmf heatmap: unit 1 on x, unit 2 on y, zeros left blank."""
+    def edges(x):
+        return np.r_[x - h / 2, x[-1] + h / 2]
+
+    top = joint.max()
+    mesh = ax.pcolormesh(edges(x1), edges(x2),
+                         np.ma.masked_where(joint <= 0.0, joint).T,
+                         cmap=LOSS_CMAP, norm=LogNorm(top * floor, top),
+                         shading="flat", rasterized=True)
+    ax.set(title=title, xlabel=f"{UNITS[0]} loss", ylabel=f"{UNITS[1]} loss")
+    ax.grid(False)
+    return mesh
+
+
+def show(fig, mesh=None, label="probability"):
+    """Attach a shared colorbar (when given a mesh) and lay the figure out."""
+    if mesh is None:
+        fig.tight_layout()
+        return fig
+    bar = fig.colorbar(mesh, ax=fig.axes, shrink=0.85, pad=0.02)
+    bar.set_label(label, color=INK_2)
+    bar.outline.set_visible(False)
+    return fig
+```
+
+## The sample portfolios
+
+Two synthetic files, both in the canonical multi-unit column layout
+(`event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss`), so the same
+data feeds `joint_two_units` and `multiunit_views` without reshaping. Two units
+appear in every event: **coastal** (maximum loss 1200) and **inland** (maximum
+loss 800) — two sites of one notional operator, hit by the same storm.
+Everything is invented; regenerate with
+`uv run python dev/features/make_two_unit_elt.py`.
+
+```{python}
+small = read_elt("two_unit_elt_10.csv")
+large = read_elt("two_unit_elt_1000.csv")
+n1, n2 = grid_lengths(small)
+x1, x2 = H * np.arange(n1), H * np.arange(n2)
+assert grid_lengths(large) == (n1, n2)     # same caps, so one grid serves both
+
+print(f"grid: {n1} x {n2} nodes at h = {H:g} "
+      f"(coastal to {x1[-1]:g}, inland to {x2[-1]:g})")
+for name, elt in (("10-event", small), ("1000-event", large)):
+    rate = elt.groupby("event_id").rate.first().sum()
+    print(f"{name:>10}: {elt.event_id.nunique():5d} events, total rate {rate:.4f}")
+```
+
+The ten handcrafted events cover the corners of the model — read the
+`sd_indep` / `sd_corr` split as "how much of this unit's uncertainty is its
+own, and how much is the storm's".
+
+```{python}
+fields = ["mean_loss", "sd_indep", "sd_corr"]
+wide = (small.pivot(index="event_id", columns="unit_id", values=fields)
+             .swaplevel(axis=1)
+             .reindex(columns=pd.MultiIndex.from_product([UNITS, fields]))
+             .round(1))
+wide.insert(0, "rate", small.groupby("event_id").rate.first())
+wide
+```
+
+Worth naming three of them, because they anchor everything below:
+
+- **ev03** has `sd_corr = 0` on both units: real secondary uncertainty, but no
+  shared factor, so the two losses are *independent given the event*.
+- **ev04** has `sd_indep = 0` on both: all the uncertainty is the storm, so each
+  loss is a strictly increasing function of one variable — comonotone.
+- **ev05** has both standard deviations zero: no secondary uncertainty at all.
+  For that event the two pictures below are identical, by construction.
+
+## One event, two units
+
+Take **ev01**, a typical storm — both sites carry their own uncertainty and
+both load on the shared factor.
+
+```{python}
+frames = by_unit(small)
+row1, row2 = (frames[u].loc["ev01"] for u in UNITS)
+pmf, gx1, gx2, meta = eltq.joint_two_units(
+    unit_tuple(row1), unit_tuple(row2), bucket_size=H, n1=n1, n2=n2,
+    z_nodes=Z_EXACT)
+
+fig, ax = plt.subplots(figsize=(5.6, 4.4))
+mesh = heatmap(ax, pmf, gx1, gx2, title="ev01 — joint severity given the event")
+ax.plot(row1.mean_loss, row2.mean_loss, "x", color=SERIES[1], markersize=9,
+        markeredgewidth=2, label="mean loss (no secondary uncertainty)")
+ax.legend(loc="upper right", labelcolor=INK_2)
+show(fig, mesh)
+plt.show()
+```
+
+The orange cross is the *entire* answer without secondary uncertainty. With it,
+the same event fills the rectangle. Both betas have $\alpha < 1$ here, so both
+marginals pile mass towards zero and the joint is heaviest at the origin and
+along the two axes — outcomes where one site is hit and the other is barely
+touched are entirely ordinary. The shared factor tilts the interior towards the
+diagonal; on a single panel that tilt is hard to see, which is what the next
+figure is for.
+
+`JointMeta` carries the derived parameters and the moment diagnostics, which
+are the first thing to look at when a result surprises you.
+
+```{python}
+print(f"beta parameters  alpha = {meta.alpha[0]:.4f}, {meta.alpha[1]:.4f}"
+      f"   beta = {meta.beta[0]:.4f}, {meta.beta[1]:.4f}")
+print(f"sigma used       {meta.sigma_used[0]:.2f}, {meta.sigma_used[1]:.2f}"
+      f"   (= sd_indep + sd_corr, after any clamp)")
+print(f"latent rho_Z     {meta.copula_normal_correlation:.4f}"
+      f"   -> loss correlation {meta.grid_correlation:.4f}")
+print(f"mass             {meta.total_mass:.12f}")
+print(f"mean  grid       {meta.grid_mean[0]:.4f}, {meta.grid_mean[1]:.4f}")
+print(f"      analytic   {meta.analytic_mean[0]:.4f}, {meta.analytic_mean[1]:.4f}")
+print(f"sd    grid       {meta.grid_sd[0]:.4f}, {meta.grid_sd[1]:.4f}")
+print(f"notes            {meta.notes}")
+```
+
+Two checks are always available: the pmf sums to one, and the grid means match
+the input means to bucketing error. The **loss** correlation sits below the
+**latent** correlation $\rho_Z$ — the copula transform is monotone but
+nonlinear, so it does not preserve linear correlation.
+
+### The dependence dial
+
+Hold each unit's total standard deviation fixed and move it from wholly
+idiosyncratic to wholly shared. In exact arithmetic the marginals do not move
+at all — the latent is standard normal whatever the split — and only the
+dependence changes. This is the single most useful picture in the notebook.
+
+```{python}
+total_sd = {u: r.sd_indep + r.sd_corr for u, r in zip(UNITS, (row1, row2))}
+
+
+def dial_units(share):
+    """The two unit tuples with the given fraction of sd on the shared factor."""
+    return [(r.mean_loss, sd * (1.0 - share), sd * share, r.max_loss)
+            for r, sd in zip((row1, row2), total_sd.values())]
+
+
+shares = [("all sd_indep\n(independent given the event)", 0.0),
+          ("as coded in the ELT", row1.sd_corr / total_sd[UNITS[0]]),
+          ("all sd_corr\n(comonotone)", 1.0)]
+
+fig, axes = plt.subplots(1, 3, figsize=(11.5, 3.8), sharex=True, sharey=True)
+marginals = {}
+for ax, (label, share) in zip(axes, shares):
+    block, _, _, dial_meta = eltq.joint_two_units(
+        *dial_units(share), bucket_size=H, n1=n1, n2=n2, z_nodes=Z_EXACT)
+    marginals[label] = block.sum(axis=1)
+    mesh = heatmap(ax, block, gx1, gx2,
+                   title=f"{label}\nrho_Z = {dial_meta.copula_normal_correlation:.2f}, "
+                         f"corr = {dial_meta.grid_correlation:.2f}")
+    if ax is not axes[0]:
+        ax.set_ylabel("")
+show(fig, mesh)
+plt.show()
+```
+
+Left: a product of the two marginals. Right: all the mass on a monotone curve —
+knowing one site's loss pins the other exactly. The middle panel is the ELT as
+coded, and it is what the shared factor buys you: a joint distribution that is
+neither extreme, controlled by one number per unit.
+
+Now check the claim that the marginals do not move — and watch it be *almost*
+true, in an instructive way:
+
+```{python}
+check = pd.DataFrame(
+    {label.splitlines()[0]: {"peak": m.max(), "mean": m @ gx1,
+                             "sd": np.sqrt(m @ gx1**2 - (m @ gx1) ** 2)}
+     for label, m in marginals.items()}).T
+labels = list(marginals)
+for i, j in ((0, 1), (0, 2), (1, 2)):
+    difference = np.abs(marginals[labels[i]] - marginals[labels[j]]).max()
+    print(f"{labels[i].splitlines()[0]:34s} vs {labels[j].splitlines()[0]:24s}"
+          f" max abs diff {difference:.2e}")
+check.round(6)
+```
+
+The first two panels agree to 2e-5 — pure quadrature noise, and it shrinks with
+`z_nodes`. The comonotone panel differs by about 5% of the peak, and raising
+`z_nodes` does not touch it, because it is not a quadrature error. When
+`sd_indep` is exactly zero the unit is degenerate given $Z$, so there is no
+conditional beta to bucket by CDF differences; the engine walks the comonotone
+quantile instead and deposits atoms by the same linear rule used for the raw
+picture. Different discretization of the same exact marginal — and note that
+this one lands *closer* to the analytic mean of 240, because the deposit rule
+preserves the first moment exactly while CDF bucketing does not.
+
+## Ten events: the portfolio picture
+
+Now accumulate over events, weighting each by its rate. Both panels below are
+in **rate units**: they sum to the total event rate, and dividing by that gives
+the severity distribution conditional on an event happening.
+
+```{python}
+joint_raw = portfolio_joint(small, n1, n2, secondary=False)
+joint_sec = portfolio_joint(small, n1, n2, secondary=True, z_nodes=Z_EXACT)
+
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), sharex=True, sharey=True)
+mesh = heatmap(axes[0], joint_raw, x1, x2, title="without secondary uncertainty")
+mesh = heatmap(axes[1], joint_sec, x1, x2, title="with secondary uncertainty")
+axes[1].set_ylabel("")
+show(fig, mesh, label="rate")
+plt.show()
+```
+
+Ten atoms become ten overlapping clouds. Note what has *not* changed: the total
+mass, and both means.
+
+```{python}
+summary = pd.DataFrame({"without": moments(joint_raw, x1, x2),
+                        "with": moments(joint_sec, x1, x2)}).T
+summary.insert(0, "mass (= rate)", [joint_raw.sum(), joint_sec.sum()])
+summary.round(4)
+```
+
+The correlation line is the interesting one, and it usually surprises people.
+Without secondary uncertainty the two units look *almost perfectly* correlated
+— but that is an artifact: the only variation left is across events, and events
+that are big for coastal are big for inland. Adding secondary uncertainty
+introduces within-event variation that is only partly shared, and the portfolio
+correlation *falls*. Ignoring secondary uncertainty does not understate
+dependence here; it overstates it, while understating every unit's spread.
+
+### Marginals
+
+Each unit's marginal is the one-dimensional severity distribution — exactly
+what `quantize_arrays` produces from that unit's rows alone. Two checks:
+
+```{python}
+coastal = frames[UNITS[0]]
+raw_1d, sec_1d, meta_1d = eltq.quantize_arrays(
+    coastal.rate, coastal.max_loss, coastal.mean_loss, coastal.sd_indep,
+    coastal.sd_corr, bucket_size=H, grid_length=n1, quadrature_points=32)
+
+print(f"raw marginal vs quantize_arrays raw : max abs diff "
+      f"{np.abs(joint_raw.sum(axis=1) - raw_1d).max():.3e}   (identical rule)")
+print(f"secondary marginal mean  {joint_sec.sum(axis=1) @ x1:.6f}")
+print(f"quantize_arrays  mean    {sec_1d @ x1:.6f}")
+print(f"analytic AAL             {meta_1d.analytic_aal:.6f}")
+```
+
+The raw marginal agrees to the last bit: same linear deposit rule, applied once
+per axis. The secondary marginals agree only to discretization error, because
+they are *different* approximations of the same beta — `quantize_arrays` uses
+`quadrature_points` equally weighted midpoint beta quantiles, while the joint
+buckets the conditional beta by exact CDF differences and integrates the shared
+factor over `z_nodes`. Both bracket the analytic AAL.
+
+```{python}
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.6))
+for ax, unit, axis, grid in zip(axes, UNITS, (1, 0), (x1, x2)):
+    ax.plot(grid, joint_raw.sum(axis=axis), color=SERIES[0],
+            label="without secondary uncertainty")
+    ax.plot(grid, joint_sec.sum(axis=axis), color=SERIES[1],
+            label="with secondary uncertainty")
+    ax.set(title=f"{unit} marginal", xlabel="loss", ylabel="rate", yscale="log")
+    ax.legend(loc="upper right", labelcolor=INK_2)
+show(fig)
+plt.show()
+```
+
+Without secondary uncertainty the marginal is ten spikes and nothing else — no
+loss between the atoms is possible, and no loss above the largest mean. With
+it, the distribution is continuous over the whole grid. Two features of the
+orange curve are worth naming: the spike that survives at 300 (coastal) and 200
+(inland) is **ev05**, the event with no secondary uncertainty, which stays an
+atom; and the upturn at the right-hand end is mass sitting at the maximum loss,
+which a beta with $\alpha < 1$ or $\beta < 1$ genuinely puts there.
+
+### The total, and the fast route
+
+The two units share one bucket size, so the distribution of the total
+$X_1 + X_2$ is just the anti-diagonal sums of the joint — no further
+approximation. That total is precisely what `multiunit_views` computes directly,
+event by event, in Rust, for any number of units and with policy terms applied.
+Here it should reproduce the event-by-event joint to machine precision:
+
+```{python}
+xs, total_sec = total_loss(joint_sec)
+_, total_raw = total_loss(joint_raw)
+
+views, multi_meta = eltq.multiunit_views(
+    small.event_id, small.unit_id, small.rate, small.mean_loss, small.sd_indep,
+    small.sd_corr, small.max_loss, bucket_size=H, views=["ground_up"],
+    z_nodes=Z_EXACT)
+ground_up = views["ground_up"]
+
+print(f"grid length: joint route {len(total_sec)}, multiunit_views {len(ground_up)}")
+print(f"max abs difference     {np.abs(ground_up - total_sec).max():.3e}")
+print(f"relative to peak       "
+      f"{np.abs(ground_up - total_sec).max() / ground_up.max():.3e}")
+print(f"mean: joint {total_sec @ xs:.8f}   views {ground_up @ xs:.8f}   "
+      f"analytic {multi_meta.analytic_aal:.8f}")
+print(f"engine: {multi_meta.engine}")
+```
+
+Two independent code paths — a Python loop over `joint_two_units` versus the
+Rust per-event convolution engine — landing on the same array. Use
+`joint_two_units` when you want to *see* the bivariate structure; use
+`multiunit_views` when you want the answer for a real portfolio.
+
+## A thousand events
+
+Same pipeline, 1000 events, at `z_nodes = 256` rather than 1001 — the shared
+factor is integrated more coarsely, which is where nearly all the cost sits.
+
+```{python}
+start = time.perf_counter()
+big_sec = portfolio_joint(large, n1, n2, secondary=True, z_nodes=Z_FAST)
+loop_seconds = time.perf_counter() - start
+big_raw = portfolio_joint(large, n1, n2, secondary=False)
+
+start = time.perf_counter()
+big_views, big_meta = eltq.multiunit_views(
+    large.event_id, large.unit_id, large.rate, large.mean_loss, large.sd_indep,
+    large.sd_corr, large.max_loss, bucket_size=H, views=["ground_up"],
+    z_nodes=Z_FAST)
+views_seconds = time.perf_counter() - start
+
+xs_big, big_total = total_loss(big_sec)
+events = large.event_id.nunique()
+print(f"{events} joints in a Python loop : {loop_seconds:6.2f} s "
+      f"({1000 * loop_seconds / events:.2f} ms per event)")
+print(f"multiunit_views, ground_up   : {views_seconds:6.2f} s")
+print(f"agreement                    : "
+      f"{np.abs(big_views['ground_up'] - big_total).max():.3e}")
+```
+
+```{python}
+fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), sharex=True, sharey=True)
+mesh = heatmap(axes[0], big_raw, x1, x2, title="1000 events — without")
+mesh = heatmap(axes[1], big_sec, x1, x2, title="1000 events — with")
+axes[1].set_ylabel("")
+show(fig, mesh, label="rate")
+plt.show()
+```
+
+With a thousand events the left panel already looks like a distribution — the
+across-event scatter fills in part of the plane on its own. The difference is
+still structural rather than cosmetic. The raw mass sits in a narrow wedge, the
+locus of $(\mu_1,\mu_2)$ as event size varies, and nothing at all lives outside
+it: no outcome where coastal is hit hard and inland is spared, and nothing
+beyond the largest event in the file. Secondary uncertainty spreads that wedge
+over the whole rectangle and puts real mass in both far corners.
+
+```{python}
+pd.DataFrame({"without": moments(big_raw, x1, x2),
+              "with": moments(big_sec, x1, x2)}).T.round(4)
+```
+
+### What it does to the tail
+
+Severity quantiles of the total (conditional on an event happening), and the
+survival curve in rate terms.
+
+```{python}
+def quantiles(weights, grid, probabilities):
+    """Left-continuous quantiles of a discrete distribution on ``grid``."""
+    cumulative = np.cumsum(weights / weights.sum())
+    return grid[np.searchsorted(cumulative, probabilities)]
+
+
+_, big_total_raw = total_loss(big_raw)
+probabilities = np.array([0.5, 0.75, 0.9, 0.95, 0.99, 0.995])
+table = pd.DataFrame(
+    {"without": quantiles(big_total_raw, xs_big, probabilities),
+     "with": quantiles(big_total, xs_big, probabilities)},
+    index=pd.Index(probabilities, name="severity quantile"))
+table["ratio"] = table["with"] / table["without"]
+table.round(3)
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7.5, 4.0))
+series = ((big_total_raw, SERIES[0], "without", (-6, -14), "right"),
+          (big_total, SERIES[1], "with", (6, 8), "left"))
+for weights, color, label, offset, align in series:
+    survival = weights[::-1].cumsum()[::-1]
+    ax.plot(xs_big, survival, color=color, label=f"{label} secondary uncertainty")
+    at = min(int(np.searchsorted(-survival, -survival[0] * 0.006)), len(xs_big) - 1)
+    ax.annotate(label, (xs_big[at], survival[at]), color=color, ha=align,
+                xytext=offset, textcoords="offset points", fontsize=9)
+ax.set(yscale="log", xlabel="total loss, coastal + inland",
+       ylabel="rate of exceedance (per year)",
+       title="Total loss across both units, 1000 events")
+ax.legend(loc="lower left", labelcolor=INK_2)
+show(fig)
+plt.show()
+```
+
+Secondary uncertainty *lowers* the median (the beta is right-skewed, so most
+outcomes come in below the mean) and *raises* everything from about the 75th
+percentile up — the crossover is where the two curves meet. The blue curve then
+falls off a cliff, because without secondary uncertainty the largest total the
+portfolio can produce is the largest $\mu_1 + \mu_2$ in the ELT, and there is
+nothing beyond it. The orange curve keeps going to the structural cap, the sum
+of the two maximum losses, 1200 + 800 = 2000. That gap is the whole argument
+for carrying secondary uncertainty into a tail metric.
+
+## Accuracy knobs
+
+Two settings control the discretization, and they are independent.
+
+**`z_nodes`** — the shared-factor quadrature. Cost is close to linear in it, and
+it is the only knob that affects the *dependence*: the marginals are exact (up
+to bucketing) at any node count, but the correlation converges from below.
+
+```{python}
+rows = []
+for nodes in (8, 16, 32, 64, 128, 256, 512, 1001, 2001):
+    start = time.perf_counter()
+    block, _, _, block_meta = eltq.joint_two_units(
+        unit_tuple(row1), unit_tuple(row2), bucket_size=H, n1=n1, n2=n2,
+        z_nodes=nodes)
+    rows.append({"z_nodes": nodes, "ms": 1000 * (time.perf_counter() - start),
+                 "correlation": block_meta.grid_correlation,
+                 "mass": block.sum(), "coastal mean": block.sum(axis=1) @ gx1})
+pd.DataFrame(rows).set_index("z_nodes").round(
+    {"ms": 2, "correlation": 6, "mass": 12, "coastal mean": 6})
+```
+
+`z_rule="gauss_hermite"` converges faster for smooth integrands; `"midpoint"`
+(the default) is the more robust choice and is what the one-unit specification
+uses. `benchmarks/z_convergence.py` studies this properly.
+
+**`bucket_size`** — the loss grid. It sets resolution on both axes and the
+memory of the joint, which is $n_1 n_2$ per event; halving $h$ quadruples it.
+The deposit rule preserves mass and mean at any $h$, so a coarse grid costs you
+shape, not moments.
+
+```{python}
+for h in (10.0, 20.0, 50.0, 100.0):
+    m1, m2 = (int(np.ceil(r.max_loss / h)) + 1 for r in (row1, row2))
+    block, bx1, bx2, block_meta = eltq.joint_two_units(
+        unit_tuple(row1), unit_tuple(row2), bucket_size=h, n1=m1, n2=m2,
+        z_nodes=Z_EXACT)
+    print(f"h = {h:6.1f}  grid {m1:3d} x {m2:3d} = {m1 * m2:6d} cells  "
+          f"correlation {block_meta.grid_correlation:.6f}  "
+          f"coastal mean {block.sum(axis=1) @ bx1:9.4f}  "
+          f"(analytic {block_meta.analytic_mean[0]:.4f})")
+```
+
+## Where to go next
+
+- **More than two units.** `joint_two_units` is deliberately the two-unit case,
+  because that is the one you can look at. For $n$ units the joint is
+  $n$-dimensional and you almost never want it — you want a *total* under some
+  view, which is what `multiunit_views` returns by convolving the units of each
+  event under the same shared factor.
+- **Policy terms.** `multiunit_views` takes DecL-style per-unit terms
+  (`unit coastal 750 xs 250 occurrence net of 50% po 400 xs 100`) and returns
+  `ground_up`, `gross`, `ceded` and `net`. Terms are where retaining unit-level
+  structure stops being optional — a limit applied to the total is not the sum
+  of limits applied per unit.
+- **The roll-up question.** `multiunit_views(..., roll_up_diagnostic=True)`
+  reports, per event, how far the exact multi-unit total sits from the single
+  rolled-up beta a one-row ELT would give you. That is the quantitative version
+  of the argument in `dev/secondary-uncertainty-additivity.md`.
+
