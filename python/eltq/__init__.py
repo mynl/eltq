@@ -21,7 +21,7 @@ import numpy as np
 
 from eltq._meta import Meta, RowIssues
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 try:
     from eltq._eltq import (

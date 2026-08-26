@@ -106,10 +106,12 @@ def medium_elt(n: int = 5000) -> pd.DataFrame:
     mu[m0] = 0.0
     sigma[m0] = 0.0
 
-    # Split sigma into independent and correlated components.
+    # Split sigma into independent and correlated components. The total sd
+    # is the arithmetic sum sd_indep + sd_corr (Burke 2016 rule, 1.6.0), so a
+    # linear split keeps f the fraction of the admissible variance.
     share = rng.uniform(0.0, 1.0, size=n)
-    sd_indep = sigma * np.sqrt(share)
-    sd_corr = sigma * np.sqrt(1.0 - share)
+    sd_indep = sigma * share
+    sd_corr = sigma * (1.0 - share)
     return pd.DataFrame(
         {
             "event_id": [f"ev{i:05d}" for i in range(n)],

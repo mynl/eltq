@@ -5,13 +5,14 @@ spaced, rate-weighted loss-grid distributions:
 
 - **raw** — each event contributes an atom of rate λ at its conditional mean μ;
 - **secondary** — each event's conditional loss is modeled as a beta on
-  [0, M] matching (μ, σ² = σ_I² + σ_C²) and approximated by K equally weighted
+  [0, M] matching (μ, σ = σ_I + σ_C) and approximated by K equally weighted
   midpoint quantiles x_k = M·Q(α, β; (k+½)/K).
 
 Both are mapped to the grid g_i = i·h by a linear deposit rule that preserves
 mass and first moment exactly. The mathematical contract is
-`secondary-uncertainty-mathematical-specification.md`; the implementation plan
-is `dev/plan-implementation.md`.
+`secondary-uncertainty-mathematical-specification.md`; the implementation plans
+are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
+(1.6.0 onward: joint multi-unit secondary uncertainty, unit terms, view totals).
 
 ## Status
 
@@ -23,6 +24,12 @@ is `dev/plan-implementation.md`.
 | [memmap] quantize_into / quantize_to_npy | 1.3.0 | done |
 | [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | done |
 | [fallback] SciPy backend in-package + demo notebook | 1.5.0 | done |
+| [sigma-rule] total sd = σ_I + σ_C (Burke 2016), outright | 1.6.0 | done |
+| [reference-n-unit] n-unit reference, terms grammar, views | 1.7.0 | planned |
+| [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | planned |
+| [terms-grammar] Rust parser + view-map compiler | 1.9.0 | planned |
+| [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | planned |
+| [ferocious-multiunit] own erf, real FFTs, 1M unit-row report | 1.11.0 | planned |
 
 ## Layout
 
@@ -131,8 +138,11 @@ Canonical columns (CSV route allows a column-name mapping from 1.2.0):
 | `sd_indep` | σ_I | independent std-dev component |
 | `sd_corr` | σ_C | correlated std-dev component |
 
-Admissibility: λ, M, σ_I, σ_C ≥ 0 and 0 ≤ μ ≤ M. Working variance
-σ² = σ_I² + σ_C².
+Admissibility: λ, M, σ_I, σ_C ≥ 0 and 0 ≤ μ ≤ M. Total conditional sd is the
+arithmetic sum σ = σ_I + σ_C (Burke, Rau-Chaplin, Varghese 2016, section
+III.E; the root-sum-of-squares rule used before 1.6.0 was incorrect). The
+model behind the two components, and why unit-level rows must be kept when
+unit-level terms exist, is in `dev/secondary-uncertainty-additivity.md`.
 
 ## Row handling and policies
 

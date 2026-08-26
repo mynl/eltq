@@ -69,7 +69,11 @@ pub fn classify_row(
         diagnostics.note(Category::ZeroRate, row);
         return Ok(DROP);
     }
-    let sigma2 = sd_indep * sd_indep + sd_corr * sd_corr;
+    // Total conditional sd is the arithmetic sum of the two components
+    // (Burke, Rau-Chaplin, Varghese 2016, section III.E, step i); the
+    // admissibility test then compares sigma^2 against mu (M - mu).
+    let sigma = sd_indep + sd_corr;
+    let sigma2 = sigma * sigma;
     if max_loss == 0.0 || sigma2 == 0.0 || mu == 0.0 || mu == max_loss {
         // Boundary/degenerate treatment: a single atom at mu. (For a boundary
         // mean with sigma > 0 the variance is formally inadmissible; the
@@ -189,6 +193,25 @@ mod tests {
         let (plan, diag) = classify(0.1, m, mu, s, &c);
         assert_eq!(plan.unwrap().kind, RowKind::Atom);
         assert_eq!(diag.get(Category::VarianceAtom).count, 1);
+    }
+
+    #[test]
+    fn total_sd_is_the_arithmetic_sum() {
+        // sigma = 3 + 4 = 7, variance 49 (not 3^2 + 4^2 = 25).
+        let c = Config::new(1.0);
+        let mut diag = Diagnostics::default();
+        let plan = classify_row(0, 0.1, 100.0, 40.0, 3.0, 4.0, &c, &mut diag).unwrap();
+        assert_eq!(plan.kind, RowKind::Beta);
+        assert_eq!(plan.var, 49.0);
+        // Each component alone is admissible; their sum is not: 30 + 25 = 55,
+        // 55^2 = 3025 >= 40 * 60 = 2400, so the clamp policy engages.
+        let (plan, diag) = {
+            let mut diag = Diagnostics::default();
+            let plan = classify_row(0, 0.1, 100.0, 40.0, 30.0, 25.0, &c, &mut diag).unwrap();
+            (plan, diag)
+        };
+        assert_eq!(plan.kind, RowKind::Beta);
+        assert_eq!(diag.get(Category::SigmaClamped).count, 1);
     }
 
     #[test]

@@ -79,13 +79,15 @@ def synthetic_elt(n: int) -> dict[str, np.ndarray]:
     mu[bound & at_max] = m[bound & at_max]
     mu[bound & ~at_max] = 0.0
     lam[kind == "zrate"] = 0.0
+    # Linear split: the total sd is sd_indep + sd_corr (Burke rule, 1.6.0),
+    # so the regime mix above is preserved exactly.
     share = rng.uniform(0.0, 1.0, size=n)
     return {
         "rate": lam,
         "max_loss": m,
         "mean_loss": mu,
-        "sd_indep": sigma * np.sqrt(share),
-        "sd_corr": sigma * np.sqrt(1.0 - share),
+        "sd_indep": sigma * share,
+        "sd_corr": sigma * (1.0 - share),
     }
 
 

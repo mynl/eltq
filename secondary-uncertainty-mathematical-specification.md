@@ -57,11 +57,11 @@ Let $X_j$ denote portfolio loss conditional on the occurrence of event $j$. The 
 $$
 0\leq X_j\leq M_j,\qquad \mathsf P(X_j)=\mu_j.
 $$
-(Using the physicist notation for expectation wrt $\mathsf P$.) For the one-dimensional marginal severity distribution required here, the working total conditional variance is
+(Using the physicist notation for expectation wrt $\mathsf P$.) For the one-dimensional marginal severity distribution required here, the total conditional standard deviation is the arithmetic sum of the two components,
 $$
-\sigma_j^2=\sigma_{I,j}^2+\sigma_{C,j}^2.
+\sigma_j=\sigma_{I,j}+\sigma_{C,j},
 $$
-The distinction between independent and correlated uncertainty cannot be retained in a single marginal severity curve after the portfolio-level event distribution has been formed. The two components would matter separately in a model that retained common latent variables, location-level dependence or joint losses across several portfolios. If the source ELT defines a different rule for combining the supplied standard deviations at portfolio level, that documented convention must replace the working formula above.
+the vendor convention (Burke, Rau-Chaplin, Varghese 2016, section III.E, step i; confirmed against the paper 2026-08-25). It is not the root sum of squares: in the underlying one-factor model the components enter the marginal sd arithmetically while the copula weights normalize in quadrature, and the two must not be conflated. `dev/secondary-uncertainty-additivity.md` sets out that model, its consequences for aggregation across units, and why unit-level structure must be retained whenever unit-level terms exist; the one-dimensional marginal here is the single-unit case. Versions before 1.6.0 combined the components in quadrature; that was incorrect and has been replaced outright.
 
 For $M_j>0$, define the normalized loss $Y_j=X_j/M_j$, its mean $p_j$ and its variance $v_j$ by
 $$
@@ -205,7 +205,7 @@ Before the utility's public interface is frozen, we must confirm:
 
 1. whether the ELT contains $\lambda_j$ directly or requires a join to an event catalogue;
 2. whether the exposure field is exactly the conditional maximum loss $M_j$;
-3. whether $\sigma_j^2=\sigma_{I,j}^2+\sigma_{C,j}^2$ is the intended portfolio-marginal convention;
+3. **resolved (1.6.0):** the marginal convention is $\sigma_j=\sigma_{I,j}+\sigma_{C,j}$ (Burke 2016, section III.E, step i; see section 4 and `dev/secondary-uncertainty-additivity.md`);
 4. whether the desired default output is a rate measure or a normalized conditional severity probability mass function;
 5. the production defaults for $h$, $n$ and $K$;
 6. the required policy for inadmissible beta moments;

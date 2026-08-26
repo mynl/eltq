@@ -167,7 +167,10 @@ def quantize_reference(
         if lam == 0.0:
             _note(diagnostics, "zero_rate", event_ids[j])
             continue
-        sigma2 = s_i * s_i + s_c * s_c
+        # Total conditional sd is the arithmetic sum of the two components
+        # (Burke, Rau-Chaplin, Varghese 2016, section III.E, step i).
+        sigma = s_i + s_c
+        sigma2 = sigma * sigma
         mu_eff[j] = mu
         if m == 0.0 or sigma2 == 0.0 or mu == 0.0 or mu == m:
             # Boundary/degenerate treatment: a single atom at mu. (For a

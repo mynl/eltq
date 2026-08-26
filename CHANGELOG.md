@@ -3,6 +3,35 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.6.0] - 2026-08-26
+
+### Changed
+
+- **[sigma-rule] Behavioral change: the total conditional standard deviation
+  is now the arithmetic sum σ = σ_I + σ_C** (Burke, Rau-Chaplin, Varghese
+  2016, section III.E, step i), replacing the quadrature rule
+  σ² = σ_I² + σ_C² used by every earlier version. The quadrature combination
+  was incorrect; it is replaced outright with no legacy option (git history
+  serves any before/after comparison). Every row with both components nonzero
+  now gets a wider secondary distribution, and rows whose summed sd exceeds
+  the beta bound now fall under the variance policy (clamped by default). The
+  admissibility test itself is unchanged: σ² against μ(M − μ). Applied in
+  `validate.rs::classify_row` and `eltq.reference`; spec section 4 working
+  formula replaced and section 11 assumption 3 marked resolved with a pointer
+  to `dev/secondary-uncertainty-additivity.md` (the one-factor model, the
+  additivity proofs, and the numerical illustration behind the change).
+- Fixture and benchmark generators split a row's total sd linearly
+  (`sd_indep = σ·share`, `sd_corr = σ·(1 − share)`) instead of in quadrature,
+  so the variance-fraction regime mix keeps its meaning under the new rule;
+  goldens regenerated (values shift wherever both sds are nonzero).
+
+### Added
+
+- `dev/plan-multiunit.md`: the plan for 1.6.0-1.11.0 (joint multi-unit
+  secondary uncertainty, DecL-style unit terms, per-view totals), plus its
+  mathematical companions `dev/secondary-uncertainty-additivity.md` and
+  `dev/secondary_two_units_reference.py`.
+
 ## [1.5.0] - 2026-08-14
 
 ### Added
