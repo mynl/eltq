@@ -1,0 +1,90 @@
+{
+  "bucket_size": 10.0,
+  "grid_length": 381,
+  "z_nodes": 32,
+  "z_rule": "midpoint",
+  "views": [
+    "ground_up",
+    "gross",
+    "ceded",
+    "net"
+  ],
+  "normalized": false,
+  "total_rate": 0.049,
+  "analytic_aal": 29.0,
+  "view_mass": {
+    "ground_up": 0.04900000000000001,
+    "gross": 0.04900000000000001,
+    "ceded": 0.049,
+    "net": 0.048999999999999995
+  },
+  "view_mean": {
+    "ground_up": 28.963643196632002,
+    "gross": 21.44180116615938,
+    "ceded": 1.8919829607526812,
+    "net": 19.549818205406698
+  },
+  "analytic_view_mean": {
+    "ground_up": 29.0,
+    "gross": 21.469067863974264,
+    "ceded": 1.9097751618754424,
+    "net": 19.55929270209882
+  },
+  "view_mean_error": {
+    "ground_up": -0.036356803367997514,
+    "gross": -0.02726669781488411,
+    "ceded": -0.017792201122761142,
+    "net": -0.009474496692121193
+  },
+  "input_rows": 17,
+  "valid_rows": 14,
+  "events": 7,
+  "valid_events": 6,
+  "unit_ids": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+  ],
+  "terms_echo": {
+    "a": "unit a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500",
+    "b": "unit b 1000 xs 0 occurrence net of 25% po 400 xs 100",
+    "c": "unit c",
+    "d": "unit d occurrence net of 50% po 300 xs 100 and 50% po 200 xs 200",
+    "e": "unit e 600 xs 50",
+    "spare": "unit spare 100 xs 0"
+  },
+  "unused_terms": [
+    "spare"
+  ],
+  "diagnostics": {
+    "degenerate_atom": {
+      "count": 3,
+      "examples": [
+        "e4/a",
+        "e7/a",
+        "e7/c"
+      ]
+    },
+    "zero_rate": {
+      "count": 2,
+      "examples": [
+        "e5/a",
+        "e5/b"
+      ]
+    },
+    "mean_exceeds_max": {
+      "count": 1,
+      "examples": [
+        "e6/d"
+      ]
+    }
+  },
+  "roll_up": null,
+  "params": {
+    "bucket_size": 10.0,
+    "z_nodes": 32,
+    "z_rule": "midpoint"
+  }
+}

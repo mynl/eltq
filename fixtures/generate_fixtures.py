@@ -12,6 +12,11 @@ Outputs:
     fixtures/medium_elt.csv               5000-row seeded mixture of regimes
     fixtures/golden/<name>.npz            raw + secondary golden arrays
     fixtures/golden/<name>.meta.json      golden metadata + diagnostics
+    fixtures/multiunit_small_elt.csv      handcrafted event x unit rows (1.7.0)
+    fixtures/multiunit_small_terms.txt    DecL-style unit terms for it
+    fixtures/golden/multiunit_small.*     per-view golden arrays + metadata
+    fixtures/golden/joint_small.*         two-unit joint pmf golden + metadata
+    fixtures/golden/terms_parse.json      terms grammar parse goldens + errors
 """
 
 from __future__ import annotations
@@ -24,6 +29,8 @@ import numpy as np
 import pandas as pd
 
 from eltq.reference import quantize_reference
+from eltq.reference_multiunit import multiunit_views_reference, secondary_two_units
+from eltq.terms import TermsError, parse_terms_line
 
 FIXTURES_DIR = Path(__file__).parent
 
@@ -146,6 +153,153 @@ def write_golden(df: pd.DataFrame, name: str, params: dict) -> None:
           f"{abs(meta.raw_mass - meta.total_rate):.3e}")
 
 
+MULTI_COLUMNS = ["event_id", "unit_id", "rate", "mean_loss", "sd_indep",
+                 "sd_corr", "max_loss"]
+MULTI_GOLDEN = {"bucket_size": 10.0, "z_nodes": 32, "z_rule": "midpoint"}
+MULTI_TERMS = """\
+# Synthetic unit terms for fixtures/multiunit_small_elt.csv (1.7.0).
+unit a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500
+unit b 1000 xs 0 occurrence net of 100 po 400 xs 100
+unit c
+unit d occurrence net of 50% po 300 xs 100 and 50% po 200 xs 200
+unit e 600 xs 50
+unit spare 100 xs 0
+"""
+
+JOINT_GOLDEN = {
+    "units": [[200.0, 100.0, 150.0, 1000.0], [500.0, 300.0, 200.0, 2000.0]],
+    "bucket_size": 20.0, "n1": 51, "n2": 101, "z_nodes": 1001, "z_rule": "midpoint",
+}
+
+TERMS_PARSE_OK = [
+    "unit a",
+    "unit plant_a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500",
+    "unit plant_b 1000 xs 0 occurrence net of 100 po 400 xs 100",
+    "unit fleet occurrence net of .2 po 5 xs 1",
+    "unit x inf xs 100",
+    "unit y 1e6 xs 2.5e5 occurrence net of 12.5% po 1e5 xs 5e4 and 25 po 100 xs 0",
+    "unit z 500 xs 0 occurrence net of 100% po 500 xs 0",
+]
+TERMS_PARSE_ERRORS = [
+    "",
+    "plant_a 750 xs 250",
+    "unit",
+    "unit xs",
+    "unit a 750 xs",
+    "unit a 750 of 250",
+    "unit a occurrence net 400 xs 100",
+    "unit a occurrence net of 400 xs 100 and",
+    "unit a occurrence net of 400 xs 100 500 xs 500",
+    "unit a occurrence net of 150% po 400 xs 100",
+    "unit a occurrence net of 500 po 400 xs 100",
+    "unit a occurrence net of 0 po 400 xs 100",
+    "unit a occurrence net of 0 xs 100",
+    "unit a occurrence net of inf xs 100",
+    "unit a 0 xs 0",
+    "unit a 750 xs -1",
+    "unit a nan xs 0",
+    "unit a 750 xs 250 occurrence net of 400 xs -5",
+    "unit a occurrence net of 300 xs 100 and 200 xs 200",
+    "unit a occurrence net of 60% po 300 xs 100 and 50% po 200 xs 200",
+]
+
+
+def multiunit_small_elt() -> pd.DataFrame:
+    """Handcrafted event x unit rows covering every unit kind and policy."""
+    rows = [
+        # event_id, unit_id, rate, mu, sd_indep, sd_corr, M
+        # e1: three beta units sharing the factor, mixed loadings.
+        ("e1", "a", 0.010, 200.0, 100.0, 150.0, 1000.0),
+        ("e1", "b", 0.010, 500.0, 300.0, 200.0, 2000.0),
+        ("e1", "c", 0.010, 300.0, 50.0, 100.0, 800.0),
+        # e2: comonotone unit (sd_indep = 0) with an independent unit.
+        ("e2", "a", 0.020, 250.0, 0.0, 200.0, 1000.0),
+        ("e2", "c", 0.020, 100.0, 120.0, 0.0, 500.0),
+        # e3: single-unit event.
+        ("e3", "b", 0.005, 400.0, 80.0, 60.0, 1200.0),
+        # e4: four units incl. an atom (sigma = 0) and a clamped row.
+        ("e4", "a", 0.003, 300.0, 0.0, 0.0, 1000.0),
+        ("e4", "b", 0.003, 600.0, 400.0, 500.0, 2000.0),
+        ("e4", "d", 0.003, 150.0, 60.0, 40.0, 600.0),
+        ("e4", "e", 0.003, 350.0, 90.0, 70.0, 900.0),
+        # e5: zero-rate event, skipped entirely.
+        ("e5", "a", 0.000, 200.0, 50.0, 50.0, 1000.0),
+        ("e5", "b", 0.000, 300.0, 50.0, 50.0, 1000.0),
+        # e6: a dropped row (mean > max) alongside a live unit.
+        ("e6", "d", 0.007, 700.0, 10.0, 10.0, 600.0),
+        ("e6", "e", 0.007, 200.0, 40.0, 30.0, 900.0),
+        # e7: boundary means (atoms at 0 and at M) with an ordinary unit.
+        ("e7", "a", 0.004, 0.0, 5.0, 5.0, 1000.0),
+        ("e7", "c", 0.004, 800.0, 0.0, 3.0, 800.0),
+        ("e7", "e", 0.004, 300.0, 100.0, 50.0, 900.0),
+    ]
+    return pd.DataFrame(rows, columns=MULTI_COLUMNS)
+
+
+def write_multiunit_golden() -> None:
+    golden_dir = FIXTURES_DIR / "golden"
+    path = FIXTURES_DIR / "multiunit_small_elt.csv"
+    multiunit_small_elt().to_csv(path, index=False)
+    terms_path = FIXTURES_DIR / "multiunit_small_terms.txt"
+    terms_path.write_text(MULTI_TERMS, encoding="utf-8", newline="\n")
+    df = pd.read_csv(path, float_precision="round_trip")
+    views, meta = multiunit_views_reference(
+        *(df[c] for c in MULTI_COLUMNS), terms=MULTI_TERMS, **MULTI_GOLDEN,
+    )
+    names = list(meta.views)
+    np.savez(golden_dir / "multiunit_small.npz", **{v: views[v] for v in names})
+    np.savetxt(golden_dir / "multiunit_small.arrays.csv",
+               np.column_stack([views[v] for v in names]), fmt="%.17g",
+               delimiter=",", header=",".join(names), comments="")
+    meta_dict = dataclasses.asdict(meta)
+    meta_dict["params"] = MULTI_GOLDEN
+    (golden_dir / "multiunit_small.meta.json").write_text(
+        json.dumps(meta_dict, indent=2), encoding="utf-8"
+    )
+    print(f"golden multiunit_small: n={meta.grid_length} rows={meta.input_rows} "
+          f"valid={meta.valid_rows} events={meta.valid_events}/{meta.events}")
+
+
+def write_joint_golden() -> None:
+    golden_dir = FIXTURES_DIR / "golden"
+    p = JOINT_GOLDEN
+    result = secondary_two_units(p["units"], p["bucket_size"], p["n1"], p["n2"],
+                                 n_z=p["z_nodes"], z_rule=p["z_rule"])
+    np.savetxt(golden_dir / "joint_small.pmf.csv", result.pmf, fmt="%.17g",
+               delimiter=",")
+    meta_dict = dataclasses.asdict(result.meta)
+    meta_dict["params"] = p
+    (golden_dir / "joint_small.meta.json").write_text(
+        json.dumps(meta_dict, indent=2), encoding="utf-8"
+    )
+    print(f"golden joint_small: shape={result.pmf.shape} mass={result.meta.total_mass:.15f}")
+
+
+def write_terms_parse_golden() -> None:
+    ok = []
+    for line in TERMS_PARSE_OK:
+        terms = parse_terms_line(line)
+        ok.append({
+            "line": line,
+            "unit_id": terms.unit_id,
+            "limit": None if np.isinf(terms.limit) else terms.limit,
+            "ded": terms.ded,
+            "clauses": [[c.share, c.limit, c.attach] for c in terms.clauses],
+            "text": terms.text(),
+        })
+    for line in TERMS_PARSE_ERRORS:
+        try:
+            parse_terms_line(line)
+        except TermsError:
+            continue
+        raise AssertionError(f"expected a parse error for {line!r}")
+    (FIXTURES_DIR / "golden" / "terms_parse.json").write_text(
+        json.dumps({"ok": ok, "errors": TERMS_PARSE_ERRORS}, indent=2),
+        encoding="utf-8",
+    )
+    print(f"golden terms_parse: {len(ok)} parses, {len(TERMS_PARSE_ERRORS)} errors")
+
+
 def main() -> None:
     # Goldens are computed from the CSV as re-read, so the committed golden
     # matches what any implementation sees after parsing the fixture file.
@@ -158,6 +312,9 @@ def main() -> None:
         # round_trip parsing: bit-identical to what the Rust CSV route sees.
         reread = pd.read_csv(path, float_precision="round_trip")
         write_golden(reread, name, params)
+    write_multiunit_golden()
+    write_joint_golden()
+    write_terms_parse_golden()
 
 
 if __name__ == "__main__":

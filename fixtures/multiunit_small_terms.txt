@@ -1,0 +1,7 @@
+# Synthetic unit terms for fixtures/multiunit_small_elt.csv (1.7.0).
+unit a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500
+unit b 1000 xs 0 occurrence net of 100 po 400 xs 100
+unit c
+unit d occurrence net of 50% po 300 xs 100 and 50% po 200 xs 200
+unit e 600 xs 50
+unit spare 100 xs 0

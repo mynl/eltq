@@ -2,11 +2,11 @@
 
 Date: 2026-08-26
 Status: finalized 2026-08-26, the five open questions resolved (see Resolved
-decisions); in execution. Progress: 1.6.0 [sigma-rule] done 2026-08-26.
+decisions); in execution. Progress: 1.6.0 [sigma-rule] and 1.7.0 [reference-n-unit] done 2026-08-26.
 
 ## Context
 
-`dev/secondary_two_units_reference.py` and `dev/secondary-uncertainty-additivity.md`
+`dev/secondary_two_units_reference.py` (now `python/eltq/reference_multiunit.py`) and `dev/secondary-uncertainty-additivity.md`
 settled the mathematics: Burke's one-factor construction (shared $Z_c$ per event,
 independent $Z_i$ per unit, beta marginals with total sd $\sigma_I + \sigma_C$),
 conditional independence given $Z_c$, and the proof that unit-level and rolled ELTs

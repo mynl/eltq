@@ -11,6 +11,12 @@ same API is served by the pure-Python SciPy reference implementation
 (``eltq.reference``, ``BACKEND == "reference"``) — identical mathematics,
 roughly forty times slower. The reference backend ignores ``threads`` and
 ``chunk_rows`` (it is single-threaded and exactly summed).
+
+Multi-unit route (1.7.0): ``multiunit_views`` accumulates the total event
+severity by view (ground_up, gross, ceded, net) for event x unit rows with
+DecL-style unit terms, and ``joint_two_units`` returns the exact bucketed
+bivariate pmf of one event across two units. Both are served by the SciPy
+reference ``eltq.reference_multiunit`` until the Rust engine lands.
 """
 
 from __future__ import annotations
@@ -19,9 +25,10 @@ from os import PathLike
 
 import numpy as np
 
-from eltq._meta import Meta, RowIssues
+from eltq._meta import JointMeta, Meta, MultiMeta, RowIssues
+from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 try:
     from eltq._eltq import (
@@ -52,8 +59,18 @@ except ImportError:
     BACKEND = "reference"
     __rust_version__ = None
 
+if BACKEND == "rust":
+
+    class MultiUnitError(EltqError):
+        """Structural problem in a multi-unit ELT: events not contiguous, a
+        rate varying within an event, or a unit repeated within an event."""
+
+else:
+    from eltq.reference_multiunit import MultiUnitError
+
 __all__ = [
     "BACKEND",
+    "MultiUnitError",
     "EltqError",
     "GridOverflowError",
     "Meta",
@@ -64,6 +81,16 @@ __all__ = [
     "quantize_dataframe",
     "quantize_into",
     "quantize_to_npy",
+    "joint_two_units",
+    "multiunit_views",
+    "multiunit_views_dataframe",
+    "parse_terms",
+    "TermsError",
+    "UnitTerms",
+    "Clause",
+    "VIEWS",
+    "JointMeta",
+    "MultiMeta",
 ]
 
 _CANONICAL_COLUMNS = ("rate", "max_loss", "mean_loss", "sd_indep", "sd_corr")
@@ -357,3 +384,162 @@ def quantize_dataframe(df, *, event_id_column: str = "event_id", **options):
         event_ids=event_ids,
         **options,
     )
+
+
+_MULTI_COLUMNS = ("event_id", "unit_id", "rate", "mean_loss", "sd_indep",
+                  "sd_corr", "max_loss")
+
+
+def _reference_multiunit():
+    try:
+        from eltq import reference_multiunit
+    except ImportError as scipy_missing:
+        raise ImportError(
+            "the multi-unit route currently runs on the SciPy reference "
+            "(eltq.reference_multiunit); install scipy to use it"
+        ) from scipy_missing
+    return reference_multiunit
+
+
+def _via_reference(function, *args, **kwargs):
+    """Call a reference-module function, translating its exception classes
+    into the package's (they coincide on the reference backend)."""
+    module = _reference_multiunit()
+    if BACKEND != "rust":
+        return function(module)(*args, **kwargs)
+    from eltq import reference as _ref
+
+    try:
+        return function(module)(*args, **kwargs)
+    except _ref.GridOverflowError as error:
+        translated = GridOverflowError(str(error))
+        translated.required_length = error.required_length
+        translated.examples = error.examples
+        raise translated from None
+    except _ref.VarianceError as error:
+        raise VarianceError(str(error)) from None
+    except module.MultiUnitError as error:
+        raise MultiUnitError(str(error)) from None
+    except _ref.EltqError as error:
+        raise EltqError(str(error)) from None
+
+
+def multiunit_views(
+    event_id,
+    unit_id,
+    rate,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    max_loss,
+    *,
+    terms=None,
+    bucket_size,
+    grid_length=None,
+    views=VIEWS,
+    z_nodes=32,
+    z_rule="midpoint",
+    normalize=False,
+    variance_policy="clamp",
+    clamp_factor=0.999,
+    roll_up_diagnostic=False,
+):
+    """Total event severity by view for a multi-unit ELT; return ``(views, meta)``.
+
+    Rows are event x unit (contiguous per event, one row per unit, rate
+    constant within an event). Per unit, the conditional loss is a beta on
+    [0, M] with total sd ``sd_indep + sd_corr``; units of one event share a
+    common factor through Burke's one-factor Gaussian copula and are
+    independent given it. Per-unit DecL-style ``terms`` (see
+    ``eltq.terms``) define the views: ``ground_up`` = X, ``gross`` after
+    deductible and limit, ``ceded`` by the occurrence clauses applied to
+    gross, ``net`` = gross - ceded. The total across units of each view is
+    accumulated across events weighted by rate, exactly as ``quantize_arrays``
+    accumulates single-unit rows.
+
+    Parameters
+    ----------
+    event_id, unit_id : array_like
+        Row identifiers (any hashable / string values).
+    rate, mean_loss, sd_indep, sd_corr, max_loss : array_like
+        Numeric columns; ``rate`` constant within an event.
+    terms : str | sequence of str | Mapping | None
+        One ``unit <id> [<limit> xs <ded>] [occurrence net of ...]`` line per
+        unit, or a mapping of structured terms; units without terms are
+        untouched (gross = ground_up, ceded = 0).
+    bucket_size : float
+        Grid spacing h; every monetary breakpoint in ``terms`` must be a
+        multiple of h (no silent rounding).
+    grid_length : int, optional
+        Number of grid nodes; auto-derived from the largest event support
+        (sum of unit maxima) when None.
+    views : sequence of str, default all four
+        Views to compute and return.
+    z_nodes : int, default 32
+        Shared-factor quadrature nodes Q.
+    z_rule : {"midpoint", "gauss_hermite"}, default "midpoint"
+        Shared-factor quadrature rule.
+    normalize : bool, default False
+        Divide every view by the total contributing rate.
+    variance_policy : {"clamp", "error", "drop", "atom"}, default "clamp"
+        Treatment of a unit row with inadmissible beta variance.
+    clamp_factor : float, default 0.999
+        Clamp target as a fraction of the admissible sigma bound.
+    roll_up_diagnostic : bool, default False
+        Per event with two or more units, report the sd and 99th-percentile
+        ratios of the exact ground-up total against the rolled single-row
+        beta (``meta.roll_up``).
+
+    Returns
+    -------
+    views : dict[str, numpy.ndarray]
+        View name -> length-n float64 rate-weight array; the loss at element
+        i is i * h.
+    meta : MultiMeta
+    """
+    return _via_reference(
+        lambda module: module.multiunit_views_reference,
+        event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+        terms=terms, bucket_size=bucket_size, grid_length=grid_length,
+        views=views, z_nodes=z_nodes, z_rule=z_rule, normalize=normalize,
+        variance_policy=variance_policy, clamp_factor=clamp_factor,
+        roll_up_diagnostic=roll_up_diagnostic,
+    )
+
+
+def multiunit_views_dataframe(df, *, terms=None, **options):
+    """``multiunit_views`` for a DataFrame with the canonical multi-unit columns
+    ``event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss``."""
+    return multiunit_views(*(df[name] for name in _MULTI_COLUMNS), terms=terms,
+                           **options)
+
+
+def joint_two_units(
+    unit1,
+    unit2,
+    *,
+    bucket_size,
+    n1,
+    n2,
+    z_nodes=1001,
+    z_rule="midpoint",
+    variance_policy="clamp",
+    clamp_factor=0.999,
+):
+    """Exact bucketed bivariate pmf of one event across two units.
+
+    ``unit1`` and ``unit2`` are ``(mean_loss, sd_indep, sd_corr, max_loss)``
+    tuples in loss currency units. Returns ``(pmf, x1, x2, meta)``: ``pmf[j,
+    k]`` is the probability that unit 1 loses ``x1[j]`` and unit 2 loses
+    ``x2[k]`` on the common grid of spacing ``bucket_size`` with ``n1`` and
+    ``n2`` nodes (each must cover its unit's maximum loss); ``meta`` is a
+    ``JointMeta``. The shared factor is integrated by ``z_nodes`` quadrature
+    nodes (``z_rule`` midpoint or gauss_hermite); marginals of the pmf agree
+    with directly bucketing each beta up to quadrature error.
+    """
+    result = _via_reference(
+        lambda module: module.secondary_two_units,
+        [unit1, unit2], bucket_size, n1, n2, n_z=z_nodes, z_rule=z_rule,
+        variance_policy=variance_policy, clamp_factor=clamp_factor,
+    )
+    return result.pmf, result.x1, result.x2, result.meta

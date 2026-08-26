@@ -1,6 +1,6 @@
 # Additivity of the RMS Secondary Uncertainty Model
 
-Date: 2026-08-26. Companion to `dev/secondary_two_units_reference.py`, which
+Date: 2026-08-26. Companion to `python/eltq/reference_multiunit.py` (promoted from `dev/secondary_two_units_reference.py` in 1.7.0), which
 implements the model and generated every number quoted below.
 
 ## 1. The question

@@ -1,0 +1,122 @@
+{
+  "ok": [
+    {
+      "line": "unit a",
+      "unit_id": "a",
+      "limit": null,
+      "ded": 0.0,
+      "clauses": [],
+      "text": "unit a"
+    },
+    {
+      "line": "unit plant_a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500",
+      "unit_id": "plant_a",
+      "limit": 750.0,
+      "ded": 250.0,
+      "clauses": [
+        [
+          0.5,
+          400.0,
+          100.0
+        ],
+        [
+          1.0,
+          500.0,
+          500.0
+        ]
+      ],
+      "text": "unit plant_a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500"
+    },
+    {
+      "line": "unit plant_b 1000 xs 0 occurrence net of 100 po 400 xs 100",
+      "unit_id": "plant_b",
+      "limit": 1000.0,
+      "ded": 0.0,
+      "clauses": [
+        [
+          0.25,
+          400.0,
+          100.0
+        ]
+      ],
+      "text": "unit plant_b 1000 xs 0 occurrence net of 25% po 400 xs 100"
+    },
+    {
+      "line": "unit fleet occurrence net of .2 po 5 xs 1",
+      "unit_id": "fleet",
+      "limit": null,
+      "ded": 0.0,
+      "clauses": [
+        [
+          0.04,
+          5.0,
+          1.0
+        ]
+      ],
+      "text": "unit fleet occurrence net of 4% po 5 xs 1"
+    },
+    {
+      "line": "unit x inf xs 100",
+      "unit_id": "x",
+      "limit": null,
+      "ded": 100.0,
+      "clauses": [],
+      "text": "unit x inf xs 100"
+    },
+    {
+      "line": "unit y 1e6 xs 2.5e5 occurrence net of 12.5% po 1e5 xs 5e4 and 25 po 100 xs 0",
+      "unit_id": "y",
+      "limit": 1000000.0,
+      "ded": 250000.0,
+      "clauses": [
+        [
+          0.125,
+          100000.0,
+          50000.0
+        ],
+        [
+          0.25,
+          100.0,
+          0.0
+        ]
+      ],
+      "text": "unit y 1000000 xs 250000 occurrence net of 12.5% po 100000 xs 50000 and 25% po 100 xs 0"
+    },
+    {
+      "line": "unit z 500 xs 0 occurrence net of 100% po 500 xs 0",
+      "unit_id": "z",
+      "limit": 500.0,
+      "ded": 0.0,
+      "clauses": [
+        [
+          1.0,
+          500.0,
+          0.0
+        ]
+      ],
+      "text": "unit z 500 xs 0 occurrence net of 500 xs 0"
+    }
+  ],
+  "errors": [
+    "",
+    "plant_a 750 xs 250",
+    "unit",
+    "unit xs",
+    "unit a 750 xs",
+    "unit a 750 of 250",
+    "unit a occurrence net 400 xs 100",
+    "unit a occurrence net of 400 xs 100 and",
+    "unit a occurrence net of 400 xs 100 500 xs 500",
+    "unit a occurrence net of 150% po 400 xs 100",
+    "unit a occurrence net of 500 po 400 xs 100",
+    "unit a occurrence net of 0 po 400 xs 100",
+    "unit a occurrence net of 0 xs 100",
+    "unit a occurrence net of inf xs 100",
+    "unit a 0 xs 0",
+    "unit a 750 xs -1",
+    "unit a nan xs 0",
+    "unit a 750 xs 250 occurrence net of 400 xs -5",
+    "unit a occurrence net of 300 xs 100 and 200 xs 200",
+    "unit a occurrence net of 60% po 300 xs 100 and 50% po 200 xs 200"
+  ]
+}

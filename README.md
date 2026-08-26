@@ -25,7 +25,7 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
 | [ferocious] parallelism + batched kernel + benchmarks | 1.4.0 | done |
 | [fallback] SciPy backend in-package + demo notebook | 1.5.0 | done |
 | [sigma-rule] total sd = σ_I + σ_C (Burke 2016), outright | 1.6.0 | done |
-| [reference-n-unit] n-unit reference, terms grammar, views | 1.7.0 | planned |
+| [reference-n-unit] n-unit reference, terms grammar, views | 1.7.0 | done |
 | [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | planned |
 | [terms-grammar] Rust parser + view-map compiler | 1.9.0 | planned |
 | [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | planned |
@@ -36,7 +36,9 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
 ```
 crates/eltq-core/     pure Rust core (no PyO3/NumPy/CLI types)
 crates/eltq-python/   PyO3 + numpy bindings
-python/eltq/          pure-Python layer: API wrappers + SciPy reference/fallback
+python/eltq/          pure-Python layer: API wrappers, SciPy reference/fallback
+                      (one-unit: reference.py; multi-unit: reference_multiunit.py),
+                      DecL-style unit terms (terms.py)
 tests/                pytest acceptance suite (runs both backends)
 fixtures/             synthetic ELTs + golden outputs (never real data)
 benchmarks/           bench harness + machine-readable results history
@@ -124,6 +126,52 @@ implementation in `eltq.reference`, used automatically when the extension is
 not importable (requires scipy; ~40x slower; ignores `threads`/`chunk_rows`).
 `eltq.reference.quantize_reference` is also importable directly as the
 independent oracle the acceptance suite tests both backends against.
+
+## Multi-unit route (1.7.0)
+
+For ELTs at unit level (event x unit rows) the units of one event share a
+common factor (Burke 2016, section III.E): per unit the conditional loss is a
+beta on [0, M] with total sd σ_I + σ_C; one shared standard normal Z_c per
+event occurrence and an independent Z_i per unit give a one-factor Gaussian
+copula, and the units are independent given Z_c. `dev/secondary-uncertainty-
+additivity.md` proves why this cannot be reduced to rolled rows, so unit-level
+rows are kept and per-unit terms applied before summation.
+
+```python
+views, meta = eltq.multiunit_views(
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+    *, terms, bucket_size, grid_length=None,
+    views=("ground_up", "gross", "ceded", "net"),
+    z_nodes=32, z_rule="midpoint", normalize=False,
+    variance_policy="clamp", clamp_factor=0.999, roll_up_diagnostic=False)
+# views: dict view -> rate-weighted array on the grid i * h; meta: MultiMeta
+
+pmf, x1, x2, meta = eltq.joint_two_units(
+    (mu1, sd_i1, sd_c1, M1), (mu2, sd_i2, sd_c2, M2),
+    *, bucket_size, n1, n2, z_nodes=1001, z_rule="midpoint")
+```
+
+Rows of one event must be contiguous with one row per unit and a constant
+rate (`MultiUnitError` otherwise). Terms are DecL-style, one line per unit
+(`eltq.parse_terms` / `eltq.terms`):
+
+```
+unit plant_a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500
+unit plant_b 1000 xs 0 occurrence net of 100 po 400 xs 100
+unit fleet
+```
+
+`ground_up` = X; `gross` = min(max(X − ded, 0), limit); `ceded` = Σ share ·
+min(max(gross − attach, 0), layer) over the clauses (each applied to gross;
+overlaps allowed as long as the combined share stays ≤ 100% in every band, so
+ceded never exceeds gross); `net` = gross − ceded. A percent share is the fraction of
+the layer; a plain number is an amount of the layer limit (`100 po 400 xs
+100` cedes 25%). Breakpoints must be multiples of `bucket_size`. Units
+without a line get no terms. The shared factor is integrated by midpoint
+quantile nodes (default) or Gauss-Hermite; `benchmarks/z-convergence-1.7.0.md`
+records the convergence study behind the default. Until the Rust engine
+lands (1.10.0) both functions run on the SciPy reference
+`eltq.reference_multiunit`.
 
 ## Input schema
 

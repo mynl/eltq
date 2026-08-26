@@ -3,6 +3,71 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.7.0] - 2026-08-26
+
+### Added
+
+- [reference-n-unit] `eltq.reference_multiunit`: the SciPy reference for
+  joint multi-unit secondary uncertainty, the oracle for the Rust engine
+  and the backend of the new API until it lands. `secondary_two_units`
+  (the two-unit joint of `dev/secondary_two_units_reference.py`, promoted
+  into the package; `dev/` copy retired) and `multiunit_views_reference`:
+  per event, per unit, conditional pmfs given the shared factor (beta cdf
+  differences at half-bucket edges; linear deposits for atoms, comonotone
+  units and every transformed view value), per-view transform, convolution
+  across units, shared-factor quadrature, rate-weighted accumulation across
+  events. Per-view mass, means, analytic beta layer means (the LEV identity,
+  closed form via the incomplete beta) and their reconciliation, plus the
+  optional roll-up diagnostic (exact total versus rolled single-row beta:
+  sd and q99 ratios per event) in the new `MultiMeta`; `JointMeta` for the
+  joint. Unit-level variance policies (clamp / error / drop / atom) and the
+  one-unit diagnostic categories carry over with `event_id/unit_id`
+  examples; misgrouped events, rates varying within an event, and repeated
+  units raise `MultiUnitError`.
+- [terms-grammar] `eltq.terms` (pure Python, shared by both backends): the
+  DecL-style grammar `unit <id> [<limit> xs <ded>] [occurrence net of
+  <clause> (and <clause>)*]`, `clause := [<share> po] <limit> xs <attach>`,
+  aligned with `aggregate`'s `decl.lark` (`xs`, `po` = part of, `occurrence
+  net of`, `and`). Percent shares are fractions of the layer, plain-number
+  shares are amounts of the layer limit. `UnitTerms` / `Clause` with the
+  four view maps (ground_up, gross, ceded, net), canonical text rendering,
+  structured-input parsing, and the grid-alignment check (breakpoints must
+  be multiples of `bucket_size`; no silent rounding). Clauses may overlap,
+  but their combined share must not exceed 100% of gross in any band
+  (`TermsError` otherwise): beyond that ceded exceeds gross and net
+  decreases or goes negative, which no loss grid can represent. This
+  tightens the plan's "clauses may overlap" wording; found by the suite.
+- Python API: `eltq.multiunit_views(...)`, `eltq.multiunit_views_dataframe`,
+  `eltq.joint_two_units(...)`, `eltq.parse_terms`, exported `UnitTerms`,
+  `Clause`, `VIEWS`, `TermsError`, `MultiUnitError`, `MultiMeta`,
+  `JointMeta`. Reference exceptions are translated to the package's classes
+  on the Rust backend.
+- Shared-factor quadrature: midpoint quantile nodes (default) or
+  Gauss-Hermite (`z_rule="gauss_hermite"`, Golub-Welsch nodes, stable at
+  any Q). Convergence study `benchmarks/z_convergence.py` with its report
+  `benchmarks/z-convergence-1.7.0.md`: Gauss-Hermite is spectral on smooth
+  units (marginal error 1e-10 at Q = 32 versus 1e-3 midpoint) but leaves
+  artifacts where the conditional is step-like in z (correlation-dominant
+  and comonotone units); the midpoint rule keeps the better pmf shape
+  there, so it stays the default at Q = 32 (plan decision 5 validated).
+- Fixtures and goldens: `fixtures/multiunit_small_elt.csv` +
+  `multiunit_small_terms.txt` (every unit kind, a zero-rate event, a
+  dropped row, boundary atoms, four-unit events) with per-view goldens;
+  `fixtures/golden/joint_small.*` (two-unit joint at Q = 1001);
+  `fixtures/golden/terms_parse.json` (parse goldens plus rejected lines)
+  that the Rust parser is held to as well.
+- Tests: `tests/test_terms.py` (grammar, shares, canonical text, view
+  semantics, alignment, goldens) and `tests/test_multiunit.py` run against
+  the reference and the package API through the `MultiImpl` registry in
+  conftest: joint mass / marginals / independence outer product /
+  comonotone / atom / errors / golden; view semantics on atoms (ded, limit,
+  tower, amount and percent shares, overlap, off-grid fractional cession);
+  independent event equals plain convolution; comonotone common-shape event
+  reproduces the rolled beta (additivity Proposition 6); per-event mass
+  exactly the rate for every view; view means reconcile to analytic layer
+  means within the stated (h, Q) tolerance; normalize; row policies and
+  diagnostics; structural and overflow errors; golden fixture agreement.
+
 ## [1.6.0] - 2026-08-26
 
 ### Changed
