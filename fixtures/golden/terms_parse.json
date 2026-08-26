@@ -118,5 +118,14 @@
     "unit a 750 xs 250 occurrence net of 400 xs -5",
     "unit a occurrence net of 300 xs 100 and 200 xs 200",
     "unit a occurrence net of 60% po 300 xs 100 and 50% po 200 xs 200"
+  ],
+  "keywords": [
+    "and",
+    "net",
+    "occurrence",
+    "of",
+    "po",
+    "unit",
+    "xs"
   ]
 }

@@ -3,6 +3,34 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.9.0] - 2026-08-26
+
+### Added
+
+- [terms-grammar] `eltq-core::terms`: the Rust twin of `eltq.terms`. Hand
+  rolled tokenizer for `unit <id> [<limit> xs <ded>] [occurrence net of
+  <clause> (and <clause>)*]`, `Clause` / `UnitTerms` with the same
+  validation (share bounds, positive finite layer limits, nonnegative
+  attachments, combined share at most 100% in every band), the four view
+  maps, canonical text rendering (`fmt_g15` reproduces Python's `%.15g`),
+  `parse_terms` over text with comments and duplicate detection, and the
+  grid-alignment check. Errors surface as `Error::Terms`.
+- `ViewMap::compile(terms, view, h, n)`: the per-(unit, view) deposit map,
+  at most two `(index, weight)` pairs per source bucket by the linear rule,
+  with `support_len` (the reachable destination length, what each view's
+  convolution size will be) and an `identity` flag (ground_up, and gross
+  without policy terms) so identical maps can share one spectrum in 1.10.0.
+  `apply` is a gather-scatter pass.
+- Goldens: `fixtures/golden/terms_parse.json` now also carries the keyword
+  vocabulary; `tests/terms_golden.rs` holds the Rust parser to the Python
+  parses, rejections, canonical text and keywords. The `decl.lark` glance
+  (aggregate_REFACTOR, 2026-08-26) confirmed `xs`, `po` (PART_OF),
+  `occurrence net of`, and `and`-joined clauses; no drift.
+- Rust unit tests: parsing of full and partial lines, share conventions and
+  bounds, overlap guard, canonical text round trips and `fmt_g15` cases,
+  text parsing and alignment, view values and compiled maps (mass and mean
+  preservation, support lengths, identity detection).
+
 ## [1.8.0] - 2026-08-26
 
 ### Added

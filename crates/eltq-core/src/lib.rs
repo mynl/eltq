@@ -12,7 +12,8 @@
 //!
 //! Multi-unit route (1.8.0+): `multiunit` holds the per-unit preparation,
 //! conditional pmfs given the shared event factor, and the two-unit joint;
-//! `quadrature` the shared-factor rules; `normal` the normal cdf/quantile.
+//! `quadrature` the shared-factor rules; `normal` the normal cdf/quantile;
+//! `terms` the DecL-style unit terms grammar and compiled view maps.
 
 pub mod batched;
 pub mod beta;
@@ -28,6 +29,7 @@ pub mod normal;
 pub mod quadrature;
 pub mod quantize;
 pub mod sum;
+pub mod terms;
 pub mod validate;
 
 pub use config::{
@@ -38,3 +40,4 @@ pub use error::Error;
 pub use multiunit::{JointConfig, JointMeta, JointResult, UnitKind, UnitPlan, UnitSpec, joint_two_units};
 pub use quadrature::{ZRule, z_quadrature};
 pub use quantize::{EltInput, quantize};
+pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};

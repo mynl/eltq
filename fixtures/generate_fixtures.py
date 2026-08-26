@@ -30,7 +30,7 @@ import pandas as pd
 
 from eltq.reference import quantize_reference
 from eltq.reference_multiunit import multiunit_views_reference, secondary_two_units
-from eltq.terms import TermsError, parse_terms_line
+from eltq.terms import KEYWORDS, TermsError, parse_terms_line
 
 FIXTURES_DIR = Path(__file__).parent
 
@@ -294,7 +294,8 @@ def write_terms_parse_golden() -> None:
             continue
         raise AssertionError(f"expected a parse error for {line!r}")
     (FIXTURES_DIR / "golden" / "terms_parse.json").write_text(
-        json.dumps({"ok": ok, "errors": TERMS_PARSE_ERRORS}, indent=2),
+        json.dumps({"ok": ok, "errors": TERMS_PARSE_ERRORS,
+                    "keywords": sorted(KEYWORDS)}, indent=2),
         encoding="utf-8",
     )
     print(f"golden terms_parse: {len(ok)} parses, {len(TERMS_PARSE_ERRORS)} errors")

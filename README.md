@@ -27,7 +27,7 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and `dev/plan-multiunit.md`
 | [sigma-rule] total sd = σ_I + σ_C (Burke 2016), outright | 1.6.0 | done |
 | [reference-n-unit] n-unit reference, terms grammar, views | 1.7.0 | done |
 | [joint-two-unit] Rust bivariate joint pmf | 1.8.0 | done |
-| [terms-grammar] Rust parser + view-map compiler | 1.9.0 | planned |
+| [terms-grammar] Rust parser + view-map compiler | 1.9.0 | done |
 | [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | planned |
 | [ferocious-multiunit] own erf, real FFTs, 1M unit-row report | 1.11.0 | planned |
 

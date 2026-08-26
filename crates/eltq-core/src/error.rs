@@ -65,4 +65,6 @@ pub enum Error {
     UnitInadmissibleVariance { unit: String, sigma2: f64, v_max: f64 },
     #[error("the drop variance policy is not available for the two-unit joint")]
     BadJointPolicy,
+    #[error("terms: {0}")]
+    Terms(String),
 }
