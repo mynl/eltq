@@ -1,118 +1,60 @@
-# Standing New Project Instructions / Operating Procedure
+# eltq
 
-* Stack
-    * Python (>= 3.13)
-    * uv for venvs
-    * pathlib.Path for all file manipulations
-    * csv, parquet/feather, pandas data storage, not sqlite; prefer visible files to dbs unless real need for db.
-    * toml or yaml for config files (one choice for project - though see next)
-    * pyproject.toml (always toml, but configs can be yaml; just not a mixture of yaml/toml outside pyproject)
-    * use hatchling build backend
-    * flask / Boostrap web / fastAPI as appropriate
+Adds to `V:\dev\CLAUDE.md` (house rules). Project detail only — see **Deltas** at the foot.
 
-* Dev drive **IMPORTANT** I have a windows dev drive V:\dev. Use that for venvs (symlink into it). Don't want the massive venv churn in ai - it is a synology drive nas synced location.
+**Note the name.** The directory is `secondary-corrosion`; the crate, package, and product are
+**`eltq`**. Use `eltq` in prose and code.
 
-* docs
-    * Numpy style doc strings.
-    * Balanced level of docstrings and comments.
-    * Code must be maintainable and readable.
+**Ferociously fast ELT secondary-uncertainty quantization.** Converts a portfolio event loss table
+(ELT, ~1M rows) into two discrete, evenly spaced, rate-weighted loss-grid distributions:
 
-* UI: no buttons that change meaning with state (the infamous play/pause)
-    * use separate, explicitly-labeled actions instead.
-    * clean design (see ai/fiscus_project, ai/csv-viewer SPA, ai/great-servers, T:/worktrees/aggreate_api)
+- **raw** — each event contributes an atom of rate λ at its conditional mean μ;
+- **secondary** — each event's conditional loss is modeled as a beta on [0, M] matching
+  (μ, σ = σ_I + σ_C) and approximated by K equally weighted midpoint quantiles
+  x_k = M·Q(α, β; (k+½)/K).
 
-* Do not plan to use env variables, use config files
+Both are mapped to the grid g_i = i·h by a linear deposit rule that **preserves mass and first
+moment exactly.**
 
-* src/PACKGE project layout
+## The authoritative documents
 
-* Semantic versioning, start at 1.0.0; expect each feature bump 1.x.0. I don't want to get 1.0.101! That should likely be 5.20.0, see?
+- **`secondary-uncertainty-mathematical-specification.md` is the mathematical contract.** It
+  governs. Code conforms to it, not the other way round; if an implementation shortcut disagrees
+  with the spec, the spec wins and the discrepancy is a bug to report.
+- Implementation plans: `dev/done/plan-implementation.md` (1.0.0–1.5.0) and
+  `dev/done/plan-multiunit.md` (1.6.0–1.11.0 — joint multi-unit secondary uncertainty, unit terms,
+  view totals).
+- `README.md` carries the milestone table and the layout.
 
-* Label: use [human-readable] type labels for project steps and deliverables. No A1, A2, but [front-end], or []
+## Layout
 
-* Maintain README.md and, critically, CHANGELOG.md
+```
+crates/eltq-core/     the Rust engine — scalar and batched kernels, parallelism, own erf, real FFTs
+crates/eltq-python/   PyO3 bindings
+python/eltq/          the Python package, CSV route, SciPy fallback backend
+fixtures/             golden fixtures
+benchmarks/           performance suite
+notebooks/            demo + exploration
+dev/                  plans; dev/done/ once execution starts
+```
 
-* Git: you do a commit after each version bump. **One line** commit message, typically "[version number] we did this and that" and CHANGELOG then has [version number]: long description.
+Correctness is anchored by a **SciPy oracle plus golden fixtures and an acceptance suite**
+(milestone 1.0.0). That reference path is the thing that makes the fast path trustworthy — keep it
+working and keep it honest. An optimization that cannot be checked against the oracle is not
+finished.
 
-* **Diagnose / design / propose before editing source or tests.** Don't change code until told to proceed ("go ahead"). "Can you see the issue?" means explain, not fix.
-    * plan docs - go into ./dev with names plan-feature-1.md etc. When plan is completed move it to dev/done.
+## Deltas from house rules
 
-* Environment is **PowerShell on Windows**. No `awk`/`sed`/`head`/`tail` (even
-  via the Bash tool). Use `rg` + the Read/Edit/Write tools.
-
-* Prefer explicit, documented recipes over magic / auto-install behavior.
-
-
-* Keep rendered output tight — no gratuitous blank lines in blocks.
-
-* US spelling throughout (prose, docstrings, comments, identifiers).
-
-* ISO dates
-
-* Talking to me / working with me:
-    * AQIN - ask questions if needed
-    * SWIM - see what I mean
-    * **gummage** — is or would be perfection. From Chandler Bing i Friends. High praise: "that's gummage" = exactly right.
-    * I often multitask. Wait for input.
-
-* **IMPORTANT**
-    * **Consistency**: check my requests are consistent - naming etc.
-    * I can forget or not think - **CHALLENGE** if something does not seem like a good idea! I want you as a though-partner / design consultant. I may not always ask for exactly what I want...I am human after all!
-
-* Other examples
-    * All the code in ai folder is ai generated. You can look at the other projects to get an idea of how i like things to go.
-
-## Working style (KISS · Ask · Yell)
-
-- **Keep It Simple.** Prefer getting 90% of the ask the easy way to getting 100% via a
-  hellacious complication. Difficulty is a signal to **stop and talk**, not to push
-  through cleverly with a fragile workaround.
-- **Yell when something proves hard.** When the obvious/simple approach hits a wall,
-  surface the tradeoff loudly — don't silently engineer around it. Example: if one
-  table can't satisfy mixed formatting needs, propose splitting it into two; don't
-  contrive a hack to force one.
-- **Ask short questions** when a decision is genuinely Steve's, rather than guessing.
-- **When you have enough to act, act.** Don't re-litigate settled decisions or narrate
-  options you won't pursue. Give a recommendation, not an exhaustive survey.
-
-## Versioning & changelog
-
-- **Bump the version on every capability change** (new feature, behavior change, fix).
-  Keep all version strings in sync (e.g. `pyproject.toml` + `__init__.__version__`).
-- **Keep a matching CHANGELOG** entry (Keep a Changelog / SemVer: Added / Changed /
-  Fixed / Notes), dated with the current date. Patch bump for fixes/small features.
-- Steve reviews the version + CHANGELOG as the record of what changed.
-
-## Git & commits
-
-- **Claude commits each version but Claude never pushes**
-- **Commit messages match the existing `git log` style** — terse, e.g.
-  `X.Y.Z short summary of what changed` (literally one line), ending with the Co-Authored-By trailer. The CHANGELOG provides the detail, with a new section per version.
-
-## Data firewall & privacy
-Be aware of privacy issues.
-
-- **Real/sensitive data never enters the repo or version control.** Develop and test
-  ONLY against synthetic fixtures committed under `fixtures/`.
-- **Never read, copy, or echo real data** into the repo, logs, or conversation. Real
-  inputs live OUTSIDE the repo under an env-var-configured path.
-- `.gitignore` blocks data files (`*.csv` except fixtures, DB/store files, `.env`,
-  local config). **Before any commit, sanity-check the staged file list for leakage.**
-- **No network egress in core code.** Any future outbound fetch must be opt-in and
-  pull public data IN only — never send private data out.
-- **Web/servers bind localhost by default** (`127.0.0.1`, never `0.0.0.0`); make the
-  bind configurable and require a token for any non-localhost bind.
-
-## Code & project conventions
-
-- **Match the surrounding code's style** — comment density, naming, idioms. New code
-  should read like the code already there - subject to having a standard minimum level of comments to ensure readability. 
-- **Reuse Steve's own packages and sibling projects** before reinventing; clone the
-  shape of an existing sibling app rather than inventing a new architecture.
-- **Type hints where they aid clarity.** Keep modules thin with clear separation of
-  concerns (e.g. parsing separate from business logic separate from reporting).
-- **Never hardcode absolute paths.** Use env vars / config; created lazily.
-- **Config is the single source of truth** for locations and behavior; edits write to
-  the config / app-state dir, never into the repo or dev tree.
-- **Plans live in `./dev`; move them to `./dev/done` when complete.**
-- **Define canonical orderings once** (e.g. a category order) and enforce centrally —
-  not ad-hoc per view.
+- **Overrides the stack default.** This is a **Rust + Python** project: a Cargo workspace with
+  PyO3 bindings, not a pure-Python uv project. Both `cargo` and the Python tooling are in play.
+- **Overrides single-sourced versioning.** The version appears in **both** `Cargo.toml` and
+  `pyproject.toml` and they must be bumped together. Currently 1.11.0 in both.
+- **Speed is a product requirement, not a nice-to-have** — "ferociously fast" is in the project's
+  own description, the work has a `[ferocious]` milestone, and there is a benchmark suite.
+  Performance regressions are defects. Equally, per the house KISS rule: raise it before trading
+  large complexity for small speed.
+- **Numerical exactness claims are load-bearing.** Mass and first-moment preservation are exact
+  properties of the deposit rule, not approximations. Any change touching the deposit rule, the
+  quantile construction, or the σ_I + σ_C total-sd rule (Burke 2016) must be checked against the
+  spec and the oracle before it lands.
+- No web face, so the house localhost-bind and UI rules do not apply.
