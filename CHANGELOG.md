@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.2] - 2026-10-21
+
+### Fixed
+
+- [fft-ceded] `multiunit_views(views=("ceded",), convolution="fft")` panicked (`range end index ... out of range`) on any event with a unit that has no terms. Ceded never uses the shared block of bare units, so their spectra were never built, yet the FFT path formed the block from them. `auto` could reach the same panic when large correlated bare units tipped its estimate to FFT.
+- The shared bare block is now built, on both paths, only when some computed view other than ceded reads it, and the `auto` cost estimate charges it only then. Ceded-only runs skip that work; results for every other view combination are unchanged.
+- New tests: direct, FFT and auto agree with each other and with the reference for each single view and for ceded plus net, on an event with a termed unit, a bare beta and a bare comonotone unit (the first test to put a comonotone unit in the shared block).
+
 ## [1.11.1] - 2026-10-21
 
 ### Fixed

@@ -293,6 +293,13 @@ fn rowset_for(view: View, terms: &UnitTerms) -> Option<usize> {
     }
 }
 
+/// Whether the event needs the shared bare block: some unit is bare and some
+/// computed view other than ceded (which never uses bare units) reads it.
+/// A view's own `uses_shared` is true only when this is.
+fn uses_shared_block(units: &[LiveUnit], computed: &[View]) -> bool {
+    units.iter().any(|u| u.bare) && computed.iter().any(|&v| v != View::Ceded)
+}
+
 fn view_of_set(set: usize) -> View {
     match set {
         SET_GROSS => View::Gross,
@@ -423,8 +430,9 @@ impl Worker<'_> {
     fn estimate(&self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View]) -> (f64, f64) {
         let q = self.z.len();
         let bare_exists = units.iter().any(|u| u.bare);
+        let shared_needed = uses_shared_block(units, computed);
         let mut direct = 0.0;
-        // Shared bare block.
+        // Shared bare block, charged only when some computed view reads it.
         let (c_ind, shared_ind_len) = chain_cost(
             1,
             units.iter().filter(|u| u.bare && u.rows == 1).map(|u| u.lens[SET_BASE]),
@@ -433,7 +441,9 @@ impl Worker<'_> {
             1,
             units.iter().filter(|u| u.bare && u.rows > 1).map(|u| u.lens[SET_BASE]),
         );
-        direct += c_ind + q as f64 * c_corr;
+        if shared_needed {
+            direct += c_ind + q as f64 * c_corr;
+        }
         let mut max_total = 1;
         let mut forward = 0usize;
         let mut products = 0.0;
@@ -488,7 +498,7 @@ impl Worker<'_> {
         }
         let n = fft_size(max_total);
         let half = (n / 2 + 1) as f64;
-        let shared_products = if bare_exists {
+        let shared_products = if shared_needed {
             (units.iter().filter(|u| u.bare).count() * q) as f64
         } else {
             0.0
@@ -501,28 +511,31 @@ impl Worker<'_> {
     fn direct_views(&mut self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View], pmfs: &mut [Vec<f64>]) {
         let q = self.z.len();
         let bare_exists = units.iter().any(|u| u.bare);
-        // Shared bare block: independent part once, correlated part per z.
-        self.shared_indep.clear();
-        self.shared_indep.push(1.0);
-        for u in units.iter().filter(|u| u.bare && u.rows == 1) {
-            convolve_direct(&self.shared_indep, u.set(SET_BASE), &mut self.tmp);
-            std::mem::swap(&mut self.shared_indep, &mut self.tmp);
-        }
         let shared_corr_units: Vec<usize> = (0..units.len()).filter(|&i| units[i].bare && units[i].rows > 1).collect();
-        self.shared_corr.resize_with(q, Vec::new);
-        if shared_corr_units.is_empty() {
-            for s in self.shared_corr.iter_mut() {
-                s.clear();
+        // Shared bare block: independent part once, correlated part per z;
+        // skipped when no computed view reads it (ceded alone).
+        if uses_shared_block(units, computed) {
+            self.shared_indep.clear();
+            self.shared_indep.push(1.0);
+            for u in units.iter().filter(|u| u.bare && u.rows == 1) {
+                convolve_direct(&self.shared_indep, u.set(SET_BASE), &mut self.tmp);
+                std::mem::swap(&mut self.shared_indep, &mut self.tmp);
             }
-        } else {
-            for zi in 0..q {
-                self.acc.clear();
-                self.acc.push(1.0);
-                for &i in &shared_corr_units {
-                    convolve_direct(&self.acc, units[i].row(SET_BASE, zi), &mut self.tmp);
-                    std::mem::swap(&mut self.acc, &mut self.tmp);
+            self.shared_corr.resize_with(q, Vec::new);
+            if shared_corr_units.is_empty() {
+                for s in self.shared_corr.iter_mut() {
+                    s.clear();
                 }
-                std::mem::swap(&mut self.shared_corr[zi], &mut self.acc);
+            } else {
+                for zi in 0..q {
+                    self.acc.clear();
+                    self.acc.push(1.0);
+                    for &i in &shared_corr_units {
+                        convolve_direct(&self.acc, units[i].row(SET_BASE, zi), &mut self.tmp);
+                        std::mem::swap(&mut self.acc, &mut self.tmp);
+                    }
+                    std::mem::swap(&mut self.shared_corr[zi], &mut self.acc);
+                }
             }
         }
         for (vi, &view) in computed.iter().enumerate() {
@@ -628,10 +641,11 @@ impl Worker<'_> {
                 }
             }
         }
-        // Shared bare block spectrum per z.
+        // Shared bare block spectrum per z, only when some computed view
+        // reads it: with ceded alone the bare units' spectra were never built.
         let shared_rows = if units.iter().any(|u| u.bare && u.rows > 1) { q } else { 1 };
         self.shared_spec.resize_with(shared_rows, Vec::new);
-        if bare_exists {
+        if uses_shared_block(units, computed) {
             for zi in 0..shared_rows {
                 let s = &mut self.shared_spec[zi];
                 s.clear();
@@ -1274,6 +1288,34 @@ mod tests {
                 assert!((x - y).abs() < 1e-14);
             }
         }
+    }
+
+    #[test]
+    fn ceded_only_fft_skips_the_unused_bare_block() {
+        // Ceded never uses bare units, so their spectra are never built; the
+        // FFT path must not form the shared block from them (1.11.2).
+        let r = rows(&[
+            (1, 0, 0.01, 300.0, 40.0, 30.0, 1000.0),
+            (1, 1, 0.01, 200.0, 50.0, 60.0, 800.0),
+            (1, 2, 0.01, 250.0, 0.0, 120.0, 900.0),
+        ]);
+        let terms = vec![
+            parse_terms_line("unit a 1000 xs 0 occurrence net of 50% po 500 xs 0").unwrap(),
+            UnitTerms::bare("b"),
+            UnitTerms::bare("c"),
+        ];
+        let mut config = MultiConfig::new(10.0);
+        config.views = vec![View::Ceded];
+        config.z_nodes = 8;
+        config.convolution = Convolution::Fft;
+        let fft = multiunit_views(&input(&r), &terms, &config).unwrap();
+        config.convolution = Convolution::Direct;
+        let direct = multiunit_views(&input(&r), &terms, &config).unwrap();
+        assert_eq!((fft.meta.fft_paths, direct.meta.direct_paths), (1, 1));
+        for (x, y) in fft.views[0].iter().zip(&direct.views[0]) {
+            assert!((x - y).abs() < 1e-15, "{x} vs {y}");
+        }
+        assert!((fft.meta.view_mass[0] - 0.01).abs() < 1e-15);
     }
 
     #[test]

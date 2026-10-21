@@ -17,6 +17,7 @@ from eltq import reference_multiunit as rm
 from eltq.terms import parse_terms_line
 
 from conftest import (
+    MULTI_IMPLS,
     diag_count,
     load_joint_golden,
     load_multi_fixture,
@@ -394,3 +395,38 @@ def test_off_grid_beta_supports_keep_full_mass(multi):
     for view in meta.views:
         assert math.isclose(views[view].sum(), 1.0, abs_tol=1e-12), view
     assert views["ground_up"][6] > 1e-6
+
+
+# ---------------------------------------------------------------------------
+# [fft-ceded] convolution paths agree when bare units sit beside a termed unit.
+
+BARE_BLOCK_ROWS = [
+    ("e", "a", 0.01, 300.0, 40.0, 30.0, 1000.0),   # termed
+    ("e", "b", 0.01, 200.0, 50.0, 60.0, 800.0),    # bare beta
+    ("e", "c", 0.01, 250.0, 0.0, 120.0, 900.0),    # bare comonotone (sd_indep = 0)
+]
+BARE_BLOCK_TERMS = "unit a 1000 xs 0 occurrence net of 50% po 500 xs 0"
+
+
+@pytest.mark.parametrize("views", [("ground_up",), ("gross",), ("ceded",), ("net",),
+                                   ("ceded", "net")])
+def test_convolution_paths_agree_with_bare_block(views):
+    # Ceded never uses the shared bare block; a ceded-only FFT run built the
+    # block from spectra it never computed and panicked (1.11.2).
+    import eltq
+
+    reference, package = MULTI_IMPLS
+    params = dict(terms=BARE_BLOCK_TERMS, bucket_size=10.0, views=views, z_nodes=16)
+    want, _ = run_multi(reference, BARE_BLOCK_ROWS, **params)
+    paths = {c: run_multi(package, BARE_BLOCK_ROWS, convolution=c, **params)[0]
+             for c in ("direct", "fft", "auto")}
+    for view in views:
+        for convolution in ("fft", "auto"):
+            assert np.allclose(paths[convolution][view], paths["direct"][view],
+                               rtol=0.0, atol=1e-13), (view, convolution)
+        for convolution, got in paths.items():
+            assert np.allclose(got[view], want[view], rtol=1e-9, atol=1e-13 * 0.01), \
+                (view, convolution)
+    if eltq.BACKEND == "rust":
+        _, meta = run_multi(package, BARE_BLOCK_ROWS, convolution="fft", **params)
+        assert meta.engine["fft_paths"] == 1
