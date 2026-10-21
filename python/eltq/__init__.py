@@ -29,7 +29,7 @@ import numpy as np
 from eltq._meta import JointMeta, Meta, MultiMeta, RowIssues
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "1.11.0"
+__version__ = "1.11.1"
 
 try:
     from eltq._eltq import (
@@ -571,8 +571,8 @@ def multiunit_views(
         Grid spacing h; every monetary breakpoint in ``terms`` must be a
         multiple of h (no silent rounding).
     grid_length : int, optional
-        Number of grid nodes; auto-derived from the largest event support
-        (sum of unit maxima) when None.
+        Number of grid nodes; auto-derived from the largest event span
+        (each unit's support rounded up to the grid, summed) when None.
     views : sequence of str, default all four
         Views to compute and return.
     z_nodes : int, default 32

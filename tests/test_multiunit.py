@@ -362,3 +362,35 @@ def test_terms_line_is_reusable_in_engine(multi):
     views, meta = run_multi(multi, [("e", "a", 0.01, 1000.0, 0.0, 0.0, 1000.0)], terms=terms,
                             bucket_size=10.0)
     assert views["net"][30] == pytest.approx(0.01)
+
+
+# ---------------------------------------------------------------------------
+# [tail-support] the grid covers each unit's support rounded up to the grid.
+
+TWO_ATOMS = [("e", "a", 1.0, 13.0, 0.0, 0.0, 20.0), ("e", "b", 1.0, 13.0, 0.0, 0.0, 20.0)]
+
+
+def test_off_grid_atoms_keep_the_tail(multi):
+    # Each atom at 13 deposits [0, 0.7, 0.3] on h = 10, so the total reaches
+    # 40; sizing by 13 + 13 = 26 gave 4 nodes and dropped the 0.09 at 40.
+    views, meta = run_multi(multi, TWO_ATOMS, bucket_size=10.0, views=("ground_up",))
+    assert meta.grid_length == 5
+    assert np.allclose(views["ground_up"], [0.0, 0.0, 0.49, 0.42, 0.09], rtol=0.0, atol=1e-15)
+    assert math.isclose(meta.view_mass["ground_up"], 1.0, rel_tol=1e-15)
+    assert math.isclose(meta.view_mean["ground_up"], 26.0, rel_tol=1e-14)
+    # An explicit grid that covers 26 but not the span of 4 buckets is refused.
+    with pytest.raises(multi.overflow_error) as info:
+        run_multi(multi, TWO_ATOMS, bucket_size=10.0, views=("ground_up",), grid_length=4)
+    assert info.value.required_length == 5
+
+
+def test_off_grid_beta_supports_keep_full_mass(multi):
+    # Three betas on [0, 16] at h = 10 each span 2 buckets: 7 nodes, not the
+    # 6 that a support of 48 suggests. The mean sits high so the top bucket
+    # carries visible mass.
+    rows = [("e", unit, 1.0, 12.0, 2.0, 1.0, 16.0) for unit in "abc"]
+    views, meta = run_multi(multi, rows, bucket_size=10.0)
+    assert meta.grid_length == 7
+    for view in meta.views:
+        assert math.isclose(views[view].sum(), 1.0, abs_tol=1e-12), view
+    assert views["ground_up"][6] > 1e-6

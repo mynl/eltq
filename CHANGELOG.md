@@ -3,6 +3,18 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.1] - 2026-10-21
+
+### Fixed
+
+- [tail-support] `multiunit_views` sized the event grid from the sum of unit supports in money, but each unit's pmf is its support rounded up to the grid, so an event with off-grid supports was longer than the grid. The Rust engine dropped the tail silently (two atoms at 13 on h = 10 returned mass 0.91, mean 22.4 instead of 1 and 26); the reference raised a NumPy broadcast error. Both now size by event span in buckets, the sum of each unit's rounded support.
+- This changes numbers: an auto grid can grow by up to one node per unit, and an explicit `grid_length` that only covered the money support now raises `GridOverflowError` with the correct `required_length`. Fixtures whose supports lie on the grid, including every golden, are unchanged.
+- The Rust deposit asserts that each event pmf fits the grid, so a future sizing mismatch fails loudly instead of losing mass.
+
+### Changed
+
+- Plan `dev/plan-multiunit-fixes.md` started and moved to `dev/done/`.
+
 ## [1.11.0] - 2026-08-26
 
 ### Added

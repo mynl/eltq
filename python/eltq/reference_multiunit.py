@@ -528,9 +528,9 @@ def multiunit_views_reference(
         Grid spacing h. Every monetary breakpoint in ``terms`` must be a
         multiple of h.
     grid_length : int, optional
-        Number of grid nodes; auto-derived from the largest event support
-        (sum of unit maxima) when None. Insufficient explicit grids raise
-        ``GridOverflowError``.
+        Number of grid nodes; auto-derived from the largest event span
+        (each unit's support rounded up to the grid, summed) when None.
+        Insufficient explicit grids raise ``GridOverflowError``.
     views : sequence of str
         Views to return, any of ground_up, gross, ceded, net.
     z_nodes, z_rule
@@ -589,11 +589,14 @@ def multiunit_views_reference(
     unit_order: dict[str, None] = {}
     diagnostics: dict[str, RowIssues] = {}
 
-    # Pass 1: group and classify. Grid coverage needs every event's support
-    # (sum of contributing unit maxima) before any deposit happens.
+    # Pass 1: group and classify. Grid coverage needs every event's span
+    # before any deposit happens: each contributing unit's pmf has
+    # grid_length_for(support, h) nodes, so the convolution across units has
+    # span + 1 nodes with span = sum(grid_length_for(support, h) - 1).
+    # Summing supports in money first undercounts off-grid supports.
     ranges = _events(event_id)
     preps: list[_Prepped | None] = [None] * n_rows
-    event_support = np.zeros(len(ranges))
+    event_span = np.zeros(len(ranges), dtype=np.int64)
     event_live = np.zeros(len(ranges), dtype=bool)
     rates = columns["rate"]
     valid_rows = 0
@@ -618,7 +621,7 @@ def multiunit_views_reference(
             for j in range(start, end):
                 _note(diagnostics, "zero_rate", f"{eid}/{unit_id[j]}")
             continue
-        support = 0.0
+        span = 0
         for j in range(start, end):
             unit = Unit(columns["mean_loss"][j], columns["sd_indep"][j],
                         columns["sd_corr"][j], columns["max_loss"][j])
@@ -628,25 +631,26 @@ def multiunit_views_reference(
                 continue
             preps[j] = prep
             valid_rows += 1
-            support += prep.support
+            span += grid_length_for(prep.support, h) - 1
         if any(preps[j] is not None for j in range(start, end)):
             event_live[e] = True
-            event_support[e] = support
+            event_span[e] = span
 
-    max_support = float(event_support.max()) if len(ranges) else 0.0
+    max_span = int(event_span.max()) if len(ranges) else 0
+    required = max_span + 1
     if grid_length is None:
-        n = grid_length_for(max_support, h)
+        n = required
     else:
         n = int(grid_length)
         if n < 1:
             raise EltqError(f"grid_length must be >= 1, got {n}")
-        if max_support > (n - 1) * h:
-            required = grid_length_for(max_support, h)
+        if required > n:
             examples = [str(event_id[start]) for e, (start, _) in enumerate(ranges)
-                        if event_live[e] and event_support[e] > (n - 1) * h][:MAX_EXAMPLES]
+                        if event_live[e] and event_span[e] + 1 > n][:MAX_EXAMPLES]
             raise GridOverflowError(
                 f"grid of {n} nodes at spacing {h} covers only {(n - 1) * h}, "
-                f"but the largest event support is {max_support}; "
+                f"but the largest event spans {max_span} buckets (each unit's "
+                f"support rounded up to the grid, summed); "
                 f"grid_length >= {required} required",
                 required_length=required, examples=examples)
 

@@ -736,7 +736,7 @@ pub fn multiunit_views(
     }
     let (z, w) = z_quadrature(config.z_nodes, config.z_rule)?;
 
-    // Pass 1: structure, classification, event supports.
+    // Pass 1: structure, classification, event spans.
     let mut diagnostics = Diagnostics::default();
     let mut classes = vec![
         RowClass {
@@ -763,7 +763,11 @@ pub fn multiunit_views(
         events.push((start, end));
         start = end;
     }
-    let mut event_support = vec![0.0_f64; events.len()];
+    // Event span in buckets: each live unit's pmf has
+    // `grid_length_for(support, h)` nodes, so the convolution across units
+    // has span + 1. Summing supports in money first undercounts whenever a
+    // support is off the grid.
+    let mut event_span = vec![0usize; events.len()];
     let mut event_live = vec![false; events.len()];
     let mut units_here: Vec<i64> = Vec::new();
     for (e, &(start, end)) in events.iter().enumerate() {
@@ -803,36 +807,37 @@ pub fn multiunit_views(
             }
             continue;
         }
-        let mut support = 0.0;
+        let mut span = 0;
         for row in start..end {
             let class = classify_unit_row(row, &input.spec(row), config.variance_policy, &mut diagnostics)?;
             classes[row] = class;
             if class.kind != UnitKind::Drop {
                 event_live[e] = true;
-                support += if class.kind == UnitKind::Atom { class.mu } else { input.max_loss[row] };
+                // Same support as `UnitPlan::support`, which sizes the unit's rows in pass 2.
+                let support = if class.kind == UnitKind::Atom { class.mu } else { input.max_loss[row] };
+                span += grid_length_for(support, h) - 1;
             }
         }
-        event_support[e] = support;
+        event_span[e] = span;
     }
-    let max_support = event_support.iter().cloned().fold(0.0_f64, f64::max);
-    let auto_length = grid_length_for(max_support, h);
+    let max_span = event_span.iter().copied().max().unwrap_or(0);
+    let auto_length = max_span + 1;
     let n = match config.grid_length {
         None => auto_length,
         Some(n) => {
-            let top = (n - 1) as f64 * h;
-            if max_support > top {
+            if auto_length > n {
                 let example_rows = events
                     .iter()
                     .enumerate()
-                    .filter(|(e, _)| event_live[*e] && event_support[*e] > top)
+                    .filter(|(e, _)| event_live[*e] && event_span[*e] + 1 > n)
                     .map(|(_, &(start, _))| start)
                     .take(MAX_EXAMPLES)
                     .collect();
                 return Err(Error::GridOverflow {
                     grid_length: n,
                     bucket_size: h,
-                    top,
-                    max_loss: max_support,
+                    top: (n - 1) as f64 * h,
+                    max_loss: max_span as f64 * h,
                     required: auto_length,
                     example_rows,
                 });
@@ -958,6 +963,13 @@ pub fn multiunit_views(
                 let mass: f64 = pmf.iter().sum();
                 partial.max_mass_error = partial.max_mass_error.max((mass - 1.0).abs());
                 if vi < n_views {
+                    // Pass 1 sized the grid to every event's span; a longer
+                    // pmf is a sizing bug and must not lose its tail silently.
+                    assert!(
+                        pmf.len() <= n,
+                        "event at row {start}: pmf of {} nodes exceeds the grid of {n}",
+                        pmf.len()
+                    );
                     for (dst, &p) in partial.views[vi].iter_mut().zip(pmf) {
                         *dst += lam * p;
                     }
