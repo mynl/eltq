@@ -3,6 +3,18 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.4] - 2026-10-21
+
+### Fixed
+
+- [gauss-hermite-ties] Gauss-Hermite runs with a comonotone unit (σ_I = 0) failed with "beta quantile evaluation failed" once Q reached the hundreds. Two adjacent nodes in z ~ [8.14, 8.29] both give Φ(z) = 1 - 2^-53, and the quantile walk rejected the repeated target. `joint_two_units` failed at 19 of the 37 node counts from 600 to 2400, including Q = 700, and `multiunit_views` on the fixture failed at Q = 1001, the z-convergence study's reference size. The midpoint rule was never affected.
+- `batched::beta_quantiles` now accepts non-decreasing targets: it solves the first of each run of equal values and copies that quantile to the rest of the run. All 37 node counts now succeed, with total mass within 9e-16 of 1.
+- New tests: the kernel on repeated targets in both halves (including 1 - 2^-53); the joint at Q = 700 and 1001, and the fixture at Q = 1001, on both backends.
+
+### Changed
+
+- Plan `dev/done/plan-multiunit-fixes.md` complete (1.11.1 to 1.11.4).
+
 ## [1.11.3] - 2026-10-21
 
 ### Fixed

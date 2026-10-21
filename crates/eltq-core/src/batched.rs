@@ -70,14 +70,19 @@ pub fn beta_midpoint_quantiles(alpha: f64, beta: f64, out: &mut [f64]) -> Result
     Ok(())
 }
 
-/// Fill `out[k] = Q(alpha, beta; targets[k])` for ascending targets in
-/// [0, 1]: strictly ascending in the interior, with repeated 0 at the
-/// start and repeated 1 at the end allowed (Gauss-Hermite nodes push
-/// `Phi(w_c z)` to exactly 0 or 1); endpoint targets yield 0 and 1 exactly.
+/// Fill `out[k] = Q(alpha, beta; targets[k])` for non-decreasing targets in
+/// [0, 1]; endpoint targets yield 0 and 1 exactly.
+///
+/// Repeated targets are expected: Gauss-Hermite nodes push `Phi(w_c z)` to
+/// exactly 0 or 1 in the tails, and from Q in the hundreds two adjacent
+/// nodes in z ~ [8.14, 8.29] both give `Phi(z) = 1 - 2^-53`. Only the first
+/// of each run of equal interior targets is solved; the rest of the run
+/// copies its quantile, so the walks see strictly increasing targets.
 ///
 /// Same machinery as the midpoint kernel: the lower half is walked
 /// directly and the upper half on the reflected distribution with exactly
-/// formed complements, so both tails keep full relative precision.
+/// formed complements, so both tails keep full relative precision. A run of
+/// equal targets never straddles the split, which is a threshold on u.
 pub fn beta_quantiles(alpha: f64, beta: f64, targets: &[f64], out: &mut [f64]) -> Result<(), KernelError> {
     assert_eq!(targets.len(), out.len());
     if targets.is_empty() {
@@ -89,10 +94,7 @@ pub fn beta_quantiles(alpha: f64, beta: f64, targets: &[f64], out: &mut [f64]) -
     if targets.iter().any(|u| !(0.0..=1.0).contains(u)) {
         return Err(KernelError);
     }
-    if targets
-        .windows(2)
-        .any(|w| w[1] < w[0] || (w[1] == w[0] && w[0] > 0.0 && w[0] < 1.0))
-    {
+    if targets.windows(2).any(|w| w[1] < w[0]) {
         return Err(KernelError);
     }
     let lower = BetaFn::new(alpha, beta);
@@ -101,28 +103,28 @@ pub fn beta_quantiles(alpha: f64, beta: f64, targets: &[f64], out: &mut [f64]) -
         return Err(KernelError);
     }
     let split = targets.partition_point(|&u| u <= cdf_half);
-    let interior = |u: f64| u > 0.0 && u < 1.0;
-    walk(
-        &lower,
-        (0..split).filter(|&i| interior(targets[i])).map(|i| (i, targets[i])),
-        out,
-    )?;
+    // Interior targets that start a run of equal values: the ones solved.
+    let leads = |i: usize| targets[i] > 0.0 && targets[i] < 1.0 && (i == 0 || targets[i - 1] != targets[i]);
+    walk(&lower, (0..split).filter(|&i| leads(i)).map(|i| (i, targets[i])), out)?;
     if split < targets.len() {
         let upper = BetaFn::new(beta, alpha);
         walk_map(
             &upper,
             (split..targets.len())
                 .rev()
-                .filter(|&j| interior(targets[j]))
+                .filter(|&j| leads(j))
                 .map(|j| (j, 1.0 - targets[j])),
             |j, y| out[j] = 1.0 - y,
         )?;
     }
-    for (slot, &u) in out.iter_mut().zip(targets) {
+    for i in 0..targets.len() {
+        let u = targets[i];
         if u == 0.0 {
-            *slot = 0.0;
+            out[i] = 0.0;
         } else if u == 1.0 {
-            *slot = 1.0;
+            out[i] = 1.0;
+        } else if i > 0 && targets[i - 1] == u {
+            out[i] = out[i - 1];
         }
     }
     Ok(())
@@ -137,6 +139,9 @@ where
 }
 
 /// Walk targets with strictly increasing u, storing via `store(idx, x)`.
+/// Callers with repeated targets pass the first of each run and copy the
+/// rest (`beta_quantiles`): the warm-started step predicts along du and
+/// brackets in [x_prev, 1), which assumes u moves forward.
 fn walk_map<I, S>(bf: &BetaFn, targets: I, mut store: S) -> Result<(), KernelError>
 where
     I: Iterator<Item = (usize, f64)>,
@@ -412,7 +417,33 @@ mod tests {
         assert_eq!(xs[0], 0.0);
         assert_eq!(xs[2], 1.0);
         assert!(beta_quantiles(2.0, 3.0, &[0.5, 0.4], &mut xs[..2]).is_err());
-        assert!(beta_quantiles(2.0, 3.0, &[0.4, 0.4], &mut xs[..2]).is_err());
+        // Repeated interior targets (Gauss-Hermite nodes whose Phi rounds to
+        // the same value) are solved once and copied.
+        beta_quantiles(2.0, 3.0, &[0.4, 0.4], &mut xs[..2]).unwrap();
+        assert_eq!(xs[0], xs[1]);
+        let mut lone = [0.0; 1];
+        beta_quantiles(2.0, 3.0, &[0.4], &mut lone).unwrap();
+        // Within a run the copies are bitwise equal; against a lone solve
+        // they agree to solver precision (the run reaches 0.4 by a warm step
+        // from 0.1, the lone call by a cold solve).
+        let close = |a: f64, b: f64| (a - b).abs() <= 4.0 * f64::EPSILON * b;
+        let mut run = [0.0; 5];
+        beta_quantiles(2.0, 3.0, &[0.1, 0.4, 0.4, 0.4, 0.7], &mut run).unwrap();
+        assert_eq!(&run[2..4], &[run[1]; 2]);
+        assert!(close(run[1], lone[0]), "{} vs {}", run[1], lone[0]);
+        assert!(run[0] < run[1] && run[3] < run[4]);
+        // The same in the reflected upper half (cdf(1/2) = 0.6875 here),
+        // including the value 1 - 2^-53 that Phi(z) takes for z near 8.2.
+        let top = 1.0 - f64::EPSILON / 2.0;
+        let mut upper = [0.0; 6];
+        beta_quantiles(2.0, 3.0, &[0.2, 0.9, 0.9, top, top, 1.0], &mut upper).unwrap();
+        let mut lone_upper = [0.0; 2];
+        beta_quantiles(2.0, 3.0, &[0.9], &mut lone_upper[..1]).unwrap();
+        beta_quantiles(2.0, 3.0, &[top], &mut lone_upper[1..]).unwrap();
+        assert!(upper[1] == upper[2] && upper[3] == upper[4]);
+        assert!(close(upper[1], lone_upper[0]) && close(upper[3], lone_upper[1]));
+        assert!(upper[0] < upper[1] && upper[2] < upper[3] && upper[4] < upper[5]);
+        assert_eq!(upper[5], 1.0);
         // Repeated endpoints (Gauss-Hermite tails) are accepted.
         let mut ys = [0.0; 6];
         beta_quantiles(2.0, 1.5, &[0.0, 0.0, 1e-20, 0.5, 1.0, 1.0], &mut ys).unwrap();

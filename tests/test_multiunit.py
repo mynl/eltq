@@ -243,16 +243,25 @@ def test_gauss_hermite_reconciles_tightly_on_smooth_units(multi):
 def test_gauss_hermite_with_comonotone_units_at_large_q(multi):
     # Gauss-Hermite nodes reach |z| ~ 10 at Q = 64, where Phi(w_c z) rounds
     # to exactly 0 or 1: the comonotone quantile walk must accept repeated
-    # endpoint targets (1.11.0 regression).
+    # endpoint targets (1.11.0 regression). From Q in the hundreds two
+    # adjacent nodes in [8.14, 8.29] both give Phi = 1 - 2^-53, a repeated
+    # interior target, which must be accepted too (1.11.4).
     df, terms = load_multi_fixture()
-    views, meta = run_multi(multi, df, terms=terms, bucket_size=10.0, z_nodes=64,
-                            z_rule="gauss_hermite")
-    for view in meta.views:
-        assert math.isclose(views[view].sum(), meta.total_rate, rel_tol=1e-12), view
+    for z_nodes in (64, 1001):
+        views, meta = run_multi(multi, df, terms=terms, bucket_size=10.0, z_nodes=z_nodes,
+                                z_rule="gauss_hermite")
+        for view in meta.views:
+            assert math.isclose(views[view].sum(), meta.total_rate, rel_tol=1e-12), \
+                (view, z_nodes)
     como = rm.Unit(574.0, 0.0, 232.0, 1000.0)
     pmf, _, _, _ = multi.joint(como, U2, bucket_size=H, n1=N1, n2=N2, n_z=64,
                                z_rule="gauss_hermite")
     assert math.isclose(pmf.sum(), 1.0, abs_tol=1e-12)
+    for z_nodes in (700, 1001):
+        pmf, _, _, _ = multi.joint((200.0, 0.0, 250.0, 1000.0), (500.0, 300.0, 200.0, 2000.0),
+                                   bucket_size=H, n1=N1, n2=N2, n_z=z_nodes,
+                                   z_rule="gauss_hermite")
+        assert math.isclose(pmf.sum(), 1.0, abs_tol=1e-12), z_nodes
 
 
 def test_normalize(multi):
