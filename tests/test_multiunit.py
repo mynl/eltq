@@ -430,3 +430,46 @@ def test_convolution_paths_agree_with_bare_block(views):
     if eltq.BACKEND == "rust":
         _, meta = run_multi(package, BARE_BLOCK_ROWS, convolution="fft", **params)
         assert meta.engine["fft_paths"] == 1
+
+
+# ---------------------------------------------------------------------------
+# [fft-nonnegative] the FFT path returns nonnegative weights.
+
+def concentrated_portfolio(events=200, seed=20261021):
+    """Seeded ELT of ``events`` events x units a, b, d, e of the fixture terms
+    (policy and reinsurance) with tight betas: most bins inside an event's
+    FFT range are exactly zero, which is where inverse-transform round-off
+    used to come out negative."""
+    rng = np.random.default_rng(seed)
+    units = np.array(list("abde"), dtype=object)
+    n = events * units.size
+    m = rng.choice([800.0, 1000.0, 1200.0, 2000.0], size=n)
+    mu = m * rng.uniform(0.1, 0.5, size=n)
+    sd = rng.uniform(0.02, 0.1, size=n) * np.sqrt(mu * (m - mu))
+    corr_share = rng.uniform(0.0, 1.0, size=n)
+    return {
+        "event_id": list(np.repeat(np.arange(events), units.size)),
+        "unit_id": list(np.tile(units, events)),
+        "rate": np.repeat(rng.uniform(1e-3, 1e-2, size=events), units.size),
+        "mean_loss": mu,
+        "sd_indep": sd * (1.0 - corr_share),
+        "sd_corr": sd * corr_share,
+        "max_loss": m,
+    }
+
+
+def test_fft_weights_are_nonnegative():
+    # 1.11.2 left ~1e-18 negatives in up to 171 bins per view on the
+    # concentrated portfolio; the direct path never produced any.
+    import eltq
+
+    if eltq.BACKEND != "rust":
+        pytest.skip("the FFT path is a property of the Rust engine")
+    _, package = MULTI_IMPLS
+    df, terms = load_multi_fixture()
+    for elt in (df, concentrated_portfolio()):
+        views, meta = run_multi(package, elt, terms=terms, bucket_size=10.0, convolution="fft")
+        assert meta.engine["direct_paths"] == 0
+        for view in meta.views:
+            assert views[view].min() >= 0.0, view
+            assert math.isclose(views[view].sum(), meta.total_rate, rel_tol=1e-12), view

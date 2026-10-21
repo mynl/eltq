@@ -1260,6 +1260,7 @@ mod tests {
             for (x, y) in d.iter().zip(f) {
                 assert!((x - y).abs() < 1e-14, "{x} vs {y}");
             }
+            assert!(f.iter().all(|&y| y >= 0.0), "negative FFT weight");
         }
         let meta = &direct.meta;
         let total_rate = 0.010 + 0.020 + 0.005 + 0.003 + 0.007;
@@ -1314,6 +1315,7 @@ mod tests {
         assert_eq!((fft.meta.fft_paths, direct.meta.direct_paths), (1, 1));
         for (x, y) in fft.views[0].iter().zip(&direct.views[0]) {
             assert!((x - y).abs() < 1e-15, "{x} vs {y}");
+            assert!(*x >= 0.0, "negative FFT weight {x}");
         }
         assert!((fft.meta.view_mass[0] - 0.01).abs() < 1e-15);
     }

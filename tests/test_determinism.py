@@ -75,3 +75,4 @@ def test_multiunit_views_bitwise_invariant_across_threads_and_paths():
     assert dm.engine["fft_paths"] == 0 and fm.engine["direct_paths"] == 0
     for view in meta.views:
         assert np.allclose(direct[view], fft[view], rtol=0.0, atol=1e-14 * meta.total_rate)
+        assert fft[view].min() >= 0.0, view

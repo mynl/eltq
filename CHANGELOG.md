@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.3] - 2026-10-21
+
+### Fixed
+
+- [fft-nonnegative] The FFT convolution path returned negative weights of order -1e-18 in bins whose exact value is zero (below a deductible, the far tails of tight betas): up to 171 bins per view on a 200-event test portfolio, against none on the direct path. The spec requires nonnegative weights. The inverse transform now clamps each bin at zero; the mass moves by about 1e-16 per event, far below every tolerance, and the determinism contract is unaffected.
+- New tests: the multi-unit fixture and a seeded 200-event, four-unit portfolio with policy and reinsurance terms, forced to FFT, have no negative bin in any view; the existing FFT-forced tests (Python and Rust) assert the same.
+- Benchmark on this machine (32 threads, interleaved A/B against a 1.11.0 build): all four views at Q = 32 about 2.0 s for both builds; no measurable change from 1.11.1 to 1.11.3.
+
 ## [1.11.2] - 2026-10-21
 
 ### Fixed

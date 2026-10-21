@@ -113,7 +113,16 @@ impl FftCache {
     }
 
     /// Inverse transform of `spectrum` (length n / 2 + 1 for size `n`,
-    /// consumed) into the first `len` real values of `out`, normalized by n.
+    /// consumed) into the first `len` real values of `out`, normalized by n
+    /// and clamped below at zero.
+    ///
+    /// The transformed rows are probability weights. A bin whose exact value
+    /// is zero (a gap in a ceded tower, the region below a deductible, the
+    /// far tail of a tight beta) comes back as symmetric round-off of order
+    /// 1e-17 relative to the largest bin, so about half of such bins would be
+    /// negative. Clamping per element moves the mass by at most the sum of
+    /// those magnitudes and keeps the result independent of thread count; a
+    /// NaN passes through unclamped so a defect upstream stays visible.
     pub fn inverse_into(&mut self, spectrum: &mut [Complex<f64>], n: usize, len: usize, out: &mut Vec<f64>) {
         let plan = self.inverse(n);
         self.real.clear();
@@ -129,7 +138,10 @@ impl FftCache {
             .expect("real FFT sizes are consistent");
         let scale = 1.0 / n as f64;
         out.clear();
-        out.extend(self.real[..len].iter().map(|v| v * scale));
+        out.extend(self.real[..len].iter().map(|v| {
+            let x = v * scale;
+            if x < 0.0 { 0.0 } else { x }
+        }));
     }
 }
 
