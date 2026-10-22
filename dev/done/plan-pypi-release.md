@@ -322,3 +322,27 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
 - Divergence: before this step, the uncommitted `chunk_rows` docstring correction in
   `python/eltq/__init__.py` (default 2048, not 65536) was committed alone without a bump
   (`fa08dc7`), so the bump commit holds only this step.
+
+### [packaging], 1.11.6, 2026-10-22
+
+- `LICENSE` (MIT); `pyproject.toml` metadata as planned, with the author entry
+  `mynl@me.com` copied from `aggregate`'s `pyproject.toml`; `reference` extra; `abi3-py312`
+  and `requires-python = ">=3.12"`; `maturin>=1.14,<2` in both `[build-system]` and the dev
+  group; `uv.lock` relocked.
+- README Install section added, and the Performance paragraph names the `x86-64-v3` cost
+  (the sentence deferred from [cargo-config]).
+- sdist audit, on a copy of the working tree holding only tracked and unignored files (the
+  equivalent of a clean clone, `reproductions/` included): 112 KB, holding `Cargo.toml`,
+  `Cargo.lock`, `LICENSE`, `README.md`, `pyproject.toml`, `PKG-INFO`, `crates/eltq-core`,
+  `crates/eltq-python` and `python/eltq`. maturin takes nothing outside the crates and the
+  Python source, so no `exclude` was needed.
+- Divergence: `repository = "https://github.com/mynl/eltq"` added to `[workspace.package]` and
+  inherited by both crates, to silence cargo's "manifest has no documentation, homepage or
+  repository" warning during `maturin sdist`.
+- Acceptance: `maturin sdist` and `maturin build --release` (with `RUSTFLAGS=-C
+  target-cpu=x86-64-v3`, against CPython 3.12.14) succeed without warnings; `uvx twine check`
+  PASSED on both; wheel `METADATA` is version 2.4 with `License-Expression: MIT`,
+  `License-File: LICENSE`, `Requires-Python: >=3.12`, `Provides-Extra: reference`. Clean 3.12.14
+  venvs: the wheel installs in 7 s, the sdist builds from source and installs in 37 s; each
+  imports with `BACKEND == "rust"` from site-packages and passes the suite, 151 tests. Project
+  venv (3.14) rebuilt: 151 passed.

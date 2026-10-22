@@ -3,6 +3,7 @@ name = "eltq-python"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "PyO3 bindings for eltq-core (conversion and error translation only)"
 
 [lib]
@@ -12,4 +13,6 @@ crate-type = ["cdylib"]
 [dependencies]
 eltq-core = { path = "../eltq-core" }
 numpy = { workspace = true }
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py313"] }
+# abi3-py312: one wheel per platform for Python 3.12 and later; matches
+# requires-python in pyproject.toml.
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }

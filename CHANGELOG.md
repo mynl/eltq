@@ -3,6 +3,16 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.6] - 2026-10-22
+
+### Changed
+
+- [packaging] Python 3.12 is now supported: the floor drops from 3.13 to 3.12 (`requires-python`, and the stable-ABI wheel tag `abi3-py312`), matching `aggregate`. Measured before the change: the full suite passes on 3.12 and every output is bitwise identical to the 3.13 build.
+- New optional dependency `eltq[reference]` installs SciPy for the reference backend; the runtime dependency is still NumPy alone.
+- PyPI metadata: MIT `LICENSE` file and license expression, readme, author, keywords, classifiers, repository and changelog URLs (`github.com/mynl/eltq`). The build needs maturin 1.14 or later.
+- README gains an Install section: the platforms, the `x86-64-v3` baseline of the x86_64 wheels, and the source build for older CPUs or a build tuned to one machine.
+- Checked: the sdist (112 KB) holds only the crates, the Python package, the Cargo and project files, README and LICENSE; a wheel and the sdist each install in a clean Python 3.12 environment and pass the suite.
+
 ## [1.11.5] - 2026-10-22
 
 ### Changed

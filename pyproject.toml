@@ -1,14 +1,50 @@
 [project]
 name = "eltq"
-version = "1.11.5"
+version = "1.11.6"
 description = "Ferociously fast ELT secondary-uncertainty quantization"
-requires-python = ">=3.13"
+readme = "README.md"
+authors = [
+    {name = "Stephen J. Mildenhall", email = "mynl@me.com"},
+]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "catastrophe modeling", "event loss table", "secondary uncertainty",
+    "aggregate distribution", "reinsurance", "actuarial",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+# abi3-py312 in crates/eltq-python/Cargo.toml must match this floor.
+requires-python = ">=3.12"
 dependencies = ["numpy>=2.1"]
 
+[project.optional-dependencies]
+# The SciPy reference backend (eltq.reference, eltq.reference_multiunit), the
+# oracle the test suite checks the Rust engine against.
+reference = ["scipy>=1.14"]
+
+[project.urls]
+Repository = "https://github.com/mynl/eltq"
+Changelog = "https://github.com/mynl/eltq/blob/master/CHANGELOG.md"
+
 # maturin (not hatchling): the package is a Rust extension; agreed in
-# dev/plan-implementation.md.
+# dev/plan-implementation.md. 1.14 writes the PEP 639 License-Expression.
 [build-system]
-requires = ["maturin>=1.7,<2"]
+requires = ["maturin>=1.14,<2"]
 build-backend = "maturin"
 
 [tool.maturin]
@@ -30,7 +66,7 @@ dev = [
     "pytest>=8",
     "scipy>=1.14",
     "pandas>=2.2",
-    "maturin>=1.7,<2",
+    "maturin>=1.14,<2",
 ]
 
 [tool.pytest.ini_options]

@@ -15,6 +15,34 @@ are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and
 `dev/done/plan-multiunit.md` (1.6.0-1.11.0: joint multi-unit secondary
 uncertainty, unit terms, view totals).
 
+## Install
+
+```
+pip install eltq                # or: uv add eltq
+pip install "eltq[reference]"   # adds SciPy for the reference backend
+```
+
+Wheels are built for Python 3.12 and later on Windows x86_64, Linux x86_64
+(manylinux) and macOS arm64; no Rust toolchain is needed. The only runtime
+dependency is NumPy. The reference backend (`eltq.reference`,
+`eltq.reference_multiunit`) is the SciPy oracle the test suite checks the Rust
+engine against; it also serves as the fallback when the compiled extension is
+missing.
+
+The x86_64 wheels target the `x86-64-v3` instruction set (AVX2: Intel Haswell,
+2013, and AMD Excavator, 2015, onward). On an older CPU the import fails with an
+illegal-instruction error; build from source instead, which needs a Rust
+toolchain:
+
+```
+pip install --no-binary eltq eltq
+```
+
+Setting `RUSTFLAGS="-C target-cpu=native"` for that build tunes it to the
+machine. On the multi-unit route that is about 8% faster than the wheel on a
+Zen 5 CPU; elsewhere the two are equally fast, and every output is bitwise
+identical.
+
 ## Status
 
 | Milestone | Version | State |
@@ -103,7 +131,9 @@ Q = 32 in 22.5 s, ground_up only in 15.2 s, Q = 8 in 7.9 s; bitwise identical
 across thread counts (whole-event chunks, default 2048 rows); the two-unit
 joint at reference accuracy (Q = 1001) in 10 ms. These figures are for local
 builds with `target-cpu=native` (see Environment), so rebuild after moving
-machines.
+machines. On an AMD Ryzen 9 9950X3D2 (Zen 5, 16C/32T) the 1M-row headline takes
+0.92 s, and the `x86-64-v3` wheel matches a native build except on the
+multi-unit route, where it is 8% slower (`dev/done/plan-pypi-release.md`).
 
 ## Python API
 
