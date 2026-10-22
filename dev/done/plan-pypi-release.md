@@ -400,8 +400,12 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
 ### [release], 1.12.0, 2026-10-22
 
 - Version 1.12.0 in the three files, CHANGELOG entry, README milestone row
-  `[pypi-release]`; project venv rebuilt, 151 passed. Committed and pushed; the push runs build
-  and test only.
+  `[pypi-release]`; project venv rebuilt, 151 passed. Committed (`5ca300c`) and pushed.
+- The push started no workflow run: GitHub's status page showed Actions in "degraded
+  performance" at the time, and no run appeared for the commit within 13 minutes. A manual run
+  with `testpypi` unticked (39818449321) built and tested the commit instead: all eight build
+  and test jobs green, 151 passed on each platform with the 1.12.0 wheels. A missed push
+  trigger is harmless, because a pushed tag builds and tests again before it publishes.
 - Left for Steve: push the tag (`git tag v1.12.0` then `git push mynl v1.12.0`), approve the
   `pypi` deployment in the Actions run, then the verification below and the call on
   `reproductions/pyproject.toml`.
