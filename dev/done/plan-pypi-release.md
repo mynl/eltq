@@ -405,7 +405,28 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
   performance" at the time, and no run appeared for the commit within 13 minutes. A manual run
   with `testpypi` unticked (39818449321) built and tested the commit instead: all eight build
   and test jobs green, 151 passed on each platform with the 1.12.0 wheels. A missed push
-  trigger is harmless, because a pushed tag builds and tests again before it publishes.
+  trigger is harmless, because a pushed tag builds and tests again before it publishes. (The
+  push run, 39819380199, did arrive at 17:03, 20 minutes late, and passed.)
+- Steve pushed `v1.12.0` (on `e9b13f6`, the execution-log commit after `5ca300c`; no code
+  difference). No run started for the tag within 15 minutes. GitHub documents that path
+  filters are not evaluated for tag pushes, so the trigger configuration is not the cause; the
+  degraded Actions service most likely dropped the event, as it delayed the push run. Fallback:
+  `gh workflow run wheels.yml --ref v1.12.0 -f testpypi=false` (run 39825856695). On the tag ref
+  `publish-pypi`'s condition holds, and the job waits for the `pypi` approval as on a tag push.
+  Builds, the tag check in the sdist job, and all four test jobs passed. Steve approved, and
+  `publish-pypi` uploaded the three wheels and the sdist with digital attestations
+  (`https://pypi.org/project/eltq/1.12.0/`).
+- Verified from PyPI on this machine: clean venvs on CPython 3.12.14 and 3.14.7 with
+  `uv pip install "eltq[reference]==1.12.0"` import 1.12.0 with `BACKEND == "rust"` and pass
+  151 tests each. Timing script on 3.12: 1M 0.77 s, 200k one thread 2.15 s, multi-unit 100k
+  1.15 s, 10k one thread 1.80 s, joint 0.10 s; every hash equals the measurement's.
+- Follow-up: Steve updated this machine to Rust 1.99.1. The local native rebuild, two runs: 1M
+  0.83 and 0.82 s, 200k one thread 2.15 and 2.13 s, multi-unit 100k 1.05 s twice, 10k one
+  thread 1.64 and 1.61 s; hashes unchanged. On the same compiler, native and the PyPI wheel are
+  level on the one-row route and the joint, and native is about 9% faster on the multi-unit
+  route, as the CPU measurement found.
+- Open, Steve's call: switch `reproductions/pyproject.toml` from the path dependency to
+  `eltq>=1.12.0`, and render `reproductions/` against the PyPI package.
 - Left for Steve: push the tag (`git tag v1.12.0` then `git push mynl v1.12.0`), approve the
   `pypi` deployment in the Actions run, then the verification below and the call on
   `reproductions/pyproject.toml`.
