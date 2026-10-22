@@ -589,7 +589,7 @@ def multiunit_views(
         Worker threads; None uses all cores. Results are bitwise identical
         for any thread count. Ignored by the reference backend.
     chunk_rows : int, optional
-        Rows per parallel chunk (rounded up to whole events; default 65536);
+        Rows per parallel chunk (rounded up to whole events; default 2048);
         part of the deterministic contract. Ignored by the reference backend.
     roll_up_diagnostic : bool, default False
         Per event with two or more units, report the sd and 99th-percentile
