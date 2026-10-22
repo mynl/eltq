@@ -36,6 +36,7 @@ fixtures/             golden fixtures
 benchmarks/           performance suite
 notebooks/            demo + exploration
 dev/                  plans; dev/done/ once execution starts
+.github/workflows/    CI: wheels, tests against the oracle, PyPI publishing
 ```
 
 Correctness is anchored by a **SciPy oracle plus golden fixtures and an acceptance suite**
@@ -49,7 +50,7 @@ finished.
   PyO3 bindings, not a pure-Python uv project. Both `cargo` and the Python tooling are in play.
 - **Overrides single-sourced versioning.** The version appears in `Cargo.toml`,
   `pyproject.toml` and `python/eltq/__init__.py` (`__version__`), and all three must be bumped
-  together (`Cargo.lock` and `uv.lock` follow on build). Currently 1.11.6.
+  together (`Cargo.lock` and `uv.lock` follow on build). Currently 1.11.7.
 - **Speed is a product requirement, not a nice-to-have** — "ferociously fast" is in the project's
   own description, the work has a `[ferocious]` milestone, and there is a benchmark suite.
   Performance regressions are defects. Equally, per the house KISS rule: raise it before trading
@@ -59,3 +60,10 @@ finished.
   quantile construction, or the σ_I + σ_C total-sd rule (Burke 2016) must be checked against the
   spec and the oracle before it lands.
 - No web face, so the house localhost-bind and UI rules do not apply.
+- **Pushing a tag publishes; the tag push is Steve's.** The house rule "A project where a push
+  itself publishes ... declares a delta and leaves the push to me" applies to tags only:
+  `.github/workflows/wheels.yml` publishes to PyPI on a pushed `v*` tag. Claude pushes commits
+  as usual (a push to `master` only builds and tests), but never creates or pushes a `v*` tag.
+  The `pypi` GitHub environment, which requires Steve's approval, is a second gate. x86_64
+  wheels target `x86-64-v3`; local builds use `target-cpu=native` from the machine-level
+  `V:\dev\.cargo\config.toml`, never from this repository (`dev/done/plan-pypi-release.md`).

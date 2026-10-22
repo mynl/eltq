@@ -346,3 +346,22 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
   venvs: the wheel installs in 7 s, the sdist builds from source and installs in 37 s; each
   imports with `BACKEND == "rust"` from site-packages and passes the suite, 151 tests. Project
   venv (3.14) rebuilt: 151 passed.
+
+### [ci], 1.11.7, 2026-10-22
+
+- `.github/workflows/wheels.yml` as planned, linted clean by `actionlint` 1.7.12. Action
+  versions are the current majors on 2026-10-22: `actions/checkout@v7`,
+  `actions/setup-python@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`,
+  `PyO3/maturin-action@v1` (1.51.0), `pypa/gh-action-pypi-publish@release/v1` (1.14.3).
+- `RUSTFLAGS` reaching the manylinux container is confirmed from the maturin-action 1.51.0
+  source rather than from a log: `isDockerEnv` forwards every variable starting with `RUST`.
+  So no `docker-options` are needed.
+- Divergence: `manylinux: "2_28"` instead of `auto`. glibc 2.28 (2018) excludes only EOL
+  distributions such as CentOS 7, and numpy's own x86_64 wheels already need it, so the choice
+  costs nothing and does not depend on how long Rust keeps supporting glibc 2.17.
+- Divergence: the tag-versus-version check runs in the sdist job, not in publish-pypi, so a
+  mismatched tag fails before the `pypi` environment asks for approval.
+- Divergence: the test jobs install the wheel by file path with the extra
+  (`"$(echo dist/*.whl)[reference]"`), not with `--find-links`. That way pip cannot prefer an
+  `eltq` of the same or a higher version from PyPI.
+- CLAUDE.md gains the tag delta and a Layout line; README Layout lists `.github/workflows/`.

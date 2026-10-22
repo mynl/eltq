@@ -1,0 +1,156 @@
+# Build the eltq wheels and sdist, test each wheel against the SciPy oracle,
+# and publish: to TestPyPI on a manual run with `testpypi` ticked, to PyPI on a
+# pushed v* tag. Plan: dev/done/plan-pypi-release.md, [ci].
+#
+# The file name (wheels.yml) and the environment names (pypi, testpypi) are part
+# of the trusted publisher configuration on PyPI and TestPyPI; change them there
+# too, or publishing fails.
+name: wheels
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]          # path filters do not apply to tag pushes
+    paths-ignore:
+      - "**.md"
+      - "dev/**"
+      - "reproductions/**"
+      - "notebooks/**"
+      - "benchmarks/**"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "dev/**"
+      - "reproductions/**"
+      - "notebooks/**"
+      - "benchmarks/**"
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Publish to TestPyPI after the tests pass"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: wheel ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 wheels target x86-64-v3 (AVX2), the ruled baseline; arm64
+          # needs no flag, its default target CPU is Apple M1.
+          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64, rustflags: "-C target-cpu=x86-64-v3" }
+          - { name: windows-x86_64, runner: windows-latest, target: x64, rustflags: "-C target-cpu=x86-64-v3" }
+          - { name: macos-arm64, runner: macos-latest, target: aarch64, rustflags: "" }
+    env:
+      # maturin-action forwards RUST* variables into its manylinux container.
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          args: --release --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag matches the package version
+        # Fails before the pypi environment asks for approval.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match version ${version} in pyproject.toml"
+            exit 1
+          fi
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist
+
+  test:
+    name: test ${{ matrix.name }} py${{ matrix.python }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, runner: ubuntu-latest, python: "3.12" }
+          - { name: linux-x86_64, runner: ubuntu-latest, python: "3.14" }
+          - { name: windows-x86_64, runner: windows-latest, python: "3.12" }
+          - { name: macos-arm64, runner: macos-latest, python: "3.12" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7         # tests/ and fixtures/ only
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist
+      - name: Install the wheel with the reference backend
+        run: python -m pip install "$(echo dist/*.whl)[reference]" pytest pandas
+      - name: Check the compiled backend loads from the wheel
+        run: python -c "import eltq; print(eltq.__version__, eltq.__file__); assert eltq.BACKEND == 'rust'"
+      - name: Run the suite against the installed wheel
+        # The checkout root holds no eltq package (it sits under python/), so
+        # pytest imports the installed wheel.
+        run: python -m pytest -p no:cacheprovider
+
+  publish-testpypi:
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    needs: [build, sdist, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/eltq
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sdist, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/eltq
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

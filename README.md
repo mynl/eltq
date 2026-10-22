@@ -73,6 +73,7 @@ fixtures/             synthetic ELTs + golden outputs (never real data)
 benchmarks/           bench harness + machine-readable results history
 notebooks/            demo notebook (eltq_demo.ipynb)
 dev/                  plans (moved to dev/done when complete)
+.github/workflows/    CI: build and test wheels, publish to PyPI (wheels.yml)
 ```
 
 ## Environment (uv)

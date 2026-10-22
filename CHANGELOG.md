@@ -3,6 +3,15 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.7] - 2026-10-22
+
+### Added
+
+- [ci] GitHub Actions workflow `.github/workflows/wheels.yml`. Every push to `master` (other than docs and plans) builds the three wheels (Windows x86_64, Linux x86_64 manylinux_2_28, macOS arm64) and the sdist. It then tests each wheel on Python 3.12, and the Linux wheel also on 3.14, against the SciPy oracle with the full suite.
+- The x86_64 wheels are built for `x86-64-v3` (AVX2), the ruled baseline.
+- Publishing uses PyPI trusted publishing, with no stored token. A manual run with `testpypi` ticked uploads to TestPyPI. A pushed `v*` tag uploads to PyPI after Steve approves the `pypi` environment, and only if the tag matches the package version.
+- CLAUDE.md declares the new delta: a pushed tag publishes, so tag pushes are Steve's.
+
 ## [1.11.6] - 2026-10-22
 
 ### Changed

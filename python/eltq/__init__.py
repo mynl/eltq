@@ -29,7 +29,7 @@ import numpy as np
 from eltq._meta import JointMeta, Meta, MultiMeta, RowIssues
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "1.11.6"
+__version__ = "1.11.7"
 
 try:
     from eltq._eltq import (
