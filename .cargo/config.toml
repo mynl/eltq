@@ -1,9 +1,0 @@
-# Keep Rust build churn off the Synology-synced folder (see CLAUDE.md).
-[build]
-target-dir = "V:/dev/cargo-target/secondary-corrosion"
-
-# The wheel is built from source on each machine (uv sync), so let the
-# compiler use the local vector extensions (AVX2 on the i7-7820HQ). Per-element
-# kernels (deposits, axpy convolution, erf pipelines) vectorize without
-# reordering any reduction, so the determinism contract is unaffected.
-rustflags = ["-C", "target-cpu=native"]

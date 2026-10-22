@@ -1,7 +1,7 @@
 # Plan: pypi-release, eltq on PyPI as prebuilt wheels
 
 Date: 2026-10-22
-Status: ruled 2026-10-22 (see "Rulings"), not executed.
+Status: ruled 2026-10-22 (see "Rulings"); executing from 2026-10-22, see "Execution log".
 
 ## Goal
 
@@ -304,4 +304,21 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
 
 ## Execution log
 
-(empty)
+### [cargo-config], 1.11.5, 2026-10-22
+
+- `.cargo/config.toml` deleted (it held only the two settings), with its `[tool.uv] cache-keys`
+  entry. `V:\dev\.cargo\config.toml` created with `target-cpu=native` and a comment on why it
+  must not build anything for distribution. `V:\dev` is not a git repository, so the file is
+  under no version control.
+- `uv sync --reinstall-package eltq` built into `./target` in 23 s; `uv run pytest`: 151 passed.
+  Timing script on the rebuilt extension, two runs: `quantize_arrays` 1M 0.88 and 0.90 s,
+  200k one thread 2.40 and 2.41 s, multi-unit 100k 1.05 s twice, 10k one thread 1.66 and
+  1.64 s, joint 0.10 s; every hash equal to the measurement's. Native speed is kept.
+- `V:\dev\cargo-target\secondary-corrosion` (0.7 GB) deleted.
+- Divergence: `V:\dev\cargo-target` itself was left empty by that and was removed too.
+- Divergence: the README sentence on the PyPI wheels' baseline moves to [packaging], which adds
+  the Install section; at 1.11.5 no wheel exists. The Performance paragraph now says only that
+  its figures are for local native builds.
+- Divergence: before this step, the uncommitted `chunk_rows` docstring correction in
+  `python/eltq/__init__.py` (default 2048, not 65536) was committed alone without a bump
+  (`fa08dc7`), so the bump commit holds only this step.

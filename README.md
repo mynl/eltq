@@ -47,17 +47,22 @@ notebooks/            demo notebook (eltq_demo.ipynb)
 dev/                  plans (moved to dev/done when complete)
 ```
 
-## Environment (Windows, uv, V:\dev)
+## Environment (uv)
 
-Build churn stays off the Synology-synced folder: the venv lives at
-`V:\dev\venvs\secondary-corrosion` (junction `.venv` in the repo) and the cargo
-target dir at `V:\dev\cargo-target\secondary-corrosion` (`.cargo/config.toml`).
+`uv sync` creates `.venv` in the checkout and builds the extension into
+`./target`; both are gitignored. The repository sets no compiler flags, so a
+source build targets the baseline instruction set of the Rust target. To tune
+local builds to the machine, set the flag in a cargo config outside the
+repository, which cargo reads for every project below it (the author's is
+`V:\dev\.cargo\config.toml`), or in `RUSTFLAGS`, which overrides it:
 
-```powershell
-uv venv V:\dev\venvs\secondary-corrosion --python 3.13
-New-Item -ItemType Junction -Path .venv -Target V:\dev\venvs\secondary-corrosion
-uv sync
+```toml
+[build]
+rustflags = ["-C", "target-cpu=native"]
 ```
+
+uv does not rebuild when that file changes; force it with
+`uv sync --reinstall-package eltq`.
 
 ## Commands
 
@@ -96,8 +101,9 @@ Multi-unit route (`benchmarks/report-1.11.0.md`, same laptop): ~0.91M unit
 rows (100k events x 10 units, typical term sparsity) with all four views at
 Q = 32 in 22.5 s, ground_up only in 15.2 s, Q = 8 in 7.9 s; bitwise identical
 across thread counts (whole-event chunks, default 2048 rows); the two-unit
-joint at reference accuracy (Q = 1001) in 10 ms. The wheel is built with
-`target-cpu=native` (`.cargo/config.toml`), so rebuild after moving machines.
+joint at reference accuracy (Q = 1001) in 10 ms. These figures are for local
+builds with `target-cpu=native` (see Environment), so rebuild after moving
+machines.
 
 ## Python API
 

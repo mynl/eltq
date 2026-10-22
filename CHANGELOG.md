@@ -3,6 +3,15 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.11.5] - 2026-10-22
+
+### Changed
+
+- [cargo-config] The repository no longer sets compiler flags or a build directory: `.cargo/config.toml` is gone, so a fresh clone builds into `./target` at the baseline instruction set, as CI and PyPI wheels need. The old file built for the local CPU (`target-cpu=native`) into a drive-letter path outside the checkout.
+- Local builds on the author's machine keep `target-cpu=native` through the machine-level `V:\dev\.cargo\config.toml`, outside any repository. Measured after the switch: the same speed as before and bitwise identical outputs.
+- README "Environment" rewritten (plain `.venv` and `./target` in the checkout, how to tune a local build); the venv junction and external target directory it described are long gone.
+- Plan `dev/done/plan-pypi-release.md` started.
+
 ## [1.11.4] - 2026-10-21
 
 ### Fixed
