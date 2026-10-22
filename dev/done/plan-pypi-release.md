@@ -365,3 +365,43 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
   (`"$(echo dist/*.whl)[reference]"`), not with `--find-links`. That way pip cannot prefer an
   `eltq` of the same or a higher version from PyPI.
 - CLAUDE.md gains the tag delta and a Layout line; README Layout lists `.github/workflows/`.
+- Acceptance, push run 39812263218 (commit `cdfb1f5`): all nine jobs green on the first attempt
+  (publish jobs skipped as designed). Wheels: `cp312-abi3-win_amd64`,
+  `cp312-abi3-manylinux_2_28_x86_64`, `cp312-abi3-macosx_11_0_arm64`. Each test job installed its
+  wheel into site-packages and passed 151 tests (41 warnings, the pandas deprecation among
+  them): Windows 3.12.10, macOS arm64 3.12, Linux 3.12.15 and 3.14.9. The Linux build log shows
+  `docker run ... -e RUSTFLAGS ... quay.io/pypa/manylinux_2_28_x86_64` with
+  `RUSTFLAGS: -C target-cpu=x86-64-v3`.
+- Acceptance, manual run 39812985297 with `testpypi`: builds and tests green again; the publish
+  failed with `invalid-publisher`, since the TestPyPI publisher had been registered on PyPI by
+  mistake (see [publisher-setup]). After Steve registered it on TestPyPI, `gh run rerun
+  --failed` re-ran only the publish job, which uploaded the three wheels and the sdist as
+  1.11.7 (TestPyPI shows `License-Expression: MIT`, `Requires-Python: >=3.12`).
+- Acceptance on this machine: a clean CPython 3.12.14 venv with numpy, scipy, pandas and pytest
+  from PyPI and `eltq==1.11.7` from TestPyPI (`--no-deps`, so no dependency comes from
+  TestPyPI) imports with `BACKEND == "rust"` and passes 151 tests. Timing script, two runs:
+  `quantize_arrays` 1M 0.79 s, 200k one thread 2.10 s, multi-unit 100k 1.13 s, 10k one thread
+  1.77 s, joint 0.11 s. Every hash equals the measurement's.
+- Finding: the multi-unit 10k one-thread time (1.77 s) matches the `x86-64-v3` column (1.78 s), as
+  expected. The one-row route is 14% faster than this machine's native build (0.79 against
+  0.92 s; 2.10 against 2.40 s). CI compiled with stable Rust 1.99.1 (2026-10-13; `rustup check`
+  lists it as the update for this machine's 1.98.0), so the gain is the newer compiler, not
+  the flags. Outputs are bitwise identical across the two compiler versions as well. A
+  `rustup update` here should bring local builds the same gain.
+
+### [publisher-setup], 2026-10-22
+
+- Done by Steve: PyPI pending publisher (environment `pypi`), TestPyPI pending publisher
+  (environment `testpypi`), and the two GitHub environments. The TestPyPI entry was first made
+  on PyPI by mistake, and the first TestPyPI publish failed on it. To check before the tag:
+  PyPI should hold one pending publisher for `eltq`, with environment `pypi`. A leftover entry
+  there with environment `testpypi` should go, because that environment has no approval gate.
+
+### [release], 1.12.0, 2026-10-22
+
+- Version 1.12.0 in the three files, CHANGELOG entry, README milestone row
+  `[pypi-release]`; project venv rebuilt, 151 passed. Committed and pushed; the push runs build
+  and test only.
+- Left for Steve: push the tag (`git tag v1.12.0` then `git push mynl v1.12.0`), approve the
+  `pypi` deployment in the Actions run, then the verification below and the call on
+  `reproductions/pyproject.toml`.

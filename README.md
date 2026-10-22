@@ -59,6 +59,7 @@ identical.
 | [terms-grammar] Rust parser + view-map compiler | 1.9.0 | done |
 | [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | done |
 | [ferocious-multiunit] own erf, real FFTs, cross-view sharing, 1M unit-row report | 1.11.0 | done |
+| [pypi-release] wheels on PyPI: Windows, Linux, macOS; CI against the oracle | 1.12.0 | done |
 
 ## Layout
 

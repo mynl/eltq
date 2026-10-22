@@ -3,6 +3,15 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [1.12.0] - 2026-10-22
+
+### Added
+
+- [release] First release on PyPI: `pip install eltq` (or `uv add eltq`) installs a prebuilt wheel on Windows x86_64, Linux x86_64 and macOS arm64, for Python 3.12 and later, with no Rust toolchain. `eltq[reference]` adds SciPy for the reference backend. Rolls up 1.11.5 to 1.11.7.
+- Each wheel passes the full suite against the SciPy oracle on its own platform in CI. The 1.11.7 wheels from TestPyPI pass on this machine too, with every benchmark output bitwise identical to a local build.
+- Speed of the `x86-64-v3` wheel against a local native build on Zen 5: the multi-unit route is about 8% slower. The one-row headline is 14% faster (1M rows in 0.79 s, against 0.92 s), because CI compiles with Rust 1.99.1 and this machine still has 1.98.0.
+- Plan `dev/done/plan-pypi-release.md` complete on this side; the first upload happens when Steve pushes the `v1.12.0` tag.
+
 ## [1.11.7] - 2026-10-22
 
 ### Added
