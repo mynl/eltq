@@ -1,0 +1,98 @@
+# house.mplstyle -- the print style for figures in the house kit.
+#
+# Started on 2026-10-18 from aggregate's data/aggregate.mplstyle, which stays
+# the screen style for the library and aLL: the same palette, grid and line
+# weights. Three things differ: the fonts, the size and the type.
+#
+# The fonts. aggregate names Segoe UI first, which exists only on Windows, so a
+# figure rendered elsewhere silently changes face. Every face named here ships
+# inside matplotlib. The text face itself is chosen per target by
+# house.figures(): STIXGeneral with stix mathtext, in documents and on slides
+# alike, with DejaVu Sans kept as the alternative. The default below is it.
+# Neither has a semibold, so the title weight is bold where aggregate's is
+# semibold.
+#
+# The size. There is no figure.figsize: each format's fig-width and fig-height
+# set it, and Quarto hands them to matplotlib, so the style must not override
+# them. house.figsize() gives the other house sizes.
+#
+# The type. Sizes are absolute, in points, because a house figure is drawn at
+# the size it is printed: labels and titles 9pt, ticks and legend 8pt, the
+# same in every figure (chosen at review, 2026-10-18; Springer asks for 8 to
+# 12pt, kept consistent, varying little within a figure). aggregate's style
+# used 8.5pt with relative sizes, which printed labels at 7.1pt and the legend
+# at 5.9pt.
+#
+# Colors are 6-digit hex without the leading '#', per matplotlib style files.
+
+# --- fonts ---
+font.size:           9
+font.family:         serif
+font.serif:          STIXGeneral
+font.sans-serif:     DejaVu Sans
+font.monospace:      DejaVu Sans Mono
+mathtext.fontset:    stix
+# Embed TrueType outlines rather than Type 3 bitmaps-as-glyphs, so text in a
+# figure stays sharp and searchable in the PDF.
+pdf.fonttype:        42
+
+# --- color cycle (site-harmonized: blue primary, then complements) ---
+axes.prop_cycle: cycler('color', ['0d6efd', 'dc3545', '198754', 'eaab00', '6f42c1', '0aa2c0', 'd63384', '6c757d'])
+
+# --- text / label colors ---
+text.color:          212529
+axes.labelcolor:     212529
+axes.titlecolor:     212529
+axes.titlesize:      9
+# bold, not aggregate's semibold: neither STIXGeneral nor DejaVu Sans has a
+# semibold, and matplotlib prints a findfont warning into the cell for it.
+axes.titleweight:    bold
+axes.labelsize:      9
+
+# --- legend ---
+# Entries sit closer than matplotlib's defaults (labelspacing 0.5, borderpad
+# 0.4, handlelength 2.0, handletextpad 0.8, all in units of the legend's font
+# size), so a legend takes less of a small panel.
+legend.fontsize:     8
+legend.labelspacing: 0.25
+legend.borderpad:    0.3
+legend.handlelength: 1.6
+legend.handletextpad: 0.5
+legend.facecolor:    white
+legend.edgecolor:    dee2e6
+legend.framealpha:   0.9
+legend.frameon:      True
+
+# --- axes / figure background ---
+axes.facecolor:      white
+figure.facecolor:    white
+axes.edgecolor:      adb5bd
+axes.linewidth:      0.8
+axes.axisbelow:      True
+axes.grid:           True
+grid.color:          dee2e6
+grid.linewidth:      0.6
+grid.alpha:          1.0
+
+# --- resolution and layout ---
+figure.dpi:          144
+figure.constrained_layout.use: True
+
+# --- savefig ---
+savefig.dpi:         300
+savefig.bbox:        tight
+savefig.pad_inches:  0.05
+savefig.facecolor:   white
+savefig.transparent: False
+
+# --- lines ---
+lines.linewidth:     1.4
+lines.markersize:    4
+
+# --- ticks ---
+xtick.direction:     out
+ytick.direction:     out
+xtick.labelsize:     8
+ytick.labelsize:     8
+xtick.color:         6c757d
+ytick.color:         6c757d

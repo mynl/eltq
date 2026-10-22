@@ -1,0 +1,29 @@
+# Dependencies only: the reproductions are Quarto documents that use eltq, not
+# a package. `uv sync` in this directory builds the environment in .venv here
+# (gitignored), with eltq built from the checkout one level up and everything
+# else from PyPI, so a clone of the repository renders with nothing from this
+# machine. uv requires a version field, and this one means nothing.
+[project]
+name = "eltq-reproductions"
+version = "0.0.0"
+requires-python = ">=3.13"
+dependencies = [
+    "eltq",
+    "aggregate>=1.6.0",
+    "greater_tables>=8.1.0",
+    "jupyter",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "scipy",
+]
+
+[tool.uv]
+package = false
+
+# Not editable: the documents run on an installed copy of eltq, so a rebuild in
+# the package's own environment never changes a render half way through.
+# `uv sync --reinstall-package eltq` picks up changes to the package.
+[tool.uv.sources]
+eltq = { path = ".." }

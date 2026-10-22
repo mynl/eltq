@@ -1,0 +1,45 @@
+# Reproductions of published results with eltq and aggregate. Each page has
+# the shape of a chapter of the aggregate Reproductions book (context, the
+# paper's solution, the reproduction, comments), so it can move there whole.
+#
+# The look is the house style: the `house` extension in _extensions/house,
+# installed with `quarto add D:\Projects\house-style` and committed. Render
+# with .\render.ps1, which points Quarto at this directory's environment.
+project:
+  type: default
+
+bibliography: references.bib
+link-bibliography: true
+link-citations: true
+colorlinks: true
+
+toc: true
+toc-depth: 2
+number-sections: true       # also what makes @sec- cross-references resolve
+code-overflow: wrap
+
+# A page is written as a book chapter, its sections at level 2 under the
+# title. Standing alone it has no chapter level, so the sections move up one
+# and number 1, 2, 3 rather than 0.1, 0.2, 0.3.
+shift-heading-level-by: -1
+
+# The papers reproduced here number their own tables, and the pages refer to
+# them by those numbers. The pages' own tables are therefore Exhibits, so
+# that Table 11 is always the paper's and Exhibit 11 always this page's.
+crossref:
+  tbl-title: Exhibit
+  tbl-prefix: Exhibit
+
+# Quarto's PDF links only the number of "Exhibit 11"; the filter makes the
+# whole reference the link, so it stands apart from the paper's plain
+# "Table 11". It runs after Quarto resolves the references.
+filters:
+  - at: post-quarto
+    path: link-whole-refs.lua
+
+format:
+  house-pdf: default
+
+# No `error: true`: a cell that raises must stop the render, because every
+# number on these pages is evidence.
+jupyter: python3
