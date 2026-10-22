@@ -425,8 +425,14 @@ publishers: owner `mynl`, repository `eltq`, workflow `wheels.yml`.
   thread 1.64 and 1.61 s; hashes unchanged. On the same compiler, native and the PyPI wheel are
   level on the one-row route and the joint, and native is about 9% faster on the multi-unit
   route, as the CPU measurement found.
-- Open, Steve's call: switch `reproductions/pyproject.toml` from the path dependency to
-  `eltq>=1.12.0`, and render `reproductions/` against the PyPI package.
+- Steve's call, 2026-10-22: switch. `reproductions/pyproject.toml` now depends on
+  `eltq>=1.12.0` from PyPI (the `[tool.uv.sources]` path entry is gone); `uv lock` moved eltq
+  from the checkout's 1.11.4 to PyPI's 1.12.0. The README drops the Rust toolchain from the
+  prerequisites and explains how to point the environment at the checkout for an unreleased
+  eltq, locally and uncommitted; the `render.ps1` description follows. `.\render.ps1` rendered
+  `Homer2017a.pdf` with eltq 1.12.0 from PyPI, with no overfull box warnings. Its text, by
+  `pdftotext -layout`, is identical to the render from the checkout's 1.11.4, as bitwise
+  identical outputs imply. Plan complete.
 - Left for Steve: push the tag (`git tag v1.12.0` then `git push mynl v1.12.0`), approve the
   `pypi` deployment in the Actions run, then the verification below and the call on
   `reproductions/pyproject.toml`.

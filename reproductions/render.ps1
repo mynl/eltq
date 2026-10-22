@@ -3,8 +3,8 @@
     Render the reproductions to PDF in this directory's own environment.
 
 .DESCRIPTION
-    Builds the environment with `uv sync` (eltq from the checkout one level up,
-    everything else from PyPI), points Quarto at its interpreter, and renders
+    Builds the environment with `uv sync` (eltq and everything else from
+    PyPI), points Quarto at its interpreter, and renders
     every page, or the pages named. Everything is derived from the script's
     location, so the render works from any clone.
 

@@ -520,21 +520,16 @@ wheels = [
 
 [[package]]
 name = "eltq"
-version = "1.11.4"
-source = { directory = "../" }
+version = "1.12.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "numpy", specifier = ">=2.1" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "maturin", specifier = ">=1.7,<2" },
-    { name = "pandas", specifier = ">=2.2" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "scipy", specifier = ">=1.14" },
+sdist = { url = "https://files.pythonhosted.org/packages/b8/c7/818c01d9d10830b3566a58fef02208d2bc3a1d785beb35a37cc98e75b992/eltq-1.12.0.tar.gz", hash = "sha256:0e4bd4e5bc90f2995e5d053e1a029126349506da03c61657116237b404c8f809", size = 112128, upload-time = "2026-10-22T18:47:59.291Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6c/09/39f160f274981148d97354775bc57c3e2bfb7b47217441912a2b53d2c584/eltq-1.12.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:3e7913b77759c4a7b4bb8d0054ce418d2039a675a4a342ed5feb9df9ae2e21c3", size = 693503, upload-time = "2026-10-22T18:47:54.445Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/10/11442750fdceaf0986f4960f5274d91beca9a09054c5bff4de536de3a688/eltq-1.12.0-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:c41c8c2e27fd427a575b99756a8e7c45d0512e9514deacb02c72dbb01e154c26", size = 909869, upload-time = "2026-10-22T18:47:56.434Z" },
+    { url = "https://files.pythonhosted.org/packages/07/77/e5c47ef0870b0e66bfa95b2b4632bf51776e036151dff78fe2b8b815d65a/eltq-1.12.0-cp312-abi3-win_amd64.whl", hash = "sha256:4356e8ac066de51fa0d5b1c413fad0594a7ca02e6a26b7827687df8d413590b1", size = 769533, upload-time = "2026-10-22T18:47:57.899Z" },
 ]
 
 [[package]]
@@ -556,7 +551,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "aggregate", specifier = ">=1.6.0" },
-    { name = "eltq", directory = "../" },
+    { name = "eltq", specifier = ">=1.12.0" },
     { name = "greater-tables", specifier = ">=8.1.0" },
     { name = "jupyter" },
     { name = "matplotlib" },
