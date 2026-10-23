@@ -2,9 +2,6 @@
 
 Adds to `V:\dev\CLAUDE.md` (house rules). Project detail only — see **Deltas** at the foot.
 
-**Note the name.** The directory is `secondary-corrosion`; the crate, package, and product are
-**`eltq`**. Use `eltq` in prose and code.
-
 **Ferociously fast ELT secondary-uncertainty quantization.** Converts a portfolio event loss table
 (ELT, ~1M rows) into two discrete, evenly spaced, rate-weighted loss-grid distributions:
 
