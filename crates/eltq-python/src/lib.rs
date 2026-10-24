@@ -150,6 +150,7 @@ fn meta_to_dict<'py>(
     dict.set_item("nodes", meta.nodes)?;
     dict.set_item("nodes_per_decade", meta.nodes_per_decade)?;
     dict.set_item("interpolation_error", meta.interpolation_error)?;
+    dict.set_item("narrow_events", meta.narrow_events)?;
     dict.set_item("overflow", meta.overflow.as_str())?;
     let per_output = |values: [f64; 2]| -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -376,6 +377,7 @@ impl PyCurve {
         dict.set_item("nodes", c.nodes())?;
         dict.set_item("nodes_per_decade", c.nodes_per_decade)?;
         dict.set_item("interpolation_error", c.interpolation_error)?;
+        dict.set_item("narrow_events", c.narrow_events())?;
         dict.set_item("total_rate", c.total_rate)?;
         dict.set_item("analytic_aal", c.analytic_aal)?;
         dict.set_item("input_rows", c.input_rows)?;

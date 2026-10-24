@@ -20,6 +20,16 @@ TAIL_INTERVALS = 4
 #: both backends.
 TAIL_RATE_FLOOR = 1e-20
 
+#: Survival method: steps of one standard deviation each side of the mean
+#: within which a narrow event's bulk must reach the rate floor; wider
+#: events take the regular route (spec section 5A). Shared by both backends.
+NARROW_STEPS = 40
+
+#: Survival method: above this ``alpha + beta`` a narrow event's density
+#: cannot be resolved in double precision and the event is a step at its
+#: mean (spec section 5A). Shared by both backends.
+NARROW_STEP_PARAMETER_SUM = 1e15
+
 
 def _zero_per_output() -> dict:
     return {"raw": 0.0, "secondary": 0.0}
@@ -73,6 +83,7 @@ class Meta:
     nodes: int | None = None
     nodes_per_decade: int | None = None
     interpolation_error: float | None = None
+    narrow_events: int | None = None
     overflow: str = "top_bucket"
     rate_above_grid: dict = field(default_factory=_zero_per_output)
     mean_above_grid: dict = field(default_factory=_zero_per_output)
@@ -95,6 +106,7 @@ class CurveMeta:
     input_rows: int
     valid_rows: int
     diagnostics: dict[str, RowIssues]
+    narrow_events: int = 0
 
 
 @dataclass

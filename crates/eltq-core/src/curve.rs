@@ -16,7 +16,9 @@
 //! `lambda_j S_j(x_k)` on `(x_k, M_j]`, is kept per event and walked along
 //! the bucket edges by a monotone cubic Hermite of `log S_j` against
 //! `log(M_j - x)` until its rate reaches `TAIL_RATE_FLOOR` of the total.
-//! The summed
+//! A **narrow** event, one standard deviation below a node interval at its
+//! mean, is kept out of the curve, whose cubic cannot follow a step inside
+//! one interval, and walked exactly on its bulk. The summed
 //! curve has kinks only at nodes, which carry one-sided slopes.
 //!
 //! [`Curve`] is the primary object (spec section 5A): built once by
@@ -239,6 +241,161 @@ pub struct TailEvent {
     pub survival: f64,
 }
 
+/// Steps of one standard deviation each side of the mean within which a
+/// narrow event's bulk must reach the rate floor; an event wider than that
+/// (its mass piled at an endpoint) takes the regular route.
+pub const NARROW_STEPS: usize = 40;
+/// Above this `alpha + beta` the density of a narrow event cannot be
+/// resolved in double precision (one ulp of the loss share moves it by
+/// more than a tenth), and the event is a step at its mean.
+pub const NARROW_STEP_PARAMETER_SUM: f64 = 1e15;
+
+/// 8-point Gauss-Legendre nodes (the positive half) and weights on [-1, 1].
+const GL_NODES: [f64; 4] = [0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363];
+const GL_WEIGHTS: [f64; 4] = [0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763];
+
+/// The density of a narrow event relative to its value at the mean,
+/// `f(y) / f(ybar)` in the loss share `y`, from the deviations by `log1p`
+/// so that huge `alpha` and `beta` lose no precision, and its integrals by
+/// 8-point Gauss-Legendre on pieces of at most half a standard deviation.
+/// Within about 1e-12 of SciPy up to `alpha + beta` of 1e8 and within the
+/// rounding of `y` itself beyond, where the incomplete beta's continued
+/// fraction (400 iterations) returns garbage near the mean.
+#[derive(Debug, Clone, Copy)]
+pub struct NarrowKernel {
+    alpha: f64,
+    beta: f64,
+    ybar: f64,
+    piece: f64,
+}
+
+impl NarrowKernel {
+    pub fn new(alpha: f64, beta: f64) -> Self {
+        let ybar = alpha / (alpha + beta);
+        let sd = (ybar * (1.0 - ybar) / (alpha + beta + 1.0)).sqrt();
+        NarrowKernel { alpha, beta, ybar, piece: 0.5 * sd }
+    }
+
+    fn ratio(&self, y: f64) -> f64 {
+        let d = y - self.ybar;
+        ((self.alpha - 1.0) * (d / self.ybar).ln_1p() + (self.beta - 1.0) * (-d / (1.0 - self.ybar)).ln_1p()).exp()
+    }
+
+    /// `int_lo^hi f(y) / f(ybar) dy` and `int_lo^hi y f(y) / f(ybar) dy`.
+    pub fn integrals(&self, lo: f64, hi: f64) -> (f64, f64) {
+        if !(hi > lo) {
+            return (0.0, 0.0);
+        }
+        let pieces = ((hi - lo) / self.piece).ceil().max(1.0) as usize;
+        let width = (hi - lo) / pieces as f64;
+        let (mut mass, mut moment) = (0.0, 0.0);
+        for k in 0..pieces {
+            let mid = lo + (k as f64 + 0.5) * width;
+            let half = 0.5 * width;
+            for (&node, &weight) in GL_NODES.iter().zip(&GL_WEIGHTS) {
+                for y in [mid - half * node, mid + half * node] {
+                    let r = half * weight * self.ratio(y);
+                    mass += r;
+                    moment += r * y;
+                }
+            }
+        }
+        (mass, moment)
+    }
+
+    pub fn integral(&self, lo: f64, hi: f64) -> f64 {
+        self.integrals(lo, hi).0
+    }
+}
+
+/// A beta event narrower than a node interval at its mean (spec section
+/// 5A): kept out of the shared curve and walked on its bulk by the
+/// quadrature of `NarrowKernel`, outside which it counts in full below and
+/// nothing above, each within the rate floor.
+#[derive(Debug, Clone, Copy)]
+pub struct NarrowEvent {
+    pub rate: f64,
+    pub max_loss: f64,
+    pub alpha: f64,
+    pub beta: f64,
+    /// The lower edge of the bulk: the first step down from the mean where
+    /// the mass of a step falls to the floor, or 0.
+    pub lower: f64,
+    /// `max(lower, min_loss)`: where the walk and the curve queries begin.
+    pub start: f64,
+    /// The upper edge of the bulk: the first step up where the mass of a
+    /// step falls to the floor, or the endpoint.
+    pub stop: f64,
+    /// The bulk's mass in the kernel's units, `int_lower^stop f / f(ybar)`.
+    pub norm: f64,
+    /// `S(start)`: 1 unless the bulk reaches below the lowest node.
+    pub survival: f64,
+}
+
+impl NarrowEvent {
+    pub fn kernel(&self) -> NarrowKernel {
+        NarrowKernel::new(self.alpha, self.beta)
+    }
+
+    /// `S(x)`: in full below the bulk, nothing at or above it, and by
+    /// quadrature from the nearer edge inside.
+    pub fn survival_at(&self, kernel: &NarrowKernel, x: f64) -> f64 {
+        // A step at the mean (lower == stop) counts nothing at its loss,
+        // as an atom does.
+        if x >= self.stop {
+            return 0.0;
+        }
+        if x <= self.lower {
+            return 1.0;
+        }
+        let m = self.max_loss;
+        if x <= m * kernel.ybar {
+            (1.0 - kernel.integral(self.lower / m, x / m) / self.norm).max(0.0)
+        } else {
+            kernel.integral(x / m, self.stop / m) / self.norm
+        }
+    }
+
+    /// `lam P(X; X > x)` for the walk's overflow moment: the partial
+    /// expectation above `x` by the same quadrature.
+    pub fn partial_expectation(&self, kernel: &NarrowKernel, x: f64) -> f64 {
+        if x >= self.stop {
+            return 0.0;
+        }
+        let m = self.max_loss;
+        let (_, moment) = kernel.integrals(x.max(self.lower) / m, self.stop / m);
+        self.rate * m * moment / self.norm
+    }
+}
+
+/// The bulk of a candidate narrow event by steps of `sigma` out from the
+/// mean, each side ending at the first step whose mass is at or below a
+/// tenth of the floor's share of the running mass (so the mass dropped
+/// beyond it is below the floor), or at 0 and `M`: `(lower, stop)`, or
+/// `None` when either side needs more than `NARROW_STEPS` steps.
+fn narrow_bulk(kernel: &NarrowKernel, m: f64, mu: f64, sigma: f64, lam: f64, floor: f64) -> Option<(f64, f64)> {
+    let cut = 0.1 * floor / lam;
+    let side = |direction: f64, limit: f64| -> Option<f64> {
+        let mut acc = 0.0;
+        let mut prev = mu;
+        for i in 1..=NARROW_STEPS {
+            let x = mu + direction * i as f64 * sigma;
+            let clipped = if direction < 0.0 { x.max(limit) } else { x.min(limit) };
+            let (lo, hi) = if direction < 0.0 { (clipped, prev) } else { (prev, clipped) };
+            let inc = kernel.integral(lo / m, hi / m);
+            acc += inc;
+            prev = clipped;
+            if clipped == limit || inc <= cut * acc {
+                return Some(clipped);
+            }
+        }
+        None
+    };
+    let lower = side(-1.0, 0.0)?;
+    let stop = side(1.0, m)?;
+    Some((lower, stop))
+}
+
 /// The exceedance curve: nodes, the truncated curve with its one-sided
 /// slopes, the tails per event, and the atoms (spec section 5A).
 #[derive(Debug, Clone)]
@@ -259,6 +416,13 @@ pub struct Curve {
     /// first index of node `k`'s group (length `nodes + 1`).
     tails: Vec<TailEvent>,
     group_start: Vec<usize>,
+    /// The narrow events sorted by `start`, with `narrow_above[i]` the
+    /// total rate from index `i` on, the widest bulk, and the mass their
+    /// walks deposit (`sum lam S(start)`).
+    narrow: Vec<NarrowEvent>,
+    narrow_above: Vec<f64>,
+    narrow_max_width: f64,
+    narrow_mass: f64,
     /// Atoms sorted by loss, with `atom_above[i]` the total rate of atoms
     /// from index `i` on (length `atoms + 1`).
     pub atom_loss: Vec<f64>,
@@ -297,6 +461,7 @@ struct BuildPartial {
     sample_curve: Vec<f64>,
     sample_total: Vec<f64>,
     tails: Vec<TailEvent>,
+    narrow: Vec<NarrowEvent>,
     atoms: Vec<(f64, f64)>,
     rate: f64,
     aal: f64,
@@ -386,6 +551,18 @@ pub fn build_curve(
         .map(|&i| (0.5 * (loss[i].ln() + loss[i + 1].ln())).exp())
         .collect();
 
+    // The narrow criterion, one node interval at the mean, and the rate
+    // floor of the bulk search, on the beta rate summed here serially (the
+    // fold below gives the reported value).
+    let narrow_ratio = 10.0_f64.powf(1.0 / config.nodes_per_decade as f64) - 1.0;
+    let mut serial_beta_rate = Neumaier::default();
+    for row in 0..n_rows {
+        if kinds[row] == RowKind::Beta {
+            serial_beta_rate.add(input.rate[row]);
+        }
+    }
+    let narrow_floor = TAIL_RATE_FLOOR * serial_beta_rate.value();
+
     let process_chunk = |chunk_index: usize| -> Result<BuildPartial, Error> {
         let start = chunk_index * chunk_rows;
         let end = (start + chunk_rows).min(n_rows);
@@ -398,6 +575,7 @@ pub fn build_curve(
             sample_curve: vec![0.0; sample_x.len()],
             sample_total: vec![0.0; sample_x.len()],
             tails: Vec::new(),
+            narrow: Vec::new(),
             atoms: Vec::new(),
             rate: 0.0,
             aal: 0.0,
@@ -436,6 +614,50 @@ pub fn build_curve(
                     }
                     let (alpha, beta) = beta_params(m, mu, classified.var_eff[row]);
                     let bf = BetaFn::new(alpha, beta);
+                    // A narrow event: its bulk, a few sigma wide, found by
+                    // stepping out from the mean; kept out of the curve.
+                    // Only bounded, log-concave densities (both parameters
+                    // above 1) qualify; beyond NARROW_STEP_PARAMETER_SUM the
+                    // event is a step at its mean.
+                    let sigma = classified.var_eff[row].sqrt();
+                    if sigma < mu * narrow_ratio && alpha > 1.0 && beta > 1.0 {
+                        let kernel = NarrowKernel::new(alpha, beta);
+                        let bulk = if alpha + beta > NARROW_STEP_PARAMETER_SUM {
+                            Some((mu, mu, 1.0))
+                        } else {
+                            narrow_bulk(&kernel, m, mu, sigma, lam, narrow_floor)
+                                .map(|(lower, stop)| (lower, stop, kernel.integral(lower / m, stop / m)))
+                        };
+                        if let Some((lower, stop, norm)) = bulk.filter(|b| b.2 > 0.0 && b.2.is_finite()) {
+                            let start = lower.max(min_loss);
+                            let event = NarrowEvent {
+                                rate: lam,
+                                max_loss: m,
+                                alpha,
+                                beta,
+                                lower,
+                                start,
+                                stop,
+                                norm,
+                                survival: if start > lower { kernel.integral(start / m, stop / m) / norm } else { 1.0 },
+                            };
+                            for (i, &x) in sample_x.iter().enumerate() {
+                                p.sample_total[i] += lam * event.survival_at(&kernel, x);
+                            }
+                            if stop > min_loss {
+                                // Its rate at the nodes: in full below the
+                                // bulk, nothing above it.
+                                for (i, &x) in loss.iter().enumerate() {
+                                    if x >= stop {
+                                        break;
+                                    }
+                                    p.node_tail[i] += lam * event.survival_at(&kernel, x);
+                                }
+                                p.narrow.push(event);
+                            }
+                            continue;
+                        }
+                    }
                     // loss[k] < m <= loss[k + 1], then TAIL_INTERVALS - 1 lower.
                     let above = loss.partition_point(|&v| v < m);
                     let k_signed = above as isize - 1 - (TAIL_INTERVALS as isize - 1);
@@ -515,6 +737,7 @@ pub fn build_curve(
     let mut sample_curve = vec![0.0_f64; sample_x.len()];
     let mut sample_total = vec![0.0_f64; sample_x.len()];
     let mut tails: Vec<TailEvent> = Vec::new();
+    let mut narrow: Vec<NarrowEvent> = Vec::new();
     let mut atoms: Vec<(f64, f64)> = Vec::new();
     let mut total_rate = Neumaier::default();
     let mut analytic_aal = Neumaier::default();
@@ -543,6 +766,7 @@ pub fn build_curve(
             *dst += src;
         }
         tails.extend(p.tails);
+        narrow.extend(p.narrow);
         atoms.extend(p.atoms);
         total_rate.add(p.rate);
         analytic_aal.add(p.aal);
@@ -590,6 +814,18 @@ pub fn build_curve(
     for k in 0..m1 {
         group_start[k + 1] += group_start[k];
     }
+    // The narrow events by start (stable), their suffix rates, the widest
+    // bulk, and the mass their walks deposit.
+    narrow.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    let mut narrow_above = vec![0.0_f64; narrow.len() + 1];
+    for i in (0..narrow.len()).rev() {
+        narrow_above[i] = narrow_above[i + 1] + narrow[i].rate;
+    }
+    let narrow_max_width = narrow.iter().map(|t| t.stop - t.start).fold(0.0_f64, f64::max);
+    let mut narrow_mass = Neumaier::default();
+    for t in &narrow {
+        narrow_mass.add(t.rate * t.survival);
+    }
     atoms.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let atom_loss: Vec<f64> = atoms.iter().map(|a| a.0).collect();
     let atom_rate: Vec<f64> = atoms.iter().map(|a| a.1).collect();
@@ -608,6 +844,10 @@ pub fn build_curve(
         tail_above,
         tails,
         group_start,
+        narrow,
+        narrow_above,
+        narrow_max_width,
+        narrow_mass: narrow_mass.value(),
         atom_loss,
         atom_rate,
         atom_above,
@@ -640,6 +880,11 @@ impl Curve {
         self.loss.len()
     }
 
+    /// The beta events kept out of the curve as narrow.
+    pub fn narrow_events(&self) -> usize {
+        self.narrow.len()
+    }
+
     /// The truncated curve by the interpolant; 0 above the highest node.
     /// Below the lowest node the curve is undefined (NaN).
     pub fn interpolate(&self, x: f64) -> f64 {
@@ -660,8 +905,9 @@ impl Curve {
     }
 
     /// `Lambda(x)` of the beta events: the interpolated curve, the tails of
-    /// the events truncated above `x`, and the exact survival of the events
-    /// whose tail interval contains `x`.
+    /// the events truncated above `x`, the exact survival of the events
+    /// whose tail interval contains `x`, and the narrow events (in full
+    /// above `x`, exact where `x` is in the bulk).
     pub fn exceedance_betas(&self, x: f64) -> f64 {
         let loss = &self.loss;
         let m1 = loss.len();
@@ -679,6 +925,17 @@ impl Curve {
                 total += t.rate * BetaFn::new(t.alpha, t.beta).sf(x / t.max_loss);
             }
         }
+        let i = self.narrow.partition_point(|t| t.start <= x);
+        total += self.narrow_above[i];
+        let lowest = x - self.narrow_max_width;
+        for t in self.narrow[..i].iter().rev() {
+            if t.start < lowest {
+                break;
+            }
+            if x < t.stop {
+                total += t.rate * t.survival_at(&t.kernel(), x);
+            }
+        }
         total
     }
 
@@ -691,9 +948,9 @@ impl Curve {
 
     /// The even grid at spacing `h` with `grid_length` nodes (derived to
     /// cover `max_loss` when `None`) under the overflow policy: the curve
-    /// differenced at the half-bucket edges, the tails walked per event to
-    /// the rate floor in a chunk pass folded in order, and the atoms by the
-    /// linear rule. Requires `h >= 2 min_loss`.
+    /// differenced at the half-bucket edges, the tails and the narrow
+    /// events walked per event to the rate floor in chunk passes folded in
+    /// order, and the atoms by the linear rule. Requires `h >= 2 min_loss`.
     pub fn grid(&self, h: f64, grid_length: Option<usize>, policy: Overflow, config: &Config) -> Result<GridOutcome, Error> {
         if !(h.is_finite() && h > 0.0) {
             return Err(Error::BadBucketSize(h));
@@ -734,7 +991,7 @@ impl Curve {
                 values.push(v);
                 prev = v;
             }
-            secondary[0] += self.beta_rate - values[0] - self.tail_above[0];
+            secondary[0] += self.beta_rate - values[0] - self.tail_above[0] - self.narrow_mass;
             for i in 1..n {
                 secondary[i] += values[i - 1] - values[i];
             }
@@ -758,83 +1015,118 @@ impl Curve {
                 }
             }
         } else {
-            secondary[0] += self.beta_rate - self.tail_above[0];
+            secondary[0] += self.beta_rate - self.tail_above[0] - self.narrow_mass;
         }
 
-        // The tails, per event, in chunks folded in order.
+        // The tails and the narrow events, per event, in chunk passes
+        // folded in order: each chunk's histogram covers only the bucket
+        // span its events can touch (the top node stands in for anything
+        // beyond the grid), so a chunk costs its span, not the grid length.
         let chunk = config.resolved_chunk_rows();
-        let n_chunks = self.tails.len().div_ceil(chunk);
         let min_distance = 0.5 * self.loss[0];
         let threshold = TAIL_RATE_FLOOR * self.beta_rate;
-        // The edges e_first ..= e_stop of a tail lie in (x_k, M) and on the
-        // grid; the remainder goes to the bucket after the last edge walked.
-        let edge_range = |t: &TailEvent| -> (usize, isize) {
-            let first = ((self.loss[t.node] / h - 0.5).floor() as isize + 1) as usize;
-            let stop = ((t.max_loss / h - 0.5).ceil() as isize - 1).min(n as isize - 1);
+        let top = n - 1;
+        // The edges e_first ..= e_stop of a walk from `start` to `end` lie
+        // in (start, end) and on the grid.
+        let edge_range = |start: f64, end: f64| -> (usize, isize) {
+            let first = ((start / h - 0.5).floor() as isize + 1) as usize;
+            let stop = ((end / h - 0.5).ceil() as isize - 1).min(n as isize - 1);
             (first, stop)
         };
-        let top = n - 1;
+        let span = |ranges: &mut dyn Iterator<Item = (usize, isize)>| -> (usize, Vec<f64>) {
+            let (mut lo, mut hi) = (top, 0_usize);
+            for (first, stop) in ranges {
+                lo = lo.min(first.min(top));
+                hi = hi.max(((stop + 1).max(first as isize) as usize).min(top));
+            }
+            (lo, vec![0.0_f64; hi + 1 - lo])
+        };
+        // A remainder beyond the grid (so the endpoint exceeds the top
+        // edge): its moment by partial expectations.
+        let overflow_moment = |lam: f64, m: f64, bf: &BetaFn, start: f64, s: f64, over: &mut OverflowAccumulator| {
+            let begin = start.max(top_edge);
+            let mass = if begin > start { lam * bf.sf(begin / m) } else { lam * s };
+            over.moment.add(tail_moment(lam, m, bf.alpha, bf.beta, begin) - top_node * mass);
+        };
+        let fold = |secondary: &mut [f64], over: &mut OverflowAccumulator, (lo, hist, part): (usize, Vec<f64>, OverflowAccumulator)| {
+            for (dst, src) in secondary[lo..].iter_mut().zip(&hist) {
+                *dst += src;
+            }
+            over.merge(&part);
+        };
+
+        let n_chunks = self.tails.len().div_ceil(chunk);
         let process = |chunk_index: usize| -> Result<(usize, Vec<f64>, OverflowAccumulator), Error> {
             let start = chunk_index * chunk;
             let end = (start + chunk).min(self.tails.len());
             let tails = &self.tails[start..end];
-            // The histogram covers only the buckets the chunk's tails can
-            // touch (the top node stands in for anything beyond the grid),
-            // so a chunk costs its span, not the grid length.
-            let (mut lo, mut hi) = (top, 0_usize);
-            for t in tails {
-                let (first, stop) = edge_range(t);
-                lo = lo.min(first.min(top));
-                hi = hi.max(((stop + 1).max(first as isize) as usize).min(top));
-            }
-            let mut hist = vec![0.0_f64; hi + 1 - lo];
+            let (lo, mut hist) = span(&mut tails.iter().map(|t| edge_range(self.loss[t.node], t.max_loss)));
             let mut over = OverflowAccumulator::default();
             for t in tails {
                 let (lam, m, s) = (t.rate, t.max_loss, t.survival);
                 let xk = self.loss[t.node];
                 let bf = BetaFn::new(t.alpha, t.beta);
-                let (first, stop) = edge_range(t);
-                // The bucket that takes the remainder.
+                let (first, stop) = edge_range(xk, m);
                 let rest = if stop < first as isize || lam * s <= threshold {
                     // No edge to walk, or the whole tail at or below the
                     // floor: one deposit in the bucket containing x_k.
                     put(&mut hist, lo, n, first, lam * s, policy, &mut over);
                     first
                 } else {
-                    // Walk the edges in order; stop at the top edge or at
-                    // the first edge where the event's rate reaches the
-                    // floor, and lump the remainder in the next bucket.
                     let interp = TailInterpolant::new(&bf, m, xk, s, min_distance);
                     let mut cursor = interp.start();
-                    let mut prev = s;
-                    let mut i = first;
-                    loop {
-                        let surv = interp.at_ascending((i as f64 + 0.5) * h, &mut cursor);
-                        put(&mut hist, lo, n, i, lam * (prev - surv), policy, &mut over);
-                        prev = surv;
-                        if i as isize == stop || lam * surv <= threshold {
-                            break;
-                        }
-                        i += 1;
-                    }
-                    put(&mut hist, lo, n, i + 1, lam * prev, policy, &mut over);
-                    i + 1
+                    walk_edges(&mut hist, lo, n, first, stop, lam, s, h, threshold, policy, &mut over, |x| {
+                        interp.at_ascending(x, &mut cursor)
+                    })
                 };
-                // A remainder beyond the grid (so M > e_{n-1}): its moment
-                // by partial expectations.
                 if rest >= n {
-                    let begin = xk.max(top_edge);
-                    let mass = if begin > xk { lam * bf.sf(begin / m) } else { lam * s };
-                    over.moment.add(tail_moment(lam, m, t.alpha, t.beta, begin) - top_node * mass);
+                    overflow_moment(lam, m, &bf, xk, s, &mut over);
                 }
             }
             Ok((lo, hist, over))
         };
-        run_chunks(config, n_chunks, process, |(lo, hist, part): (usize, Vec<f64>, OverflowAccumulator)| {
-            for (dst, src) in secondary[lo..].iter_mut().zip(&hist) {
-                *dst += src;
+        run_chunks(config, n_chunks, process, |part| {
+            fold(&mut secondary, &mut over, part);
+            Ok(())
+        })?;
+
+        // The narrow events, exactly on their bulk.
+        let n_chunks = self.narrow.len().div_ceil(chunk);
+        let process = |chunk_index: usize| -> Result<(usize, Vec<f64>, OverflowAccumulator), Error> {
+            let start = chunk_index * chunk;
+            let end = (start + chunk).min(self.narrow.len());
+            let events = &self.narrow[start..end];
+            let (lo, mut hist) = span(&mut events.iter().map(|t| edge_range(t.start, t.stop)));
+            let mut over = OverflowAccumulator::default();
+            for t in events {
+                let (lam, m, s) = (t.rate, t.max_loss, t.survival);
+                let kernel = t.kernel();
+                let (first, stop) = edge_range(t.start, t.stop);
+                let rest = if stop < first as isize || lam * s <= threshold {
+                    put(&mut hist, lo, n, first, lam * s, policy, &mut over);
+                    first
+                } else {
+                    // Incremental: each edge's survival is the previous
+                    // less the bucket's mass, one short quadrature.
+                    let (mut prev_x, mut prev_s) = (t.start, s);
+                    walk_edges(&mut hist, lo, n, first, stop, lam, s, h, threshold, policy, &mut over, |x| {
+                        prev_s = (prev_s - kernel.integral(prev_x / m, x.min(t.stop) / m) / t.norm).max(0.0);
+                        prev_x = x;
+                        if x >= t.stop { 0.0 } else { prev_s }
+                    })
+                };
+                if rest >= n {
+                    // The remainder beyond the grid: its moment by the
+                    // kernel's partial expectation.
+                    let begin = t.start.max(top_edge);
+                    let mass = lam * t.survival_at(&kernel, begin);
+                    over.moment.add(t.partial_expectation(&kernel, begin) - top_node * mass);
+                }
             }
-            over.merge(&part);
+            Ok((lo, hist, over))
+        };
+        run_chunks(config, n_chunks, process, |part| {
+            fold(&mut secondary, &mut over, part);
             Ok(())
         })?;
 
@@ -848,6 +1140,41 @@ impl Curve {
             overflow: over,
         })
     }
+}
+
+/// Walk one event's survival along the edges `first ..= stop` (given
+/// `first <= stop` and `lam s` above the floor): deposit `lam` times the
+/// drop across each edge, break at the last edge or at the first edge
+/// where `lam S` reaches the floor, and lump the remainder in the next
+/// bucket; returns that bucket.
+#[allow(clippy::too_many_arguments)]
+fn walk_edges(
+    hist: &mut [f64],
+    lo: usize,
+    n: usize,
+    first: usize,
+    stop: isize,
+    lam: f64,
+    s: f64,
+    h: f64,
+    threshold: f64,
+    policy: Overflow,
+    over: &mut OverflowAccumulator,
+    mut survival_at: impl FnMut(f64) -> f64,
+) -> usize {
+    let mut prev = s;
+    let mut i = first;
+    loop {
+        let surv = survival_at((i as f64 + 0.5) * h);
+        put(hist, lo, n, i, lam * (prev - surv), policy, over);
+        prev = surv;
+        if i as isize == stop || lam * surv <= threshold {
+            break;
+        }
+        i += 1;
+    }
+    put(hist, lo, n, i + 1, lam * prev, policy, over);
+    i + 1
 }
 
 /// Deposit `w` into bucket `i` of a grid of `n`, through a histogram that
@@ -931,6 +1258,38 @@ mod tests {
                 }
             }
             assert!(got.windows(2).all(|w| w[1] <= w[0]));
+        }
+    }
+
+    #[test]
+    fn narrow_kernel_matches_incomplete_beta_where_that_converges() {
+        // CV 1e-2 and 3e-3 at mean 0.25: the continued fraction converges
+        // (to about 1e-10 of its own at alpha of 2e4) and the quadrature
+        // agrees with it to 1e-9; at CV 1e-5 the fraction fails and the
+        // quadrature survival is still monotone in [0, 1] with the half at
+        // the mean.
+        let m = 1e6;
+        let mu = 2.5e5;
+        for (cv, check) in [(1e-2, true), (3e-3, true), (1e-5, false)] {
+            let sd = cv * mu;
+            let (alpha, beta) = beta_params(m, mu, sd * sd);
+            let kernel = NarrowKernel::new(alpha, beta);
+            let (lower, stop) = narrow_bulk(&kernel, m, mu, sd, 1.0, 1e-20, ).unwrap();
+            let norm = kernel.integral(lower / m, stop / m);
+            let event = NarrowEvent { rate: 1.0, max_loss: m, alpha, beta, lower, start: lower, stop, norm, survival: 1.0 };
+            let mut prev = 1.0;
+            for k in -10..=10 {
+                let x = mu + k as f64 * sd;
+                let s = event.survival_at(&kernel, x);
+                assert!((0.0..=1.0).contains(&s) && s <= prev, "cv={cv} k={k}: {s}");
+                prev = s;
+                if check {
+                    let want = BetaFn::new(alpha, beta).sf(x / m);
+                    assert!((s - want).abs() <= 1e-9 * want.max(1e-300) + 1e-14, "cv={cv} k={k}: {s} vs {want}");
+                }
+            }
+            let half = event.survival_at(&kernel, mu);
+            assert!((half - 0.5).abs() < 2e-3 * (1.0 + cv * 100.0), "cv={cv}: {half}");
         }
     }
 

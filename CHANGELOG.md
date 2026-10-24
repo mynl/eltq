@@ -3,6 +3,18 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.0] - 2026-10-24
+
+### Changed
+
+- [narrow-events] A beta whose standard deviation is below one node interval at its mean (2.3% of the loss at the default density) is kept out of the shared curve, which could not follow its step and was off by up to the event's rate across one interval, and is walked along the bucket edges of its bulk (a few standard deviations each side of the mean, to the rate floor) with its survival by quadrature of its density. `exceedance(x)` is exact for such events to about 1e-12; the survival grid changes near their means (spec section 5A, test 22). Events with a parameter at or below 1, or whose bulk does not reach the floor within 40 standard deviations on either side, take the regular route.
+- Found on the way: the engine's incomplete beta (a continued fraction of 400 iterations) is good only to about 1e-10 near the mean at `alpha + beta` of 1e4 and fails above 1e7, where SciPy is right. The narrow events are the one place the engine evaluates such a beta inside its bulk, and they no longer use it; the regular routes still do for the rare events the narrow criterion rejects.
+- The survival goldens `small_survival` and `medium_survival` are regenerated (the medium fixture has four narrow events; its grid moves by up to 2.7e-6 of rate in buckets near their means, the total unchanged).
+
+### Added
+
+- `narrow_events` in `Meta` (survival method; None under quantiles) and in `CurveMeta`: the count of events treated this way.
+
 ## [2.2.0] - 2026-10-24
 
 ### Changed

@@ -19,7 +19,9 @@ implementation plans are `dev/done/plan-implementation.md` (1.0.0-1.5.0),
 `dev/done/plan-multiunit.md` (1.6.0-1.11.0: joint multi-unit secondary
 uncertainty, unit terms, view totals) and
 `dev/done/plan-single-unit-survival-route.md` (1.13.0-2.0.0: the survival
-method, Bernoulli rows, overflow policies, the exceedance curve).
+method, Bernoulli rows, overflow policies, the exceedance curve) and
+`dev/done/plan-survival-tail-cost.md` (2.0.1-2.3.0: the tail rate cut, the
+balanced tail pass, narrow events).
 
 ## Install
 
@@ -72,6 +74,10 @@ identical.
 | [benchmark] node density set, speed gate met (`benchmarks/report-1.16.0.md`) | 1.16.0 | done |
 | [curve] public exceedance curve: `exceedance_curve`, grids at any spacing, OEP points | 1.17.0 | done |
 | [default] survival is the default method; the clamp leaves the one-row route | 2.0.0 | done |
+| [oep-pml] `oep_pml` above every atom | 2.0.1 | done |
+| [tail-cut] tail walks cut at the rate floor and the grid window | 2.1.0 | done |
+| [edge-cost] span-limited chunk histograms balance the tail pass | 2.2.0 | done |
+| [narrow-events] betas narrower than a node interval walked by quadrature | 2.3.0 | done |
 
 ## Layout
 
@@ -195,8 +201,10 @@ a `(rate, max_loss, mean_loss, sd_indep, sd_corr)` tuple.
 **Methods.** `method="survival"` (the default from 2.0.0) evaluates the
 portfolio exceedance rate exactly at `nodes_per_decade` geometric nodes,
 interpolates it monotonically and buckets it by the nearest rule, with each
-event's endpoint handled per event (spec section 5A); both backends compute
-the same function. `method="quantiles"` (the default before 2.0.0) replaces
+event's endpoint handled per event, its tail walked only while its rate
+exceeds 1e-20 of the total, and events narrower than a node interval kept
+out of the curve and walked by quadrature of their density (spec section
+5A); both backends compute the same function. `method="quantiles"` (the default before 2.0.0) replaces
 each beta event by K midpoint quantiles deposited by the linear rule; it cuts
 every event's survival function at 1/(2K), which loses tens of percent of the
 expected loss for small-alpha events (spec section 5). `overflow` names what happens to mass

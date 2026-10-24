@@ -129,6 +129,8 @@ pub struct Meta {
     pub nodes: Option<usize>,
     pub nodes_per_decade: Option<usize>,
     pub interpolation_error: Option<f64>,
+    /// Beta events kept out of the curve as narrow (survival method).
+    pub narrow_events: Option<usize>,
     pub overflow: Overflow,
     pub rate_above_grid: [f64; 2],
     pub mean_above_grid: [f64; 2],

@@ -8,9 +8,9 @@
   "raw_mass": 5.170967861486127,
   "raw_mean": 1754027.42806614,
   "secondary_mass": 5.170967861486127,
-  "secondary_mean": 1753872.3973751378,
+  "secondary_mean": 1753872.3929452447,
   "quadrature_secondary_mean": null,
-  "secondary_mean_error": -155.03069100226276,
+  "secondary_mean_error": -155.03512089536525,
   "input_rows": 5000,
   "valid_rows": 4909,
   "diagnostics": {
@@ -63,7 +63,8 @@
   "method": "survival",
   "nodes": 332,
   "nodes_per_decade": 100,
-  "interpolation_error": 1.4022646498935282e-05,
+  "interpolation_error": 1.3984357567517899e-05,
+  "narrow_events": 4,
   "overflow": "top_bucket",
   "rate_above_grid": {
     "raw": 0.0,

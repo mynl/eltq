@@ -1,6 +1,6 @@
-"""Spec tests 15 to 21: the survival method, the overflow policies, the
-Bernoulli treatment of inadmissible rows (`dev/done/plan-single-unit-survival-route.md`)
-and the tail rate cut (`dev/done/plan-survival-tail-cost.md`).
+"""Spec tests 15 to 22: the survival method, the overflow policies, the
+Bernoulli treatment of inadmissible rows (`dev/done/plan-single-unit-survival-route.md`),
+the tail rate cut and the narrow events (`dev/done/plan-survival-tail-cost.md`).
 
 Every test runs on both backends through the ``impl`` fixture in conftest;
 the oracle checks (``exact_edges``, ``check_every_interval``) call the
@@ -232,6 +232,51 @@ def test_21_tail_rate_cut():
     assert not np.array_equal(cut, full)
     bound = len(df) * TAIL_RATE_FLOOR * curve.beta_rate
     assert np.max(np.abs(tail_sums(cut) - tail_sums(full))) <= bound
+
+
+# [22] Narrow events: betas narrower than a node interval are kept out of
+# the shared curve and walked exactly, so the curve is exact across their
+# bulk and the grid's tail sums match the exact Lambda there.
+def test_22_narrow_events():
+    import eltq
+
+    rng = np.random.default_rng(22)
+    center, n_base, n_narrow = 250_000.0, 2_000, 100
+    rate = 10.0 ** rng.uniform(-5, -2, n_base)
+    max_loss = 10.0 ** rng.uniform(5, 7, n_base)
+    mean = 10.0 ** rng.uniform(-4, -1, n_base) * max_loss
+    sd = np.minimum(10.0 ** rng.uniform(0, 1, n_base) * mean,
+                    0.95 * np.sqrt(mean * (max_loss - mean)))
+    # Coefficients of variation from 1e-6 to 1e-2 at a common mean.
+    cols = (np.concatenate([rate, np.full(n_narrow, 2.5e-7)]),
+            np.concatenate([max_loss, 10.0 ** rng.uniform(np.log10(3e5), 7, n_narrow)]),
+            np.concatenate([mean, np.full(n_narrow, center)]),
+            np.concatenate([sd, center * 10.0 ** rng.uniform(-6, -2, n_narrow)]),
+            np.zeros(n_base + n_narrow))
+    h = 25.0
+    ref_curve, ref_meta = reference.exceedance_curve_reference(*cols, min_loss=0.5 * h)
+    curve = eltq.exceedance_curve(*cols, min_loss=0.5 * h)
+    assert ref_meta.narrow_events == n_narrow
+    assert curve.meta.narrow_events == n_narrow
+    x = np.linspace(0.97 * center, 1.03 * center, 241)
+    exact = ref_curve.exact(x)
+    for got in (ref_curve.exceedance_betas(x), curve.exceedance(x)):
+        assert np.max(np.abs(got - exact) / exact) <= 1e-8
+    # The grids: the full rate, the backends within 1e-12 of the total, and
+    # the tail sums at the edges around the narrow events exact to 1e-7.
+    grid, gmeta = curve.grid(h)
+    ref_grid, _ = ref_curve.grid(h)
+    total = curve.meta.total_rate
+    assert math.isclose(grid.sum(), total, rel_tol=1e-14)
+    assert np.max(np.abs(grid - ref_grid)) <= 1e-12 * total
+    sums = tail_sums(grid)
+    edges = (np.arange(sums.size) + 0.5) * h
+    near = (edges >= 0.95 * center) & (edges <= 1.05 * center)
+    want = ref_curve.exact(edges[near])
+    assert np.max(np.abs(sums[near] - want) / want) <= 1e-7
+    # Under quantize the count is reported too.
+    _, _, meta = eltq.quantize_arrays(*cols, bucket_size=h)
+    assert meta.narrow_events == n_narrow
 
 
 def test_curve_matches_quantize_and_exact(impl):

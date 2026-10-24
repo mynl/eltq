@@ -26,11 +26,11 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.special import betaincc, betaln
+from scipy.special import betainc, betaincc, betaln
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import (DEFAULT_NODES_PER_DECADE, TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta,
-                        GridMeta, Meta, RowIssues)
+from eltq._meta import (DEFAULT_NODES_PER_DECADE, NARROW_STEP_PARAMETER_SUM, NARROW_STEPS,
+                        TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta, GridMeta, Meta, RowIssues)
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -206,6 +206,35 @@ def _tail_moment(lam: float, m: float, a: float, b: float, e: float) -> float:
     return lam * m * (a / (a + b)) * float(betaincc(a + 1.0, b, e / m))
 
 
+def _narrow_bulk(a: float, b: float, m: float, mu: float, sigma: float,
+                 lam: float, floor: float, min_loss: float):
+    """The bulk of a candidate narrow event by steps of ``sigma`` out from
+    the mean: ``start``, the first step down where ``lam F`` is at or below
+    the floor (``min_loss`` if reached first), and ``stop``, the first step
+    up where ``lam S`` is at or below it (``M`` if reached first); None
+    when either side needs more than ``NARROW_STEPS`` steps."""
+    start = stop = None
+    for i in range(1, NARROW_STEPS + 1):
+        x = mu - i * sigma
+        if x <= 0.0:
+            start = 0.0
+            break
+        if lam * float(betainc(a, b, x / m)) <= floor:
+            start = x
+            break
+    for i in range(1, NARROW_STEPS + 1):
+        x = mu + i * sigma
+        if x >= m:
+            stop = m
+            break
+        if lam * float(betaincc(a, b, x / m)) <= floor:
+            stop = x
+            break
+    if start is None or stop is None:
+        return None
+    return max(start, min_loss), stop
+
+
 def _tail_survival(m: float, a: float, b: float, xk: float, s: float,
                    x: np.ndarray, min_distance: float) -> np.ndarray:
     """``S(x)`` of one beta event on its tail interval ``(x_k, M]`` by the
@@ -290,7 +319,7 @@ class SurvivalCurve:
     """
 
     def __init__(self, loss, curve, slope_out, slope_in, groups, below_rate,
-                 beta_rate, atom_loss, atom_rate, whole=()):
+                 beta_rate, atom_loss, atom_rate, whole=(), narrow=()):
         self.loss = np.asarray(loss, dtype=np.float64)
         self.curve = np.asarray(curve, dtype=np.float64)
         self.slope_out = np.asarray(slope_out, dtype=np.float64)
@@ -302,6 +331,14 @@ class SurvivalCurve:
         # Events whose tail region is their whole support above the lowest
         # node: (lam, M, alpha, beta, 1.0), deposited exactly from edge 0.
         self._whole = list(whole)
+        # The narrow events (lam, M, alpha, beta, start, stop, S(start)),
+        # sorted by start: kept out of the curve and walked exactly on
+        # their bulk; in full below it, nothing above it.
+        self._narrow = sorted(narrow, key=lambda t: t[4])
+        self._narrow_start = np.array([t[4] for t in self._narrow], dtype=np.float64)
+        above = np.cumsum([t[0] for t in self._narrow][::-1])[::-1]
+        self._narrow_above = np.append(above, 0.0)
+        self.narrow_mass = math.fsum(t[0] * t[6] for t in self._narrow)
         self._below_rate = float(below_rate)
         self.beta_rate = float(beta_rate)
         # Set by exceedance_curve_reference; the grid's metadata needs them.
@@ -344,6 +381,11 @@ class SurvivalCurve:
     @property
     def nodes(self) -> int:
         return int(self.loss.size)
+
+    @property
+    def narrow_events(self) -> int:
+        """The beta events kept out of the curve as narrow."""
+        return len(self._narrow)
 
     @property
     def exceedance_rate(self) -> np.ndarray:
@@ -456,6 +498,8 @@ class SurvivalCurve:
         for group in list(self._groups) + [self._whole]:
             for lam, m, a, b, _ in group:
                 out += lam * betaincc(a, b, np.minimum(x / m, 1.0))
+        for lam, m, a, b, _, _, _ in self._narrow:
+            out += lam * betaincc(a, b, np.minimum(x / m, 1.0))
         return out
 
     def exceedance_betas(self, x) -> np.ndarray:
@@ -481,6 +525,13 @@ class SurvivalCurve:
         # at the lowest node; replace that by their exact survival.
         for lam, m, a, b, s in self._whole:
             add += lam * (betaincc(a, b, np.minimum(xi / m, 1.0)) - s)
+        # The narrow events: in full above x, exact where x is in the bulk.
+        if self._narrow:
+            add += self._narrow_above[np.searchsorted(self._narrow_start, xi, side="right")]
+            for lam, m, a, b, start, stop, _ in self._narrow:
+                sel = (xi >= start) & (xi < stop)
+                if sel.any():
+                    add[sel] += lam * betaincc(a, b, xi[sel] / m)
         out[inside] += add
         return out
 
@@ -550,11 +601,11 @@ class SurvivalCurve:
             # no bucket is negative and the telescoping sum stays exact.
             values = np.minimum.accumulate(np.minimum(values, self.curve[0]))
             # Below e_0 = x_0: everything the curve and the tails do not hold.
-            weights[0] = self.beta_rate - values[0] - self.tail_above[0]
+            weights[0] = self.beta_rate - values[0] - self.tail_above[0] - self.narrow_mass
             weights[1:] = values[:-1] - values[1:]
             over_rate_terms = [float(values[-1])]
         else:
-            weights[0] = self.beta_rate
+            weights[0] = self.beta_rate - self.narrow_mass
             over_rate_terms = []
         over_moment_terms = []
         # The curve part above the top edge: events truncated above it.
@@ -567,51 +618,73 @@ class SurvivalCurve:
                     mass = lam * (float(betaincc(a, b, top_edge / m)) - s)
                     moment = _tail_moment(lam, m, a, b, top_edge) - _tail_moment(lam, m, a, b, xk)
                     over_moment_terms.append(moment - top_node * mass)
-        # The tails: each event's survival walked along the edges inside
-        # (x_k, M) and on the grid, by its endpoint interpolant (exactly
-        # under ``exact_edges``), in blocks, to the top edge or to the first
-        # edge where the event's rate reaches the floor; the remainder goes
-        # to the next bucket, and beyond the grid its moment is taken by
-        # partial expectations. The whole-tail events start at the lowest
-        # node.
+        # The tails and the narrow events, per event: the survival walked
+        # along the edges inside its interval and on the grid (a tail by its
+        # endpoint interpolant, exactly under ``exact_edges``; a narrow
+        # event exactly) to the top edge or to the first edge where the
+        # event's rate reaches the floor; the remainder goes to the next
+        # bucket, and beyond the grid its moment is taken by partial
+        # expectations. The whole-tail events start at the lowest node.
         threshold = tail_rate_floor * self.beta_rate
+        x_min = 0.5 * loss[0]
+
+        def deposit(lam, m, a, b, start, end, s, survival_at):
+            first = int(math.floor(start / h - 0.5)) + 1      # e_{first-1} <= start < e_first
+            stop = min(int(math.ceil(end / h - 0.5)) - 1, n - 1)   # e_stop < end, on the grid
+            if stop < first or lam * s <= threshold:
+                # No edge to walk, or the whole mass at or below the floor:
+                # one deposit in the bucket containing ``start``.
+                self._put(weights, first, lam * s, over_rate_terms)
+                rest = first
+            else:
+                rest = self._walk(weights, over_rate_terms, first, stop, lam, s, h,
+                                  threshold, survival_at)
+            if rest >= n:
+                begin = max(start, top_edge)
+                mass = lam * (float(betaincc(a, b, begin / m)) if begin > start else s)
+                over_moment_terms.append(_tail_moment(lam, m, a, b, begin) - top_node * mass)
+
         for k, group in list(enumerate(self._groups)) + [(0, self._whole)]:
             xk = loss[k]
-            first = int(math.floor(xk / h - 0.5)) + 1      # e_{first-1} <= x_k < e_first
             for lam, m, a, b, s in group:
                 if s <= 0.0:
                     continue   # the survival underflowed before x_k: no tail
-                stop = min(int(math.ceil(m / h - 0.5)) - 1, n - 1)   # e_stop < M, on the grid
-                if stop < first or lam * s <= threshold:
-                    # No edge to walk, or the whole tail at or below the
-                    # floor: one deposit in the bucket containing x_k.
-                    self._put(weights, first, lam * s, over_rate_terms)
-                    rest = first
+                if exact_edges:
+                    def survival_at(e, a=a, b=b, m=m):
+                        return betaincc(a, b, e / m)
                 else:
-                    prev, i = s, first
-                    while True:
-                        # The same edge arithmetic as the Rust walk, so the
-                        # values agree bitwise.
-                        block = (np.arange(i, min(i + TAIL_BLOCK, stop + 1), dtype=np.float64) + 0.5) * h
-                        if exact_edges:
-                            surv = betaincc(a, b, block / m)
-                        else:
-                            surv = _tail_survival(m, a, b, xk, s, block, 0.5 * loss[0])
-                        cut = np.flatnonzero(lam * surv <= threshold)
-                        used = int(cut[0]) + 1 if cut.size else surv.size
-                        values = np.concatenate([[prev], surv[:used]])
-                        for j, w in zip(range(i, i + used), lam * (values[:-1] - values[1:])):
-                            self._put(weights, j, w, over_rate_terms)
-                        prev, i = float(surv[used - 1]), i + used
-                        if cut.size or i > stop:
-                            break
-                    self._put(weights, i, lam * prev, over_rate_terms)
-                    rest = i
-                if rest >= n:
-                    start = max(xk, top_edge)
-                    mass = lam * (float(betaincc(a, b, start / m)) if start > xk else s)
-                    over_moment_terms.append(_tail_moment(lam, m, a, b, start) - top_node * mass)
+                    def survival_at(e, a=a, b=b, m=m, xk=xk, s=s):
+                        return _tail_survival(m, a, b, xk, s, e, x_min)
+                deposit(lam, m, a, b, xk, m, s, survival_at)
+        for lam, m, a, b, start, stop, s in self._narrow:
+            def survival_at(e, a=a, b=b, m=m):
+                return betaincc(a, b, e / m)
+            deposit(lam, m, a, b, start, stop, s, survival_at)
         return weights, math.fsum(over_rate_terms), math.fsum(over_moment_terms)
+
+    def _walk(self, weights, over_rate_terms, first, stop, lam, s, h, threshold,
+              survival_at):
+        """Walk one event's survival along the edges ``first .. stop`` in
+        blocks (given ``first <= stop`` and ``lam s`` above the floor):
+        deposit ``lam`` times the drop across each edge, break at the last
+        edge or at the first edge where ``lam S`` reaches the floor, and
+        lump the remainder in the next bucket; returns that bucket."""
+        prev, i = s, first
+        while True:
+            # The same edge arithmetic as the Rust walk, so the values
+            # agree bitwise.
+            block = (np.arange(i, min(i + TAIL_BLOCK, stop + 1), dtype=np.float64) + 0.5) * h
+            surv = survival_at(block)
+            cut = np.flatnonzero(lam * surv <= threshold)
+            used = int(cut[0]) + 1 if cut.size else surv.size
+            values = np.concatenate([[prev], surv[:used]])
+            for j, w in zip(range(i, i + used), lam * (values[:-1] - values[1:])):
+                self._put(weights, j, w, over_rate_terms)
+            prev, i = float(surv[used - 1]), i + used
+            if cut.size or i > stop:
+                break
+        self._put(weights, i, lam * prev, over_rate_terms)
+        return i
 
     @staticmethod
     def _put(weights, i, w, over_rate_terms):
@@ -651,11 +724,11 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
         raise EltqError(f"min_loss must be finite and positive, got {min_loss}")
     if int(nodes_per_decade) < 1:
         raise EltqError(f"nodes_per_decade must be >= 1, got {nodes_per_decade}")
-    beta_rows = [(float(lam), float(m), float(a), float(b)) for lam, m, a, b in beta_rows]
+    beta_rows = [tuple(float(v) for v in row) for row in beta_rows]
     atom_loss = np.asarray([x for x, _ in atoms], dtype=np.float64)
     atom_rate = np.asarray([w for _, w in atoms], dtype=np.float64)
-    beta_rate = math.fsum(lam for lam, _, _, _ in beta_rows)
-    max_m = max((m for _, m, _, _ in beta_rows), default=0.0)
+    beta_rate = math.fsum(row[0] for row in beta_rows)
+    max_m = max((row[1] for row in beta_rows), default=0.0)
     if max_m <= min_loss:
         # Every event lies below the lowest node: nothing to interpolate.
         return SurvivalCurve(np.array([min_loss]), np.zeros(1), np.zeros(1), np.zeros(1),
@@ -672,10 +745,29 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
     groups = [[] for _ in range(m1)]
     below_rate = 0.0
     whole = []   # events whose tail region starts at the lowest node
-    for lam, m, a, b in beta_rows:
+    narrow = []  # events narrower than a node interval, walked exactly
+    # The narrow criterion, one node interval at the mean, and the rate
+    # floor of the bulk search.
+    narrow_ratio = 10.0 ** (1.0 / nodes_per_decade) - 1.0
+    narrow_floor = TAIL_RATE_FLOOR * beta_rate
+    for lam, m, a, b, mu, sigma in beta_rows:
         if m <= min_loss:
             below_rate += lam
             continue
+        # Only bounded, log-concave densities (both parameters above 1)
+        # qualify; beyond NARROW_STEP_PARAMETER_SUM the event is a step at
+        # its mean, as in the Rust engine.
+        if sigma < mu * narrow_ratio and a > 1.0 and b > 1.0:
+            if a + b > NARROW_STEP_PARAMETER_SUM:
+                bulk = (max(mu, min_loss), mu)
+            else:
+                bulk = _narrow_bulk(a, b, m, mu, sigma, lam, narrow_floor, min_loss)
+            if bulk is not None:
+                start, stop = bulk
+                if stop > min_loss:
+                    s = 1.0 if stop <= start else float(betaincc(a, b, start / m))
+                    narrow.append((lam, m, a, b, start, stop, s))
+                continue
         # loss[k] < m <= loss[k + 1], then TAIL_INTERVALS - 1 nodes lower.
         k = int(np.searchsorted(loss, m, side="left")) - 1 - (TAIL_INTERVALS - 1)
         if k < 0:
@@ -702,7 +794,7 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
         groups[k].append((lam, m, a, b, s))
     curve[curve < 0.0] = 0.0
     return SurvivalCurve(loss, curve, slope_both, slope_both + slope_end, groups,
-                         below_rate, beta_rate, atom_loss, atom_rate, whole)
+                         below_rate, beta_rate, atom_loss, atom_rate, whole, narrow)
 
 
 def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
@@ -830,7 +922,7 @@ def exceedance_curve_reference(
             atoms.append((m, lam * p))
         else:
             a, b = beta_params(m, mu, var_eff[j])
-            beta_rows.append((lam, m, a, b))
+            beta_rows.append((lam, m, a, b, mu, math.sqrt(var_eff[j])))
     curve = build_survival_curve(beta_rows, atoms, x0, npd)
     curve.total_rate = math.fsum(rates_kept)
     curve.analytic_aal = math.fsum(aal_terms)
@@ -840,6 +932,7 @@ def exceedance_curve_reference(
         interpolation_error=curve.interpolation_error(),
         total_rate=curve.total_rate, analytic_aal=curve.analytic_aal,
         input_rows=n_rows, valid_rows=valid_rows, diagnostics=diagnostics,
+        narrow_events=curve.narrow_events,
     )
     return curve, meta
 
@@ -981,7 +1074,7 @@ def quantize_reference(
                     sec_overflow.place(secondary, x, w)
                 quad_terms.append(w * math.fsum(xs))
             else:
-                beta_rows.append((lam, m, a, b))
+                beta_rows.append((lam, m, a, b, mu, math.sqrt(var_eff[j])))
 
     curve = None
     interpolation_error = None
@@ -1025,6 +1118,7 @@ def quantize_reference(
         nodes=curve.nodes if curve is not None else None,
         nodes_per_decade=npd if method == "survival" else None,
         interpolation_error=interpolation_error,
+        narrow_events=curve.narrow_events if curve is not None else None,
         overflow=overflow,
         rate_above_grid={"raw": raw_overflow.rate, "secondary": sec_overflow.rate},
         mean_above_grid={"raw": raw_overflow.moment, "secondary": sec_overflow.moment},
