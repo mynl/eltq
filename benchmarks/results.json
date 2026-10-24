@@ -947,5 +947,212 @@
     ],
     "determinism_bitwise_across_threads": null,
     "peak_working_set_mb": 217.7
+  },
+  {
+    "timestamp": "2026-10-24T16:30:06+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "large_m",
+    "rows": 100000,
+    "bucket_size": 25.0,
+    "grid_length": 4194304,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.2.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 4194304,
+        "elapsed_s": 0.8801,
+        "rows_per_s": 113625,
+        "secondary_mean_error_rel": -0.5921044720734852,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 2.4158453015843406e-13,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "grid_length": 4194304,
+        "elapsed_s": 1.33,
+        "rows_per_s": 75191,
+        "secondary_mean_error_rel": -0.5765971642729808,
+        "interpolation_error": 2.1067656337552433e-07,
+        "nodes": 792,
+        "mass_error": 0.0,
+        "ratio_to_k32": 1.51
+      }
+    ],
+    "determinism_bitwise_across_threads": null,
+    "peak_working_set_mb": 227.5
+  },
+  {
+    "timestamp": "2026-10-24T16:30:10+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "mixture",
+    "rows": 1000000,
+    "bucket_size": 5000.0,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.2.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 1001,
+        "elapsed_s": 0.7563,
+        "rows_per_s": 1322145,
+        "secondary_mean_error_rel": -0.00025578863543973936,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 0.0,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 25,
+        "grid_length": 1001,
+        "elapsed_s": 0.4793,
+        "rows_per_s": 2086446,
+        "secondary_mean_error_rel": -7.548113464480327e-05,
+        "interpolation_error": 0.00010903553462850371,
+        "nodes": 84,
+        "mass_error": 2.0463630789890885e-12,
+        "ratio_to_k32": 0.63
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 50,
+        "grid_length": 1001,
+        "elapsed_s": 0.6861,
+        "rows_per_s": 1457591,
+        "secondary_mean_error_rel": -6.735818004422301e-05,
+        "interpolation_error": 1.1694344930018455e-05,
+        "nodes": 167,
+        "mass_error": 2.0463630789890885e-12,
+        "ratio_to_k32": 0.91
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 100,
+        "grid_length": 1001,
+        "elapsed_s": 1.0453,
+        "rows_per_s": 956642,
+        "secondary_mean_error_rel": -6.68686795839349e-05,
+        "interpolation_error": 2.8867433513604714e-06,
+        "nodes": 332,
+        "mass_error": 2.0463630789890885e-12,
+        "ratio_to_k32": 1.38
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 150,
+        "grid_length": 1001,
+        "elapsed_s": 1.393,
+        "rows_per_s": 717866,
+        "secondary_mean_error_rel": -6.686068255409192e-05,
+        "interpolation_error": 1.5376495492184417e-06,
+        "nodes": 497,
+        "mass_error": 2.2737367544323206e-12,
+        "ratio_to_k32": 1.84
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "peak_working_set_mb": 171.9
+  },
+  {
+    "timestamp": "2026-10-24T16:30:39+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "small_alpha",
+    "rows": 1000000,
+    "bucket_size": 100.0,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.2.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 10001,
+        "elapsed_s": 0.9609,
+        "rows_per_s": 1040699,
+        "secondary_mean_error_rel": -0.20473953881133802,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 5.638867150992155e-11,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 25,
+        "grid_length": 10001,
+        "elapsed_s": 1.0716,
+        "rows_per_s": 933149,
+        "secondary_mean_error_rel": -0.005993396302195932,
+        "interpolation_error": 7.886620999482984e-06,
+        "nodes": 109,
+        "mass_error": 0.0,
+        "ratio_to_k32": 1.12
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 50,
+        "grid_length": 10001,
+        "elapsed_s": 1.6423,
+        "rows_per_s": 608915,
+        "secondary_mean_error_rel": -0.005991606243419485,
+        "interpolation_error": 4.872528019740836e-07,
+        "nodes": 217,
+        "mass_error": 2.2737367544323206e-13,
+        "ratio_to_k32": 1.71
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 100,
+        "grid_length": 10001,
+        "elapsed_s": 2.6418,
+        "rows_per_s": 378525,
+        "secondary_mean_error_rel": -0.0059914935375154615,
+        "interpolation_error": 1.2661134435470331e-06,
+        "nodes": 432,
+        "mass_error": 0.0,
+        "ratio_to_k32": 2.75
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 150,
+        "grid_length": 10001,
+        "elapsed_s": 3.6753,
+        "rows_per_s": 272088,
+        "secondary_mean_error_rel": -0.005991487543943365,
+        "interpolation_error": 1.0234815777096067e-06,
+        "nodes": 647,
+        "mass_error": 0.0,
+        "ratio_to_k32": 3.82
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "peak_working_set_mb": 169.6
   }
 ]

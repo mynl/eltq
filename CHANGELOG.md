@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.2.0] - 2026-10-24
+
+### Changed
+
+- [edge-cost] The survival grid's tail pass balances across threads: each chunk's histogram covers only the bucket span its tails touch instead of the whole grid, and the survival method's default `chunk_rows` is 256 (was 4,096), so long tails spread over many cheap chunks. Results stay bitwise identical across thread counts at a fixed `chunk_rows`; at the new default they differ in rounding from 2.1.0 for inputs over 256 rows (the fold order). On the large-exposed-value benchmark portfolio the survival grid falls from 5.1 s to 1.4 s, 1.5 times the quantiles method at K = 32 (16 threads scaled 4.5 times before, 13 times now).
+- Not done, measured unnecessary: the plan's merge of the edges with the nodes for the curve part (the fixed cost of a 2**22 grid is 0.1 s) and a cubic in `x` for the tails.
+
 ## [2.1.0] - 2026-10-24
 
 ### Changed

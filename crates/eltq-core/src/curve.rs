@@ -766,23 +766,39 @@ impl Curve {
         let n_chunks = self.tails.len().div_ceil(chunk);
         let min_distance = 0.5 * self.loss[0];
         let threshold = TAIL_RATE_FLOOR * self.beta_rate;
-        let process = |chunk_index: usize| -> Result<(Vec<f64>, OverflowAccumulator), Error> {
+        // The edges e_first ..= e_stop of a tail lie in (x_k, M) and on the
+        // grid; the remainder goes to the bucket after the last edge walked.
+        let edge_range = |t: &TailEvent| -> (usize, isize) {
+            let first = ((self.loss[t.node] / h - 0.5).floor() as isize + 1) as usize;
+            let stop = ((t.max_loss / h - 0.5).ceil() as isize - 1).min(n as isize - 1);
+            (first, stop)
+        };
+        let top = n - 1;
+        let process = |chunk_index: usize| -> Result<(usize, Vec<f64>, OverflowAccumulator), Error> {
             let start = chunk_index * chunk;
             let end = (start + chunk).min(self.tails.len());
-            let mut hist = vec![0.0_f64; n];
+            let tails = &self.tails[start..end];
+            // The histogram covers only the buckets the chunk's tails can
+            // touch (the top node stands in for anything beyond the grid),
+            // so a chunk costs its span, not the grid length.
+            let (mut lo, mut hi) = (top, 0_usize);
+            for t in tails {
+                let (first, stop) = edge_range(t);
+                lo = lo.min(first.min(top));
+                hi = hi.max(((stop + 1).max(first as isize) as usize).min(top));
+            }
+            let mut hist = vec![0.0_f64; hi + 1 - lo];
             let mut over = OverflowAccumulator::default();
-            for t in &self.tails[start..end] {
+            for t in tails {
                 let (lam, m, s) = (t.rate, t.max_loss, t.survival);
                 let xk = self.loss[t.node];
                 let bf = BetaFn::new(t.alpha, t.beta);
-                // The edges e_first ..= e_stop lie in (x_k, M) and on the grid.
-                let first = ((xk / h - 0.5).floor() as isize + 1) as usize;
-                let stop = ((m / h - 0.5).ceil() as isize - 1).min(n as isize - 1);
+                let (first, stop) = edge_range(t);
                 // The bucket that takes the remainder.
                 let rest = if stop < first as isize || lam * s <= threshold {
                     // No edge to walk, or the whole tail at or below the
                     // floor: one deposit in the bucket containing x_k.
-                    put(&mut hist, first, lam * s, policy, &mut over);
+                    put(&mut hist, lo, n, first, lam * s, policy, &mut over);
                     first
                 } else {
                     // Walk the edges in order; stop at the top edge or at
@@ -794,14 +810,14 @@ impl Curve {
                     let mut i = first;
                     loop {
                         let surv = interp.at_ascending((i as f64 + 0.5) * h, &mut cursor);
-                        put(&mut hist, i, lam * (prev - surv), policy, &mut over);
+                        put(&mut hist, lo, n, i, lam * (prev - surv), policy, &mut over);
                         prev = surv;
                         if i as isize == stop || lam * surv <= threshold {
                             break;
                         }
                         i += 1;
                     }
-                    put(&mut hist, i + 1, lam * prev, policy, &mut over);
+                    put(&mut hist, lo, n, i + 1, lam * prev, policy, &mut over);
                     i + 1
                 };
                 // A remainder beyond the grid (so M > e_{n-1}): its moment
@@ -812,10 +828,10 @@ impl Curve {
                     over.moment.add(tail_moment(lam, m, t.alpha, t.beta, begin) - top_node * mass);
                 }
             }
-            Ok((hist, over))
+            Ok((lo, hist, over))
         };
-        run_chunks(config, n_chunks, process, |(hist, part): (Vec<f64>, OverflowAccumulator)| {
-            for (dst, src) in secondary.iter_mut().zip(&hist) {
+        run_chunks(config, n_chunks, process, |(lo, hist, part): (usize, Vec<f64>, OverflowAccumulator)| {
+            for (dst, src) in secondary[lo..].iter_mut().zip(&hist) {
                 *dst += src;
             }
             over.merge(&part);
@@ -834,17 +850,18 @@ impl Curve {
     }
 }
 
-/// Deposit `w` into bucket `i`, or beyond the grid: the top node under the
-/// `top_bucket` policy, nowhere under `drop`; the overflow rate either way.
+/// Deposit `w` into bucket `i` of a grid of `n`, through a histogram that
+/// starts at bucket `lo` and reaches the top node whenever `i` can exceed
+/// the grid; beyond the grid, the top node under the `top_bucket` policy,
+/// nowhere under `drop`, and the overflow rate either way.
 #[inline]
-fn put(hist: &mut [f64], i: usize, w: f64, policy: Overflow, over: &mut OverflowAccumulator) {
-    let n = hist.len();
+fn put(hist: &mut [f64], lo: usize, n: usize, i: usize, w: f64, policy: Overflow, over: &mut OverflowAccumulator) {
     if i < n {
-        hist[i] += w;
+        hist[i - lo] += w;
     } else {
         over.rate.add(w);
         if policy == Overflow::TopBucket {
-            hist[n - 1] += w;
+            hist[n - 1 - lo] += w;
         }
     }
 }

@@ -135,7 +135,7 @@ irrelevant to throughput (each deposit touches two nodes whatever n is):
 n = 1,001, n = 65,536 (2^16) and n = 100,000 all run at the same speed.
 
 Determinism contract: for a fixed input, config (including `chunk_rows`,
-default 65536 for the quantiles method and 4096 for the survival method) and
+default 65536 for the quantiles method and 256 for the survival method) and
 build, output arrays are bitwise reproducible regardless of `threads` and
 work stealing. Reordering input rows changes results only within
 floating-point summation tolerance.

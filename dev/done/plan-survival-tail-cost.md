@@ -374,6 +374,14 @@ Approved by Steve on 2026-10-24 with the corrections of the independent check an
 - Divergence: the plan's [tail-cut] text had the stop found on the tail's nodes and the lumped tail reflected in `exceedance(x)`; as corrected in the independent check, the walk breaks in order and the curve stays exact.
 - Commit subject: `2.1.0 cut survival tail walks at the rate floor and the grid window`.
 
+### [edge-cost] 2.2.0
+
+- Measured after [tail-cut] on the large-M portfolio (all threads): build 0.37 s, grid 3.87 s, whole run on one thread 17.65 s (so 16 threads scaled 4.5 times), fixed cost of a 2**22 grid with 8 rows 0.09 s, chunks of 256 events 2.17 s. The time was load balance, not per-edge arithmetic or the serial curve interpolation: tails sort by truncation node, so the long tails of the large endpoints sit in a few chunks of 4,096, and each chunk paid a grid-length histogram.
+- `crates/eltq-core/src/curve.rs`: the chunk histogram spans `[lo, hi]`, the lowest first edge to the highest bucket its tails can touch (the top node when any can overflow), folded into the grid at `lo`; `put` takes the span and the grid length. `crates/eltq-core/src/config.rs`: `DEFAULT_SURVIVAL_CHUNK_ROWS = 256`. `README.md`: the chunk default.
+- Measured after: grid 0.92 s, whole run 1.355 s against 0.894 s (1.52 times K=32). The mixture and small-alpha sweeps rerun: see `benchmarks/results.json` (2.2.0 records).
+- Not done: the plan's merge of edges with nodes for the curve part and the cubic in `x` for the tails, both measured unnecessary; a work budget in edges per item, considered and rejected because the clipped width overstates the work of cut tails by orders of magnitude on real blocks and the span-limited histogram makes small chunks cheap anyway.
+- Commit subject: `2.2.0 balance the survival tail pass with span-limited chunk histograms`.
+
 ## Independent check, 2026-10-24
 
 By the survival-route session (Claude), at the tie-out session's request through Steve. Code read at the cited lines; the appendix script rerun unchanged on the 2.0.0 working tree, Rust backend, all threads; extra accounting and a coefficient-of-variation sweep run alongside. Nothing implemented.

@@ -8,7 +8,7 @@ pub const DEFAULT_QUADRATURE_POINTS: usize = 32;
 /// vectors) and for the survival method (node-length partials, so smaller
 /// chunks keep every thread busy).
 pub const DEFAULT_CHUNK_ROWS: usize = 64 * 1024;
-pub const DEFAULT_SURVIVAL_CHUNK_ROWS: usize = 4096;
+pub const DEFAULT_SURVIVAL_CHUNK_ROWS: usize = 256;
 /// Node density of the survival method; matches
 /// `eltq._meta.DEFAULT_NODES_PER_DECADE` (`benchmarks/report-1.16.0.md`).
 pub const DEFAULT_NODES_PER_DECADE: usize = 100;
