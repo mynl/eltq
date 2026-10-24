@@ -1,15 +1,64 @@
 //! Own regularized incomplete-beta CDF and PDF with per-event constants.
 //!
-//! Cephes/Numerical-Recipes-style modified Lentz continued fraction with the
-//! symmetry switch at x = (alpha + 1) / (alpha + beta + 2). The per-event
+//! The continued fraction of Numerical Recipes in C, second edition
+//! (Press, Teukolsky, Vetterling, Flannery, 1992; `Press1992`), section 6.4:
+//! Abramowitz and Stegun 26.5.8 evaluated by the modified Lentz method with
+//! the symmetry switch at x = (alpha + 1) / (alpha + beta + 2). The per-event
 //! constant ln B(alpha, beta) is computed once per event, not per
-//! probability — the key setup reuse the scalar statrs path cannot offer.
+//! probability, the key setup reuse the scalar statrs path cannot offer. For
+//! a large parameter it comes from the difference of two Stirling series
+//! (section 6.1 of the same source), not from three ln Gamma values, whose
+//! cancellation costs seven digits at beta = 1e8
+//! (`dev/done/plan-ln-beta-large-parameters.md`).
 
 use statrs::function::gamma::ln_gamma;
 
 const MAX_CF_ITERS: usize = 400;
 const CF_EPS: f64 = 1e-16;
 const FPMIN: f64 = 1e-300;
+
+/// The larger parameter from which `ln B` takes the Stirling route. Six
+/// terms of the series are exact to double at 100; below it the sum of
+/// three `ln_gamma` values cancels by at most 1e-13.
+const LN_BETA_STIRLING_FROM: f64 = 100.0;
+
+/// The Stirling correction `sigma(z) = sum B_2k / (2k (2k - 1) z^(2k - 1))`,
+/// six terms, for `z >= LN_BETA_STIRLING_FROM`: `ln Gamma(z) = (z - 1/2) ln z
+/// - z + ln(2 pi) / 2 + sigma(z)`. The coefficients are the Bernoulli numbers
+/// B_2 to B_12 over 2k (2k - 1).
+#[inline]
+fn stirling_correction(z: f64) -> f64 {
+    let w = 1.0 / (z * z);
+    (1.0 / 12.0
+        + w * (-1.0 / 360.0
+            + w * (1.0 / 1260.0
+                + w * (-1.0 / 1680.0 + w * (1.0 / 1188.0 + w * (-691.0 / 360360.0))))))
+        / z
+}
+
+/// `ln B(a, b)` for `a <= b` with `b >= LN_BETA_STIRLING_FROM`, as
+/// `ln Gamma(a) + [ln Gamma(b) - ln Gamma(a + b)]` with the bracket from the
+/// two Stirling series subtracted symbolically:
+/// `a - (b - 1/2) ln(1 + a / b) - a ln(a + b) + sigma(b) - sigma(a + b)`.
+/// Every term is O(a) or O(a ln b), so nothing of size b cancels; the naive
+/// difference of two values near b ln b loses about log10(b) digits.
+fn ln_beta_large(a: f64, b: f64) -> f64 {
+    let bracket = a - (b - 0.5) * (a / b).ln_1p() - a * (a + b).ln()
+        + stirling_correction(b)
+        - stirling_correction(a + b);
+    ln_gamma(a) + bracket
+}
+
+/// `ln B(alpha, beta)`: the three-term `ln_gamma` sum while both parameters
+/// are below `LN_BETA_STIRLING_FROM`, the Stirling route otherwise.
+fn ln_beta_fn(alpha: f64, beta: f64) -> f64 {
+    let (a, b) = if alpha <= beta { (alpha, beta) } else { (beta, alpha) };
+    if b >= LN_BETA_STIRLING_FROM {
+        ln_beta_large(a, b)
+    } else {
+        ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)
+    }
+}
 
 /// Per-event beta function bundle: shapes plus ln B(alpha, beta).
 #[derive(Debug, Clone, Copy)]
@@ -21,11 +70,7 @@ pub struct BetaFn {
 
 impl BetaFn {
     pub fn new(alpha: f64, beta: f64) -> Self {
-        BetaFn {
-            alpha,
-            beta,
-            ln_beta: ln_gamma(alpha) + ln_gamma(beta) - ln_gamma(alpha + beta),
-        }
+        BetaFn { alpha, beta, ln_beta: ln_beta_fn(alpha, beta) }
     }
 
     pub fn ln_beta(&self) -> f64 {
@@ -185,7 +230,12 @@ mod tests {
             for &x in &xs {
                 let got = ours.cdf(x);
                 let want = oracle.cdf(x);
-                let tolerance = 1e-15 + 1e-13 * want.abs();
+                // statrs forms ln B from three ln_gamma values, which at
+                // (500, 500) costs it 2.6e-13 at x = 0.5 (exact: 0.5); ours
+                // is within 4e-14 there (the Stirling route), so the oracle
+                // is held to its own precision on that shape.
+                let slack = if a + b >= 1000.0 { 5e-13 } else { 1e-13 };
+                let tolerance = 1e-15 + slack * want.abs();
                 assert!(
                     (got - want).abs() <= tolerance,
                     "cdf mismatch a={a} b={b} x={x}: got {got}, want {want}"
@@ -227,6 +277,33 @@ mod tests {
         let g = BetaFn::new(2.0, 2000.0);
         let s = g.sf(0.2);
         assert!(s > 0.0 && s.is_finite() && s < 1e-150, "{s}");
+    }
+
+    #[test]
+    fn ln_beta_matches_mpmath_at_large_parameters() {
+        // mpmath at 40 digits, 2026-10-24:
+        //   import mpmath as mp; mp.mp.dps = 40
+        //   for a, b in pairs: print(mp.nstr(mp.log(mp.beta(a, b)), 20))
+        // The first row is the three-term sum (b below the Stirling
+        // threshold); the rest take the Stirling route. The naive sum is off
+        // by 3.5e-8 at (0.13, 8e7) and 3.8e-8 at (0.5, 1e7).
+        let table = [
+            (0.13, 50.0, 1.4708432867497706688),
+            (0.13, 100.0, 1.380166568528025525),
+            (0.13, 8e7, -0.38740733800432604908),
+            (0.5, 1e3, -2.8813876965715767707),
+            (0.5, 1e7, -7.486682870054459807),
+            (1.0, 1e4, -9.2103403719761827361),
+            (1.5, 1e4, -13.9363302943495662),
+            (2.0, 1e6, -27.631022115928048209),
+            (20.0, 1e6, -236.97051697085100008),
+        ];
+        for (a, b, want) in table {
+            let got = BetaFn::new(a, b).ln_beta();
+            assert!((got - want).abs() <= 1e-13, "ln B({a}, {b}): got {got}, want {want}");
+            // Symmetric by construction: the parameters are ordered first.
+            assert_eq!(BetaFn::new(b, a).ln_beta(), got);
+        }
     }
 
     #[test]

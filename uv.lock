@@ -21,7 +21,7 @@ wheels = [
 
 [[package]]
 name = "eltq"
-version = "2.3.0"
+version = "2.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
@@ -35,6 +35,7 @@ reference = [
 [package.dev-dependencies]
 dev = [
     { name = "maturin" },
+    { name = "mpmath" },
     { name = "pandas" },
     { name = "pytest" },
     { name = "scipy" },
@@ -50,6 +51,7 @@ provides-extras = ["reference"]
 [package.metadata.requires-dev]
 dev = [
     { name = "maturin", specifier = ">=1.14,<2" },
+    { name = "mpmath", specifier = ">=1.3" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pytest", specifier = ">=8" },
     { name = "scipy", specifier = ">=1.14" },
@@ -83,6 +85,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/27/bf677183920718da49cd7982d6a3ffc440aad8919329f571d189f81b7bdf/maturin-1.14.1-py3-none-win32.whl", hash = "sha256:1a04de0a20188f95c721b5702eed18140bdcccb28c386797093eca3f62f4d4e0", size = 8931293, upload-time = "2026-06-19T05:19:41.183Z" },
     { url = "https://files.pythonhosted.org/packages/63/4b/585adeb9167b08d3cdff0032a938b0e72655c92003df4f52c3f696a1bcc2/maturin-1.14.1-py3-none-win_amd64.whl", hash = "sha256:3c9f94640ecc4895e94abaf834a0684430032c865b2748a36c12461fd9252fdd", size = 10314067, upload-time = "2026-06-19T05:19:44.389Z" },
     { url = "https://files.pythonhosted.org/packages/51/d4/dac8c0720ae246be1700afb6fbdbbea20fe35b13f6570b2f70faa005df77/maturin-1.14.1-py3-none-win_arm64.whl", hash = "sha256:15cea8fcb3ba47dd636f50092bb34baea8b04ac777392f23e6bf8a9a61efb894", size = 9718943, upload-time = "2026-06-19T05:19:47.49Z" },
+]
+
+[[package]]
+name = "mpmath"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/b0/6de8e78014ff1842a90cc9a56da6ccfb598a5390ed0257fcdb7d9680c18b/mpmath-1.4.1.tar.gz", hash = "sha256:efd6d1b75f09d69524a67609949812668b28e81ecbfe0ab449ced8c13e92642e", size = 2093211, upload-time = "2026-03-15T01:17:38.245Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/f2/abeec3db71d221ccd3cd89d206be1fabf5a3ee7178862f5fba23a59607e0/mpmath-1.4.1-py3-none-any.whl", hash = "sha256:dc4f0ea2304480d4a9a48a94c1020571558ade522b44a6912efac63a586e140f", size = 567787, upload-time = "2026-03-15T01:17:36.392Z" },
 ]
 
 [[package]]

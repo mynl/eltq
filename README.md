@@ -21,7 +21,8 @@ uncertainty, unit terms, view totals) and
 `dev/done/plan-single-unit-survival-route.md` (1.13.0-2.0.0: the survival
 method, Bernoulli rows, overflow policies, the exceedance curve) and
 `dev/done/plan-survival-tail-cost.md` (2.0.1-2.3.0: the tail rate cut, the
-balanced tail pass, narrow events).
+balanced tail pass, narrow events) and `dev/done/plan-ln-beta-large-parameters.md`
+(2.3.1: the incomplete beta at large parameters).
 
 ## Install
 
@@ -78,6 +79,7 @@ identical.
 | [tail-cut] tail walks cut at the rate floor and the grid window | 2.1.0 | done |
 | [edge-cost] span-limited chunk histograms balance the tail pass | 2.2.0 | done |
 | [narrow-events] betas narrower than a node interval walked by quadrature | 2.3.0 | done |
+| [ln-beta] `ln B` by Stirling at large parameters; the survival exact to 1e-13 at beta = 8e7 | 2.3.1 | done |
 
 ## Layout
 

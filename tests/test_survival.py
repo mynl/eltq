@@ -1,6 +1,7 @@
-"""Spec tests 15 to 22: the survival method, the overflow policies, the
+"""Spec tests 15 to 23: the survival method, the overflow policies, the
 Bernoulli treatment of inadmissible rows (`dev/done/plan-single-unit-survival-route.md`),
-the tail rate cut and the narrow events (`dev/done/plan-survival-tail-cost.md`).
+the tail rate cut and the narrow events (`dev/done/plan-survival-tail-cost.md`),
+and the incomplete beta at large parameters (`dev/done/plan-ln-beta-large-parameters.md`).
 
 Every test runs on both backends through the ``impl`` fixture in conftest;
 the oracle checks (``exact_edges``, ``check_every_interval``) call the
@@ -277,6 +278,85 @@ def test_22_narrow_events():
     # Under quantize the count is reported too.
     _, _, meta = eltq.quantize_arrays(*cols, bucket_size=h)
     assert meta.narrow_events == n_narrow
+
+
+# [23] Large parameters: a J-shaped beta with beta up to 8e7 (a real ELT's
+# limit at 1e7 to 3.5e8 times the mean) has its survival at the nodes to
+# double precision below the continued fraction's switch point and to the
+# formulation's eps * beta ceiling above it, on both backends, against mpmath
+# (SciPy's betaincc is off by 5e-9 at an integer alpha of 2 or more with
+# beta = 8e7, so it is not the oracle here); then a portfolio with 300 such
+# events buckets as the method promises and the backends agree.
+def test_23_large_beta_parameters():
+    import mpmath as mp
+    import eltq
+
+    mp.mp.dps = 30
+    big_m = 1e6
+    for alpha in (0.13, 0.5, 1.0, 1.5, 2.5):
+        for beta in (1e4, 1e6, 1e7, 8e7):
+            mu = big_m * alpha / (alpha + beta)
+            sd = big_m * math.sqrt(alpha * beta / ((alpha + beta) ** 2 * (alpha + beta + 1.0)))
+            cols = tuple(np.array([v]) for v in (1.0, big_m, mu, sd, 0.0))
+            # The parameters both backends recover from (M, mu, sd).
+            a, b = reference.beta_params(big_m, mu, sd * sd)
+            switch = (a + 1.0) / (a + b + 2.0)
+            ref_curve, _ = reference.exceedance_curve_reference(*cols, min_loss=0.25 * mu)
+            curve = eltq.exceedance_curve(*cols, min_loss=0.25 * mu)
+            for loss, got in ((ref_curve.loss, ref_curve.exceedance_rate),
+                              (curve.loss, curve.exceedance_rate)):
+                # Every tenth node from 0.3 to 30 times the mean: about 20 points.
+                sel = np.flatnonzero((loss >= 0.3 * mu) & (loss <= 30.0 * mu))[::10]
+                y = loss[sel] / big_m
+                exact = np.array([float(mp.betainc(a, b, yi, 1, regularized=True)) for yi in y])
+                ok = exact >= 1e-15
+                rel = np.abs(got[sel] - exact) / exact
+                lower = y < switch
+                assert np.all(rel[lower & ok] <= 1e-13), (alpha, beta, rel[lower & ok].max())
+                assert np.all(rel[~lower & ok] <= 2e-8), (alpha, beta, rel[~lower & ok].max())
+    # The portfolio: the base recipe of test 22 plus 300 large-parameter
+    # events with means from 1e3 to 1e5 (M from 1e10 to 6e13), on a windowed
+    # grid with the overflow in the top bucket.
+    rng = np.random.default_rng(23)
+    n_base, n_large = 2_000, 300
+    rate = 10.0 ** rng.uniform(-5, -2, n_base)
+    max_loss = 10.0 ** rng.uniform(5, 7, n_base)
+    mean = 10.0 ** rng.uniform(-4, -1, n_base) * max_loss
+    sd = np.minimum(10.0 ** rng.uniform(0, 1, n_base) * mean,
+                    0.95 * np.sqrt(mean * (max_loss - mean)))
+    a = 10.0 ** rng.uniform(np.log10(0.13), np.log10(2.0), n_large)
+    b = 10.0 ** rng.uniform(4, np.log10(8e7), n_large)
+    mean_large = 10.0 ** rng.uniform(3, 5, n_large)
+    m_large = mean_large * (a + b) / a
+    sd_large = m_large * np.sqrt(a * b / ((a + b) ** 2 * (a + b + 1.0)))
+    cols = (np.concatenate([rate, 10.0 ** rng.uniform(-5, -3, n_large)]),
+            np.concatenate([max_loss, m_large]),
+            np.concatenate([mean, mean_large]),
+            np.concatenate([sd, sd_large]),
+            np.zeros(n_base + n_large))
+    h, n = 100.0, 2 ** 18
+    ref_curve, _ = reference.exceedance_curve_reference(*cols, min_loss=0.5 * h)
+    curve = eltq.exceedance_curve(*cols, min_loss=0.5 * h)
+    total = curve.meta.total_rate
+    # The node values are exact (the beta part only: there are no atoms).
+    assert curve.atom_loss.size == 0
+    exact = ref_curve.exact(curve.loss)
+    ok = exact >= 1e-12 * total
+    assert np.max(np.abs(curve.exceedance_rate[ok] - exact[ok]) / exact[ok]) <= 1e-11
+    grid, _ = curve.grid(h, n)
+    ref_grid, _ = ref_curve.grid(h, n)
+    assert math.isclose(grid.sum(), total, rel_tol=1e-14)
+    assert np.max(np.abs(grid - ref_grid)) <= 1e-12 * total
+    # The tail sums against the exact Lambda at every 32nd edge where it is
+    # above 1e-12 of the rate: the shared cubic between nodes sets the
+    # figure (6e-6 measured, the same on both backends, against the 1e-4 the
+    # method promises in test 15).
+    sums = tail_sums(grid)
+    edges = (np.arange(sums.size) + 0.5) * h
+    sel = np.arange(0, edges.size, 32)
+    sel = sel[sums[sel] >= 1e-12 * total]
+    want = ref_curve.exact(edges[sel])
+    assert np.max(np.abs(sums[sel] - want) / want) <= 1e-5
 
 
 def test_curve_matches_quantize_and_exact(impl):

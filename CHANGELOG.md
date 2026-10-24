@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.1] - 2026-10-24
+
+### Fixed
+
+- [ln-beta] The engine's incomplete beta at a large parameter: the constant `ln B(alpha, beta)` is now the difference of two Stirling series for the large parameter (at or above 100) plus `ln Gamma` of the small one, instead of three `ln Gamma` values whose cancellation cost seven digits at beta = 1e8. On real events with alpha below 2 and beta from 1e7 to 8e7 the survival at the nodes moves from 3e-6 relative off SciPy to 1e-13 below the continued fraction's switch point and the formulation's eps times beta (1e-8 at beta = 8e7) above it (spec section 5A, test 23). Portfolio grids change in rounding where such events sit; the goldens are unchanged. No cost: the constant is computed once per event as before.
+- The continued fraction itself was not at fault: with one parameter small it converges in tens of iterations at any beta. The 2.3.0 note on its failure above 1e7 applies when both parameters are large, the narrow events' regime.
+- Found on the way: SciPy's `betaincc` is off by 5e-9 against mpmath at an integer alpha of 2 or more with beta = 8e7 (6e-13 at beta = 1e4), so the reference backend carries that there; test 23 uses mpmath as its oracle and `mpmath` joins the dev dependencies.
+
 ## [2.3.0] - 2026-10-24
 
 ### Changed

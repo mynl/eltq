@@ -1,6 +1,6 @@
 # Plan: the incomplete beta at large parameters
 
-Status: specified 2026-10-24, awaiting Steve's review. Version at execution: 2.3.1 (a fix). Sources: Numerical Recipes joins the allowed set (Steve, 2026-10-24: "pull in NR").
+Status: specified 2026-10-24; executed the same day as 2.3.1 (Steve's `/execute-plan`, which stands as the review). Sources: Numerical Recipes joins the allowed set (Steve, 2026-10-24: "pull in NR").
 
 ## Goal
 
@@ -83,4 +83,25 @@ The fixture question of the follow-up is answered here rather than by a fixture 
 
 ## Execution log
 
-(Filled at execution.)
+Executed 2026-10-24 as 2.3.1, one commit. Gates: `cargo test -p eltq-core --release` (77 unit tests) and `uv run pytest`, both green; the goldens passed unchanged, as expected.
+
+**Measured after the change** (`BetaFn::new` by the Stirling route, both backends' node values against mpmath at 30 digits on the one-row portfolios, every node from 0.3 to 30 times the mean): the engine is within $5.3\times10^{-14}$ relative below the switch point at every $(\alpha,\beta)$, and above it within $1.7\times10^{-12}$ at $\beta=10^4$, $2.7\times10^{-10}$ at $10^6$, $2.3\times10^{-9}$ at $10^7$ and $1.3\times10^{-8}$ at $8\times10^7$ (the plan estimated $4.5\times10^{-9}$ from the Python port; the Rust fraction is about three times that, still the $\varepsilon\beta$ ceiling of the upper branch). Speed: `benchmarks/run_end_to_end.py --survival-sweep --small-alpha --rows 1000000`, survival at 100 nodes per decade 2.743 s against 2.642 s and 2.664 s in the two prior records, quantiles 0.979 s against 0.961 s and 1.006 s: noise. The record was not kept in `results.json`.
+
+### Divergences from the plan as written
+
+- **Status.** The plan's status line read "awaiting Steve's review"; Steve's `/execute-plan` on it is taken as that review. No open question was outstanding.
+- **Test 23 probes the nodes, not `exceedance(x)`.** The plan said a one-row portfolio's `exceedance(x)` is $\lambda S(x)$ exactly. It is not: between nodes `exceedance` is the cubic of section 5A (exact only in the tail interval and on narrow events). The test reads `loss` and `exceedance_rate`, the nodes with the exact survival at them, every tenth node from 0.3 to 30 times the mean (about 20 points, the plan's 21).
+- **The tight band is bounded by the switch point, not by three means.** The switch $x=(\alpha+1)/(\alpha+\beta+2)$ sits at $(\alpha+1)/\alpha$ times the mean: 8.7 means at $\alpha=0.13$ but 1.4 at $\alpha=2.5$. The plan's "(0.3 to 3 times the mean)" was the $\alpha=0.5$ case. The test asks $10^{-13}$ below the switch and $2\times10^{-8}$ above it (the plan said $10^{-8}$; measured $1.3\times10^{-8}$ at $\beta=8\times10^7$).
+- **The oracle is mpmath, not SciPy, and $\alpha=2$ became $2.5$.** SciPy's `betaincc` at an integer $\alpha\ge2$ with $\beta=8\times10^7$ is off by $5\times10^{-9}$ against mpmath ($6\times10^{-13}$ at $\beta=10^4$; $\alpha=1$ and non-integer $\alpha$ are within $5\times10^{-15}$), presumably Boost's finite-sum route for integer parameters. The plan's "SciPy within 2e-15 throughout" was measured at non-integer $\alpha$. The reference backend inherits the figure at such events; that is recorded in the CHANGELOG and is not fixed here. `mpmath` is a dev dependency (0.2 ms per call; the test runs in about 9 s, most of it the reference's portfolio curve and grid).
+- **The portfolio half.** The plan gave $M=10^6$ for the one-row portfolios only; with $M=10^6$ the large events' means (about $10^{-3}$) would sit inside bucket 0. The 300 events take means from $10^3$ to $10^5$ and $M=\mu(\alpha+\beta)/\alpha$, up to $6\times10^{13}$; the grid is windowed at $2^{18}$ buckets of 100 with the overflow in the top bucket. The exact $\Lambda$ is taken at every 32nd edge (3,064 edges, 2.7 s), not every edge.
+- **The grid bound is $10^{-5}$, not $10^{-6}$.** Measured $6.04\times10^{-6}$ at the edge 7,606,450 ($\Lambda=7\times10^{-4}$), identical to ten digits on both backends: the shared cubic between nodes on the base rows, as the plan said would set the bound, only larger. The node values of the same portfolio are within $3.8\times10^{-12}$ of exact (asserted at $10^{-11}$), the grids within $8.4\times10^{-14}$ of the rate of each other.
+- **The existing unit test `matches_statrs_across_regimes`** failed at $(500,500)$, $x=0.5$: ours now $3.5\times10^{-14}$ from the exact $0.5$, statrs $2.6\times10^{-13}$ off (its own three-term $\ln B$). The oracle is held to $5\times10^{-13}$ where $\alpha+\beta\ge1000$.
+- **The benchmark ran at 1,000,000 rows**, not the plan's 100,000, to compare with the two existing records at that size.
+- **README** also gained the plan in its list of implementation plans, beside the milestone row.
+
+### Left for Steve
+
+- The push (one commit, no tag).
+- The downstream tie-out rerun on the eight real blocks, by the session that holds them: the forty largest events' node values are expected within $2\times10^{-8}$ of SciPy (from $3.1\times10^{-6}$), the OEP and AEP points unchanged to their present tolerances.
+- Whether the reference's SciPy figure at integer $\alpha\ge2$ with huge $\beta$ deserves a note in the reference's docstring or a workaround (an `mpmath` path is too slow for a portfolio; the engine is right there).
+
