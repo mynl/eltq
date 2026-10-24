@@ -107,12 +107,11 @@ finished.
   quantile construction, or the σ_I + σ_C total-sd rule (Burke 2016) must be checked against the
   spec and the oracle before it lands.
 - No web face, so the house localhost-bind and UI rules do not apply.
-- **Steve makes every commit in this repository, until further notice** (ruled 2026-10-24).
-  Overrides the house rule that each plan step and version bump is committed and pushed as it
-  lands. Claude edits the working tree, bumps versions and writes CHANGELOG entries as the plan
-  requires, leaves everything uncommitted, and reports what changed and which files belong in
-  each commit. No `git commit`, no `git push`, no tags. The repository is public and a push to
-  `master` runs CI.
+- **Claude commits, Steve pushes** (ruled 2026-10-24, revising the same day's ruling that Steve
+  made every commit). Overrides the house rule that each commit is pushed as it lands. Claude
+  commits each plan step and version bump as it lands, staged by path, and never runs
+  `git push` or creates a tag; the report says what is waiting to be pushed. The repository is
+  public and a push to `master` runs CI.
 - **Pushing a tag publishes.** `.github/workflows/wheels.yml` publishes to PyPI on a pushed `v*`
   tag; the `pypi` GitHub environment, which requires Steve's approval, is a second gate. x86_64
   wheels target `x86-64-v3`; local builds use `target-cpu=native` from the machine-level
