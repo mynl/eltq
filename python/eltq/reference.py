@@ -29,7 +29,8 @@ import numpy as np
 from scipy.special import betaincc, betaln
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import DEFAULT_NODES_PER_DECADE, TAIL_INTERVALS, CurveMeta, GridMeta, Meta, RowIssues
+from eltq._meta import (DEFAULT_NODES_PER_DECADE, TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta,
+                        GridMeta, Meta, RowIssues)
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -41,6 +42,8 @@ OVERFLOW_POLICIES = ("top_bucket", "drop", "error")
 # in double precision once F < 2^-54; the margin covers the closed form's
 # error for shapes with beta < 1).
 LOWER_SKIP_PROBABILITY = 2.0 ** -60
+#: Edges per block of a tail walk (reference only; the Rust walk is per edge).
+TAIL_BLOCK = 4096
 
 # Canonical diagnostic categories, in canonical order (mirrored by eltq-core).
 CATEGORIES = (
@@ -515,7 +518,8 @@ class SurvivalCurve:
 
     # -- bucketing -----------------------------------------------------------
 
-    def bucket(self, h: float, n: int, *, exact_edges: bool = False):
+    def bucket(self, h: float, n: int, *, exact_edges: bool = False,
+               tail_rate_floor: float = TAIL_RATE_FLOOR):
         """Beta part of the secondary grid by the nearest rule.
 
         Returns ``(weights, overflow_rate, overflow_moment_excess)``: the
@@ -525,8 +529,9 @@ class SurvivalCurve:
         excess of the top node (by partial expectations). The curve part is
         differenced at the edges; each event's tail is differenced exactly
         at the edges inside its tail interval. ``exact_edges`` evaluates the
-        curve part exactly at every edge (tests only). Requires
-        ``h >= 2 loss[0]``.
+        curve part exactly at every edge (tests only); ``tail_rate_floor``
+        is the rate cut of the tail walks (tests only; 0 walks every tail
+        to its endpoint or the top edge). Requires ``h >= 2 loss[0]``.
         """
         loss = self.loss
         if loss.size and h < 2.0 * loss[0] * (1.0 - 1e-12):
@@ -562,42 +567,51 @@ class SurvivalCurve:
                     mass = lam * (float(betaincc(a, b, top_edge / m)) - s)
                     moment = _tail_moment(lam, m, a, b, top_edge) - _tail_moment(lam, m, a, b, xk)
                     over_moment_terms.append(moment - top_node * mass)
-        # The tails: each event's survival at the edges inside (x_k, M], by
-        # its endpoint interpolant (exactly under ``exact_edges``). The
-        # whole-tail events start at the lowest node.
+        # The tails: each event's survival walked along the edges inside
+        # (x_k, M) and on the grid, by its endpoint interpolant (exactly
+        # under ``exact_edges``), in blocks, to the top edge or to the first
+        # edge where the event's rate reaches the floor; the remainder goes
+        # to the next bucket, and beyond the grid its moment is taken by
+        # partial expectations. The whole-tail events start at the lowest
+        # node.
+        threshold = tail_rate_floor * self.beta_rate
         for k, group in list(enumerate(self._groups)) + [(0, self._whole)]:
             xk = loss[k]
             first = int(math.floor(xk / h - 0.5)) + 1      # e_{first-1} <= x_k < e_first
             for lam, m, a, b, s in group:
                 if s <= 0.0:
                     continue   # the survival underflowed before x_k: no tail
-                last = int(math.ceil(m / h - 0.5)) - 1         # e_last < M <= e_{last+1}
-                if last < first:
-                    # No edge inside (x_k, M]: the whole tail in one bucket.
+                stop = min(int(math.ceil(m / h - 0.5)) - 1, n - 1)   # e_stop < M, on the grid
+                if stop < first or lam * s <= threshold:
+                    # No edge to walk, or the whole tail at or below the
+                    # floor: one deposit in the bucket containing x_k.
                     self._put(weights, first, lam * s, over_rate_terms)
-                    continue
-                # The same arithmetic as ``edges``, so the values agree
-                # bitwise, and valid beyond the grid for the overflow.
-                inner = (np.arange(first, last + 1, dtype=np.float64) + 0.5) * h
-                if exact_edges:
-                    surv = betaincc(a, b, inner / m)
+                    rest = first
                 else:
-                    surv = _tail_survival(m, a, b, xk, s, inner, 0.5 * loss[0])
-                self._put(weights, first, lam * (s - surv[0]), over_rate_terms)
-                for i, w in zip(range(first + 1, last + 1), lam * (surv[:-1] - surv[1:])):
-                    self._put(weights, i, w, over_rate_terms)
-                self._put(weights, last + 1, lam * surv[-1], over_rate_terms)
-        over_rate = math.fsum(over_rate_terms)
-        # Tail overflow moments, once per event, by partial expectations.
-        for k, group in list(enumerate(self._groups)) + [(0, self._whole)]:
-            xk = loss[k]
-            for lam, m, a, b, s in group:
-                if m <= top_edge:
-                    continue
-                start = max(xk, top_edge)
-                mass = lam * (float(betaincc(a, b, start / m)) if start > xk else s)
-                over_moment_terms.append(_tail_moment(lam, m, a, b, start) - top_node * mass)
-        return weights, over_rate, math.fsum(over_moment_terms)
+                    prev, i = s, first
+                    while True:
+                        # The same edge arithmetic as the Rust walk, so the
+                        # values agree bitwise.
+                        block = (np.arange(i, min(i + TAIL_BLOCK, stop + 1), dtype=np.float64) + 0.5) * h
+                        if exact_edges:
+                            surv = betaincc(a, b, block / m)
+                        else:
+                            surv = _tail_survival(m, a, b, xk, s, block, 0.5 * loss[0])
+                        cut = np.flatnonzero(lam * surv <= threshold)
+                        used = int(cut[0]) + 1 if cut.size else surv.size
+                        values = np.concatenate([[prev], surv[:used]])
+                        for j, w in zip(range(i, i + used), lam * (values[:-1] - values[1:])):
+                            self._put(weights, j, w, over_rate_terms)
+                        prev, i = float(surv[used - 1]), i + used
+                        if cut.size or i > stop:
+                            break
+                    self._put(weights, i, lam * prev, over_rate_terms)
+                    rest = i
+                if rest >= n:
+                    start = max(xk, top_edge)
+                    mass = lam * (float(betaincc(a, b, start / m)) if start > xk else s)
+                    over_moment_terms.append(_tail_moment(lam, m, a, b, start) - top_node * mass)
+        return weights, math.fsum(over_rate_terms), math.fsum(over_moment_terms)
 
     @staticmethod
     def _put(weights, i, w, over_rate_terms):

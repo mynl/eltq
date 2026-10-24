@@ -14,6 +14,12 @@ DEFAULT_NODES_PER_DECADE = 100
 #: (spec section 5A). Shared by both backends.
 TAIL_INTERVALS = 4
 
+#: Survival method: the rate cut of a tail walk as a fraction of the beta
+#: events' total rate; the walk along the bucket edges stops where the
+#: event's exceedance rate is at or below it (spec section 5A). Shared by
+#: both backends.
+TAIL_RATE_FLOOR = 1e-20
+
 
 def _zero_per_output() -> dict:
     return {"raw": 0.0, "secondary": 0.0}

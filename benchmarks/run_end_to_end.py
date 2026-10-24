@@ -4,7 +4,7 @@ Run from the repository root (release wheel installed by `uv sync`):
 
     uv run python benchmarks/run_end_to_end.py [--rows 1000000] [--quick]
         [--scratch-dir PATH] [--method quantiles|survival]
-        [--nodes-per-decade N] [--survival-sweep] [--small-alpha]
+        [--nodes-per-decade N] [--survival-sweep] [--small-alpha | --large-m]
 
 Generates a seeded synthetic portfolio ELT (mixture of well-conditioned,
 skewed alpha < 1, concentrated large-parameter, degenerate, inadmissible and
@@ -22,7 +22,11 @@ prints a summary, and appends a machine-readable record to
   nodes per decade against the quantiles method at K = 32, on the mixture
   portfolio and (``--small-alpha``) on a small-alpha portfolio with the
   recipe of ``fixtures/small_alpha_elt.csv`` at scale, recording the
-  interpolation error and the secondary mean error of each.
+  interpolation error and the secondary mean error of each; with
+  ``--large-m`` (``--rows 100000``) the survival method at the default
+  density only against K = 32 on a large-exposed-value portfolio at
+  ``h = 25`` and ``2**22`` buckets, the tail-cost case of
+  ``dev/done/plan-survival-tail-cost.md``.
 
 Scratch files (the benchmark CSV) go to --scratch-dir, defaulting to the
 system temp dir; keep them off Synology-synced folders.
@@ -123,6 +127,32 @@ def small_alpha_elt(n: int) -> dict[str, np.ndarray]:
     }
 
 
+def large_m_elt(n: int) -> dict[str, np.ndarray]:
+    """Large-exposed-value portfolio: M log-uniform on [1e6, 1e9], 98% of
+    the rows low-mean (mean damage ratio 1e-5 to 1e-2, CV 1 to 20) and 2%
+    top-heavy (ratio 0.5 to 0.9, CV 0.3 to 0.6), the recipe of reproduction
+    1 in ``dev/done/plan-survival-tail-cost.md``. At ``h = 25`` and 2**22
+    buckets the window ends at 1.05e8, below a third of the endpoints."""
+    rng = np.random.default_rng(SEED + 2)
+    rate = 10.0 ** rng.uniform(-6, -2, n)
+    m = 10.0 ** rng.uniform(6, 9, n)
+    top_heavy = rng.random(n) < 0.02
+    p = np.where(top_heavy, rng.uniform(0.5, 0.9, n), 10.0 ** rng.uniform(-5, -2, n))
+    mean = p * m
+    cv = np.where(top_heavy, rng.uniform(0.3, 0.6, n), 10.0 ** rng.uniform(0, np.log10(20), n))
+    sd = np.minimum(cv * mean, 0.95 * np.sqrt(mean * (m - mean)))
+    return {
+        "rate": rate,
+        "max_loss": m,
+        "mean_loss": mean,
+        "sd_indep": 0.6 * sd,
+        "sd_corr": 0.4 * sd,
+    }
+
+
+LARGE_M = {"bucket_size": 25.0, "grid_length": 2 ** 22}
+
+
 def cols_tuple(cols: dict[str, np.ndarray]) -> tuple:
     return (cols["rate"], cols["max_loss"], cols["mean_loss"],
             cols["sd_indep"], cols["sd_corr"])
@@ -221,26 +251,40 @@ def survival_sweep(args) -> None:
     """Survival at four node densities against quantiles at K = 32, on the
     mixture portfolio or the small-alpha one; appends a ``survival_sweep``
     record to the results history."""
-    label = "small_alpha" if args.small_alpha else "mixture"
+    label = "small_alpha" if args.small_alpha else "large_m" if args.large_m else "mixture"
     print(f"generating {args.rows:,} {label} rows ...")
-    cols = small_alpha_elt(args.rows) if args.small_alpha else synthetic_elt(args.rows)
-    h = HEADLINE["bucket_size"] if not args.small_alpha else 100.0
+    if args.large_m:
+        cols = large_m_elt(args.rows)
+    elif args.small_alpha:
+        cols = small_alpha_elt(args.rows)
+    else:
+        cols = synthetic_elt(args.rows)
+    h = LARGE_M["bucket_size"] if args.large_m else 100.0 if args.small_alpha else HEADLINE["bucket_size"]
+    window = {"grid_length": LARGE_M["grid_length"]} if args.large_m else {}
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "suite": "survival_sweep",
         "portfolio": label,
         "rows": args.rows,
         "bucket_size": h,
+        **window,
         "machine": machine_info(),
         "runs": [],
     }
     configs = [{"method": "quantiles", "quadrature_points": 32}]
-    configs += [{"method": "survival", "nodes_per_decade": d} for d in (25, 50, 100, 150)]
+    if args.large_m:
+        # The default density only, once: the survival grid here is the
+        # tail-cost case and runs for minutes before the rate cut.
+        configs += [{"method": "survival"}]
+        repeats = 1
+    else:
+        configs += [{"method": "survival", "nodes_per_decade": d} for d in (25, 50, 100, 150)]
+        repeats = 2
     base = None
     for params in configs:
         elapsed, (raw, secondary, meta) = timed(
-            lambda p=params: eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, **p),
-            repeats=2,
+            lambda p=params: eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, **window, **p),
+            repeats=repeats,
         )
         run = {
             **params,
@@ -263,10 +307,15 @@ def survival_sweep(args) -> None:
               f"({run['ratio_to_k32']:>5}x K=32)  mean err {run['secondary_mean_error_rel']:+.2e}  "
               f"interp err {meta.interpolation_error if meta.interpolation_error is not None else float('nan'):.1e}  "
               f"nodes {meta.nodes}  n={meta.grid_length}")
-    r1, s1, _ = eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, method="survival", threads=1)
-    r2, s2, _ = eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, method="survival")
-    record["determinism_bitwise_across_threads"] = bool(np.array_equal(r1, r2) and np.array_equal(s1, s2))
-    print(f"bitwise deterministic across threads (survival): {record['determinism_bitwise_across_threads']}")
+    if args.large_m:
+        # A single-thread survival run would take too long here; the test
+        # suite covers determinism.
+        record["determinism_bitwise_across_threads"] = None
+    else:
+        r1, s1, _ = eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, method="survival", threads=1)
+        r2, s2, _ = eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, method="survival")
+        record["determinism_bitwise_across_threads"] = bool(np.array_equal(r1, r2) and np.array_equal(s1, s2))
+        print(f"bitwise deterministic across threads (survival): {record['determinism_bitwise_across_threads']}")
     record["peak_working_set_mb"] = peak_working_set_mb()
     history = json.loads(RESULTS_PATH.read_text(encoding="utf-8")) if RESULTS_PATH.exists() else []
     history.append(record)
@@ -292,6 +341,9 @@ def main() -> None:
                              "against quantiles at K = 32, then stop")
     parser.add_argument("--small-alpha", action="store_true",
                         help="use the small-alpha portfolio for the sweep")
+    parser.add_argument("--large-m", action="store_true",
+                        help="use the large-exposed-value portfolio for the sweep "
+                             "(h = 25, 2**22 buckets, default density only)")
     args = parser.parse_args()
 
     if args.survival_sweep:

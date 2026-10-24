@@ -1,5 +1,6 @@
-"""Spec tests 15 to 20: the survival method, the overflow policies and the
-Bernoulli treatment of inadmissible rows (`dev/done/plan-single-unit-survival-route.md`).
+"""Spec tests 15 to 21: the survival method, the overflow policies, the
+Bernoulli treatment of inadmissible rows (`dev/done/plan-single-unit-survival-route.md`)
+and the tail rate cut (`dev/done/plan-survival-tail-cost.md`).
 
 Every test runs on both backends through the ``impl`` fixture in conftest;
 the oracle checks (``exact_edges``, ``check_every_interval``) call the
@@ -213,6 +214,26 @@ def test_20_bernoulli_row(impl, method):
 # [curve] The public exceedance curve: the grid it makes is the survival
 # method's grid, its exceedance matches the exact incomplete beta, and the
 # OEP points come straight from it.
+# [21] The rate cut: against the same grid with every tail walked to its
+# endpoint, the tail sums move by at most N eps Lambda(0); the rate is exact.
+def test_21_tail_rate_cut():
+    from eltq._meta import TAIL_RATE_FLOOR
+
+    df = load_fixture("small_alpha")
+    h = FIXTURE_H
+    curve, _ = reference.exceedance_curve_reference(*columns(df), min_loss=0.5 * h)
+    n = int(math.ceil(curve.max_loss / h)) + 1
+    cut, over_cut, _ = curve.bucket(h, n)
+    full, over_full, _ = curve.bucket(h, n, tail_rate_floor=0.0)
+    assert over_cut == 0.0 and over_full == 0.0
+    assert math.isclose(cut.sum(), curve.beta_rate, rel_tol=1e-14)
+    assert math.isclose(full.sum(), curve.beta_rate, rel_tol=1e-14)
+    # The cut fires on this fixture (its deep events have long tails).
+    assert not np.array_equal(cut, full)
+    bound = len(df) * TAIL_RATE_FLOOR * curve.beta_rate
+    assert np.max(np.abs(tail_sums(cut) - tail_sums(full))) <= bound
+
+
 def test_curve_matches_quantize_and_exact(impl):
     import eltq
 

@@ -13,8 +13,10 @@
 //! `TAIL_INTERVALS` intervals below the first node at or above its endpoint
 //! `M_j`. The **curve** carries `lambda_j (S_j(x) - S_j(x_k))` for `x <= x_k`,
 //! continuous and vanishing at a node; the **tail**, the mass
-//! `lambda_j S_j(x_k)` on `(x_k, M_j]`, is kept per event and bucketed by a
-//! monotone cubic Hermite of `log S_j` against `log(M_j - x)`. The summed
+//! `lambda_j S_j(x_k)` on `(x_k, M_j]`, is kept per event and walked along
+//! the bucket edges by a monotone cubic Hermite of `log S_j` against
+//! `log(M_j - x)` until its rate reaches `TAIL_RATE_FLOOR` of the total.
+//! The summed
 //! curve has kinks only at nodes, which carry one-sided slopes.
 //!
 //! [`Curve`] is the primary object (spec section 5A): built once by
@@ -41,6 +43,11 @@ pub const TAIL_INTERVALS: usize = 4;
 pub const LN_LOWER_SKIP_PROBABILITY: f64 = -60.0 * std::f64::consts::LN_2;
 /// Interval log-midpoints sampled for the interpolation-error diagnostic.
 pub const SAMPLE_POINTS: usize = 64;
+/// The rate cut of a tail walk, as a fraction of the beta events' total
+/// rate: the walk along the bucket edges stops at the first edge where the
+/// event's exceedance rate is at or below it and the remainder is lumped
+/// into the next bucket (spec section 5A). Shared with `_meta.py`.
+pub const TAIL_RATE_FLOOR: f64 = 1e-20;
 /// The exceedance level, as a fraction of the beta events' total rate,
 /// below which the interpolation error is not measured.
 pub const ERROR_FLOOR: f64 = 1e-12;
@@ -109,59 +116,114 @@ fn tail_moment(lam: f64, m: f64, a: f64, b: f64, e: f64) -> f64 {
     lam * m * (a / (a + b)) * BetaFn::new(a + 1.0, b).sf(e / m)
 }
 
-/// `S(x)` of one beta event on its tail interval `(x_k, M]` at the given
-/// losses, by the endpoint interpolant: `log S` against `u = log(M - x)`,
-/// a monotone cubic Hermite with the exact slopes `(1 - y) f(y) / S(y)` on
-/// nodes shrinking the distance to the endpoint by sqrt(2) per step from
-/// `M - x_k` down to `min_distance`, and the exact power law `S ~ d^beta`
-/// below the last node. `s` is the exact `S(x_k)`, used as the first
-/// node's value.
-pub fn tail_survival(bf: &BetaFn, m: f64, xk: f64, s: f64, x: &[f64], min_distance: f64) -> Vec<f64> {
-    let (a, b) = (bf.alpha, bf.beta);
-    let d0 = m - xk;
-    let count = 2 * ((d0 / min_distance).log2().ceil().max(1.0) as usize) + 1;
-    // Nodes with a positive survival, descending in distance.
-    let mut dist = Vec::with_capacity(count);
-    let mut log_surv = Vec::with_capacity(count);
-    let mut slope = Vec::with_capacity(count);
-    for i in 0..count {
-        let d = d0 * 0.5_f64.powf(i as f64 / 2.0);
-        let y = 1.0 - d / m;
-        let surv = if i == 0 { s } else { bf.sf(y) };
-        if !(surv > 0.0) {
-            break;
+/// One beta event's survival on its tail interval `(x_k, M]`, the
+/// endpoint interpolant: `log S` against `u = log(M - x)`, a monotone
+/// cubic Hermite with the exact slopes `(1 - y) f(y) / S(y)` on nodes
+/// shrinking the distance to the endpoint by sqrt(2) per step from
+/// `M - x_k` down to `min_distance`, the limited end slopes fixed per
+/// interval at construction, and the exact power law `S ~ d^beta` below
+/// the last node. The first node's value is the exact `S(x_k)`, so the
+/// tail joins the curve bitwise.
+pub struct TailInterpolant {
+    max_loss: f64,
+    beta: f64,
+    survival_at_node: f64,
+    /// Nodes ascending in `u`, their `log S`, and the limited end slopes
+    /// of each interval `[u[k], u[k + 1]]`.
+    u: Vec<f64>,
+    g: Vec<f64>,
+    m0: Vec<f64>,
+    m1: Vec<f64>,
+}
+
+impl TailInterpolant {
+    pub fn new(bf: &BetaFn, m: f64, xk: f64, s: f64, min_distance: f64) -> Self {
+        let (a, b) = (bf.alpha, bf.beta);
+        let d0 = m - xk;
+        let count = 2 * ((d0 / min_distance).log2().ceil().max(1.0) as usize) + 1;
+        // Nodes with a positive survival, descending in distance.
+        let mut dist = Vec::with_capacity(count);
+        let mut log_surv = Vec::with_capacity(count);
+        let mut slope = Vec::with_capacity(count);
+        for i in 0..count {
+            let d = d0 * 0.5_f64.powf(i as f64 / 2.0);
+            let y = 1.0 - d / m;
+            let surv = if i == 0 { s } else { bf.sf(y) };
+            if !(surv > 0.0) {
+                break;
+            }
+            let ls = surv.ln();
+            dist.push(d);
+            log_surv.push(ls);
+            slope.push(((a - 1.0) * y.ln() + b * (d / m).ln() - bf.ln_beta() - ls).exp());
         }
-        let ls = surv.ln();
-        dist.push(d);
-        log_surv.push(ls);
-        slope.push(((a - 1.0) * y.ln() + b * (d / m).ln() - bf.ln_beta() - ls).exp());
+        // Ascending in u = log d.
+        let u: Vec<f64> = dist.iter().rev().map(|d| d.ln()).collect();
+        let g: Vec<f64> = log_surv.iter().rev().copied().collect();
+        let sl: Vec<f64> = slope.iter().rev().copied().collect();
+        let intervals = u.len().saturating_sub(1);
+        let mut m0 = Vec::with_capacity(intervals);
+        let mut m1 = Vec::with_capacity(intervals);
+        for k in 0..intervals {
+            let du = u[k + 1] - u[k];
+            let (lo, hi) = limit_slopes((g[k + 1] - g[k]) / du, sl[k], sl[k + 1]);
+            m0.push(lo);
+            m1.push(hi);
+        }
+        TailInterpolant { max_loss: m, beta: b, survival_at_node: s, u, g, m0, m1 }
     }
-    let mut out = vec![0.0; x.len()];
-    if dist.is_empty() {
-        return out;
+
+    /// The cursor `at_ascending` starts from: the topmost interval.
+    pub fn start(&self) -> usize {
+        self.u.len().saturating_sub(2)
     }
-    // Ascending in u = log d.
-    let u: Vec<f64> = dist.iter().rev().map(|d| d.ln()).collect();
-    let g: Vec<f64> = log_surv.iter().rev().copied().collect();
-    let sl: Vec<f64> = slope.iter().rev().copied().collect();
-    let last = u.len() - 1;
-    for (o, &xq) in out.iter_mut().zip(x) {
-        let d = m - xq;
-        if d <= 0.0 {
-            continue;
+
+    /// `S` at distance `d = M - x > 0` on interval `k`, or by the power
+    /// law below the first node.
+    fn eval(&self, d: f64, k: usize) -> f64 {
+        let (u, g) = (&self.u, &self.g);
+        let uq = d.ln();
+        let value = if uq < u[0] || u.len() == 1 {
+            g[0] + self.beta * (uq - u[0])
+        } else {
+            let du = u[k + 1] - u[k];
+            hermite((uq - u[k]) / du, g[k], g[k + 1], du, self.m0[k], self.m1[k])
+        };
+        value.exp().min(self.survival_at_node)
+    }
+
+    /// `S(x)` with the interval found by search; 0 at and beyond `M`, and
+    /// everywhere when no node has a positive survival.
+    pub fn at(&self, x: f64) -> f64 {
+        let d = self.max_loss - x;
+        if d <= 0.0 || self.u.is_empty() {
+            return 0.0;
+        }
+        let k = self.u.partition_point(|&v| v <= d.ln()).saturating_sub(1).min(self.start());
+        self.eval(d, k)
+    }
+
+    /// `S(x)` for queries ascending in `x`: the interval cursor moves down
+    /// as the distance shrinks instead of being searched. Start it at
+    /// `start()`.
+    pub fn at_ascending(&self, x: f64, cursor: &mut usize) -> f64 {
+        let d = self.max_loss - x;
+        if d <= 0.0 || self.u.is_empty() {
+            return 0.0;
         }
         let uq = d.ln();
-        let value = if uq < u[0] || last == 0 {
-            g[0] + b * (uq - u[0])
-        } else {
-            let k = (u.partition_point(|&v| v <= uq) - 1).min(last - 1);
-            let du = u[k + 1] - u[k];
-            let (m0, m1) = limit_slopes((g[k + 1] - g[k]) / du, sl[k], sl[k + 1]);
-            hermite((uq - u[k]) / du, g[k], g[k + 1], du, m0, m1)
-        };
-        *o = value.exp().min(s);
+        while *cursor > 0 && uq < self.u[*cursor] {
+            *cursor -= 1;
+        }
+        self.eval(d, *cursor)
     }
-    out
+}
+
+/// `S(x)` of one beta event on its tail interval at the given losses, by
+/// `TailInterpolant`.
+pub fn tail_survival(bf: &BetaFn, m: f64, xk: f64, s: f64, x: &[f64], min_distance: f64) -> Vec<f64> {
+    let interp = TailInterpolant::new(bf, m, xk, s, min_distance);
+    x.iter().map(|&xq| interp.at(xq)).collect()
 }
 
 /// One beta event's tail: what the curve omits above its truncation node.
@@ -629,9 +691,9 @@ impl Curve {
 
     /// The even grid at spacing `h` with `grid_length` nodes (derived to
     /// cover `max_loss` when `None`) under the overflow policy: the curve
-    /// differenced at the half-bucket edges, the tails bucketed exactly per
-    /// event in a chunk pass folded in order, and the atoms by the linear
-    /// rule. Requires `h >= 2 min_loss`.
+    /// differenced at the half-bucket edges, the tails walked per event to
+    /// the rate floor in a chunk pass folded in order, and the atoms by the
+    /// linear rule. Requires `h >= 2 min_loss`.
     pub fn grid(&self, h: f64, grid_length: Option<usize>, policy: Overflow, config: &Config) -> Result<GridOutcome, Error> {
         if !(h.is_finite() && h > 0.0) {
             return Err(Error::BadBucketSize(h));
@@ -703,32 +765,48 @@ impl Curve {
         let chunk = config.resolved_chunk_rows();
         let n_chunks = self.tails.len().div_ceil(chunk);
         let min_distance = 0.5 * self.loss[0];
+        let threshold = TAIL_RATE_FLOOR * self.beta_rate;
         let process = |chunk_index: usize| -> Result<(Vec<f64>, OverflowAccumulator), Error> {
             let start = chunk_index * chunk;
             let end = (start + chunk).min(self.tails.len());
             let mut hist = vec![0.0_f64; n];
             let mut over = OverflowAccumulator::default();
-            let mut edges = Vec::new();
             for t in &self.tails[start..end] {
                 let (lam, m, s) = (t.rate, t.max_loss, t.survival);
                 let xk = self.loss[t.node];
                 let bf = BetaFn::new(t.alpha, t.beta);
+                // The edges e_first ..= e_stop lie in (x_k, M) and on the grid.
                 let first = ((xk / h - 0.5).floor() as isize + 1) as usize;
-                let last_signed = (m / h - 0.5).ceil() as isize - 1;
-                if last_signed < first as isize {
+                let stop = ((m / h - 0.5).ceil() as isize - 1).min(n as isize - 1);
+                // The bucket that takes the remainder.
+                let rest = if stop < first as isize || lam * s <= threshold {
+                    // No edge to walk, or the whole tail at or below the
+                    // floor: one deposit in the bucket containing x_k.
                     put(&mut hist, first, lam * s, policy, &mut over);
+                    first
                 } else {
-                    let last = last_signed as usize;
-                    edges.clear();
-                    edges.extend((first..=last).map(|i| (i as f64 + 0.5) * h));
-                    let tail = tail_survival(&bf, m, xk, s, &edges, min_distance);
-                    put(&mut hist, first, lam * (s - tail[0]), policy, &mut over);
-                    for (i, w) in (first + 1..=last).zip(tail.windows(2).map(|w| lam * (w[0] - w[1]))) {
-                        put(&mut hist, i, w, policy, &mut over);
+                    // Walk the edges in order; stop at the top edge or at
+                    // the first edge where the event's rate reaches the
+                    // floor, and lump the remainder in the next bucket.
+                    let interp = TailInterpolant::new(&bf, m, xk, s, min_distance);
+                    let mut cursor = interp.start();
+                    let mut prev = s;
+                    let mut i = first;
+                    loop {
+                        let surv = interp.at_ascending((i as f64 + 0.5) * h, &mut cursor);
+                        put(&mut hist, i, lam * (prev - surv), policy, &mut over);
+                        prev = surv;
+                        if i as isize == stop || lam * surv <= threshold {
+                            break;
+                        }
+                        i += 1;
                     }
-                    put(&mut hist, last + 1, lam * tail[last - first], policy, &mut over);
-                }
-                if m > top_edge {
+                    put(&mut hist, i + 1, lam * prev, policy, &mut over);
+                    i + 1
+                };
+                // A remainder beyond the grid (so M > e_{n-1}): its moment
+                // by partial expectations.
+                if rest >= n {
                     let begin = xk.max(top_edge);
                     let mass = if begin > xk { lam * bf.sf(begin / m) } else { lam * s };
                     over.moment.add(tail_moment(lam, m, t.alpha, t.beta, begin) - top_node * mass);
@@ -837,6 +915,25 @@ mod tests {
             }
             assert!(got.windows(2).all(|w| w[1] <= w[0]));
         }
+    }
+
+    #[test]
+    fn tail_walk_with_cursor_matches_search() {
+        // Ascending queries through the cursor give the searched values
+        // bitwise, across every interval and into the power law.
+        let bf = BetaFn::new(0.7, 40.0);
+        let (m, xk) = (1e5, 0.92e5);
+        let interp = TailInterpolant::new(&bf, m, xk, bf.sf(xk / m), 0.5);
+        let mut cursor = interp.start();
+        let mut prev = f64::INFINITY;
+        for i in 0..5000 {
+            let x = xk + (m - xk) * (i as f64 + 0.5) / 5000.0;
+            let walked = interp.at_ascending(x, &mut cursor);
+            assert_eq!(walked, interp.at(x), "x={x}");
+            assert!(walked <= prev);
+            prev = walked;
+        }
+        assert_eq!(interp.at(m), 0.0);
     }
 
     #[test]

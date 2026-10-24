@@ -362,6 +362,18 @@ Approved by Steve on 2026-10-24 with the corrections of the independent check an
 - `Cargo.toml`, `pyproject.toml` (`Cargo.lock`, `uv.lock` on build), `CHANGELOG.md`, this plan moved to `dev/done/`.
 - Commit subject: `2.0.1 fix oep_pml returning the largest atom above every atom`.
 
+### [tail-cut] 2.1.0
+
+- `crates/eltq-core/src/curve.rs`: `TAIL_RATE_FLOOR`; `tail_survival` becomes `TailInterpolant` (built once per event, limited slopes per interval, `at` by search and `at_ascending` by cursor), `tail_survival` kept as a wrapper for the unit test; `Curve::grid` walks each tail from the first edge above `x_k` to the smaller of the last edge below `M` and the top edge, breaks at the first edge where `lam S <= threshold`, lumps the remainder in the next bucket, and adds the overflow moment only when the remainder went beyond the grid; the per-event edge vectors are gone; unit test `tail_walk_with_cursor_matches_search`. `lib.rs` exports the constant.
+- `python/eltq/_meta.py`: `TAIL_RATE_FLOOR`. `python/eltq/reference.py`: the same walk in blocks of `TAIL_BLOCK` edges in `SurvivalCurve.bucket`, with a reference-only `tail_rate_floor` argument; the overflow moment loop merged into the walk.
+- `secondary-uncertainty-mathematical-specification.md`: section 5A "The rate cut" paragraph, the cost sentence of "The tails", test 21.
+- `benchmarks/run_end_to_end.py`: `large_m_elt` and `--large-m` (default density only, one repeat, no single-thread determinism run); `benchmarks/results.json`: two `large_m` records, before and after.
+- `tests/test_survival.py`: test 21. Version lines, `CHANGELOG.md`.
+- Measurements (this machine, all threads): before, quantiles 0.895 s and survival 240.7 s (269 times); after, 0.894 s and 5.05 s (5.66 times). The plan projected about 7.4 s from edge counts. Both backends pass tests 15 to 21.
+- Downstream tie-out (2026-10-24, the tie-out session, eight real blocks at 2**22 buckets, editable install rebuilt from this tree): survival grid 0.54 to 1.60 s per block (2.0.0: 0.6 to 70 s), 0.8 to 2.5 times K=32; OEP and AEP points unchanged at every return period; `oep_pml` within 4.1e-7 of the exact OEP in every block; the whole tie-out 2 min 17 s against about 7 min. The 7 s target is met by the cut alone.
+- Divergence: the plan's [tail-cut] text had the stop found on the tail's nodes and the lumped tail reflected in `exceedance(x)`; as corrected in the independent check, the walk breaks in order and the curve stays exact.
+- Commit subject: `2.1.0 cut survival tail walks at the rate floor and the grid window`.
+
 ## Independent check, 2026-10-24
 
 By the survival-route session (Claude), at the tie-out session's request through Steve. Code read at the cited lines; the appendix script rerun unchanged on the 2.0.0 working tree, Rust backend, all threads; extra accounting and a coefficient-of-variation sweep run alongside. Nothing implemented.

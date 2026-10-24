@@ -35,7 +35,7 @@ pub mod terms;
 pub mod validate;
 pub mod views;
 
-pub use curve::{Curve, GridOutcome, TAIL_INTERVALS, build_curve};
+pub use curve::{Curve, GridOutcome, TAIL_INTERVALS, TAIL_RATE_FLOOR, build_curve};
 pub use config::{
     Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_NODES_PER_DECADE,
     DEFAULT_QUADRATURE_POINTS, DEFAULT_SURVIVAL_CHUNK_ROWS, Method, Overflow, VariancePolicy,

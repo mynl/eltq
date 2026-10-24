@@ -857,5 +857,95 @@
     ],
     "determinism_bitwise_across_threads": true,
     "peak_working_set_mb": 150.5
+  },
+  {
+    "timestamp": "2026-10-24T16:03:00+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "large_m",
+    "rows": 100000,
+    "bucket_size": 25.0,
+    "grid_length": 4194304,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.0.1",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 4194304,
+        "elapsed_s": 0.8947,
+        "rows_per_s": 111773,
+        "secondary_mean_error_rel": -0.5921044720734852,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 2.4158453015843406e-13,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "grid_length": 4194304,
+        "elapsed_s": 240.6926,
+        "rows_per_s": 415,
+        "secondary_mean_error_rel": -0.5765971644100083,
+        "interpolation_error": 2.106765633429248e-07,
+        "nodes": 792,
+        "mass_error": 3.3577407521079294e-10,
+        "ratio_to_k32": 269.03
+      }
+    ],
+    "determinism_bitwise_across_threads": null,
+    "peak_working_set_mb": 298.2
+  },
+  {
+    "timestamp": "2026-10-24T16:10:13+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "large_m",
+    "rows": 100000,
+    "bucket_size": 25.0,
+    "grid_length": 4194304,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.0.1",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 4194304,
+        "elapsed_s": 0.8937,
+        "rows_per_s": 111896,
+        "secondary_mean_error_rel": -0.5921044720734852,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 2.4158453015843406e-13,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "grid_length": 4194304,
+        "elapsed_s": 5.0541,
+        "rows_per_s": 19786,
+        "secondary_mean_error_rel": -0.5765971642729809,
+        "interpolation_error": 2.106765633429248e-07,
+        "nodes": 792,
+        "mass_error": 0.0,
+        "ratio_to_k32": 5.66
+      }
+    ],
+    "determinism_bitwise_across_threads": null,
+    "peak_working_set_mb": 217.7
   }
 ]

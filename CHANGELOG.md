@@ -3,6 +3,19 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.1.0] - 2026-10-24
+
+### Changed
+
+- [tail-cut] The survival grid walks each event's tail along the bucket edges only while the event's exceedance rate exceeds 1e-20 of the total beta rate (`TAIL_RATE_FLOOR`), and only up to the top edge of the grid; the remainder is lumped into the next bucket. The rate stays exact and the tail sums move by at most N times that fraction of the total rate (spec section 5A, test 21). On a 100,000-row portfolio with endpoints to 1e9 at `h = 25` and 2**22 buckets the survival grid falls from 240.7 s to 5.1 s (269 to 5.7 times the quantiles method at K = 32).
+- `ExceedanceCurve.exceedance` is unchanged and exact; the grid now departs from it by the bound above where the cut applies. Grids with a window short of the largest endpoint change in rounding only (the overflow is one deposit per tail instead of one per edge).
+- The tail interpolant is built once per event with its limited slopes fixed per interval and walked with a cursor instead of a search per edge.
+
+### Added
+
+- `benchmarks/run_end_to_end.py --survival-sweep --large-m --rows 100000`: the large-exposed-value portfolio at `h = 25` and 2**22 buckets, recorded before and after the cut in `benchmarks/results.json`.
+- Reference only: `SurvivalCurve.bucket(..., tail_rate_floor=0.0)` walks every tail to its endpoint, for test 21.
+
 ## [2.0.1] - 2026-10-24
 
 ### Fixed
