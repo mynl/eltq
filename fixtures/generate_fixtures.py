@@ -10,7 +10,12 @@ synthetic (data firewall: no real data ever enters the repository).
 Outputs:
     fixtures/small_elt.csv                handcrafted rows covering every category
     fixtures/medium_elt.csv               5000-row seeded mixture of regimes
-    fixtures/golden/<name>.npz            raw + secondary golden arrays
+    fixtures/small_alpha_elt.csv          2000 small-alpha rows for the survival
+                                          tests (spec tests 15 to 20)
+    fixtures/golden/<name>.npz            raw + secondary golden arrays, for
+                                          small and medium under the quantiles
+                                          method and small_survival and
+                                          medium_survival under the default
     fixtures/golden/<name>.meta.json      golden metadata + diagnostics
     fixtures/multiunit_small_elt.csv      handcrafted event x unit rows (1.7.0)
     fixtures/multiunit_small_terms.txt    DecL-style unit terms for it
@@ -38,8 +43,10 @@ COLUMNS = ["event_id", "rate", "max_loss", "mean_loss", "sd_indep", "sd_corr"]
 SEED = 20260814
 
 # Golden run parameters, shared with the acceptance suite via the meta files.
-SMALL_GOLDEN = {"bucket_size": 0.5, "quadrature_points": 8}
-MEDIUM_GOLDEN = {"bucket_size": 5000.0, "quadrature_points": 32}
+SMALL_GOLDEN = {"bucket_size": 0.5, "method": "quantiles", "quadrature_points": 8}
+MEDIUM_GOLDEN = {"bucket_size": 5000.0, "method": "quantiles", "quadrature_points": 32}
+SMALL_SURVIVAL_GOLDEN = {"bucket_size": 0.5, "method": "survival"}
+MEDIUM_SURVIVAL_GOLDEN = {"bucket_size": 5000.0, "method": "survival"}
 
 
 def small_elt() -> pd.DataFrame:
@@ -63,7 +70,8 @@ def small_elt() -> pd.DataFrame:
         ("mu_zero", 0.011, 100.0, 0.0, 5.0, 0.0),
         ("mu_max", 0.009, 75.0, 75.0, 0.0, 3.0),
         ("m_zero", 0.007, 0.0, 0.0, 0.0, 0.0),
-        # Inadmissible variance (sigma^2 >= mu (M - mu)): clamped by default.
+        # Inadmissible variance (sigma^2 >= mu (M - mu)): Bernoulli rows by
+        # default from 1.13.0 (two atoms, at 0 and at M).
         ("inadmissible_1", 0.005, 100.0, 30.0, 50.0, 30.0),
         ("inadmissible_2", 0.003, 40.0, 20.0, 20.0, 0.0),
         # Zero rate.
@@ -131,7 +139,54 @@ def medium_elt(n: int = 5000) -> pd.DataFrame:
     )
 
 
-def write_golden(df: pd.DataFrame, name: str, params: dict) -> None:
+def small_alpha_elt(n: int = 1000) -> pd.DataFrame:
+    """Small-alpha events for the survival tests: ground-up rows (``gu``)
+    and a gross-like copy (``gr``) with mu and alpha both shrunk fivefold
+    and M kept, as deductibles do.
+
+    Shapes are drawn directly: alpha loguniform on [0.003, 3], M / mu
+    loguniform on [1e2, 1e4] with a tenth of the rows at 1e5 on M = 1e6, so
+    that the variance is admissible by construction. A few rows are atoms,
+    inadmissible (Bernoulli by default) or zero-rate.
+    """
+    rng = np.random.default_rng(SEED + 1)
+    m = np.exp(rng.uniform(np.log(1e4), np.log(1e6), size=n))
+    ratio = np.exp(rng.uniform(np.log(1e2), np.log(1e4), size=n))
+    deep = rng.random(n) < 0.1
+    m[deep] = 1e6
+    ratio[deep] = 1e5
+    alpha = np.exp(rng.uniform(np.log(0.003), np.log(3.0), size=n))
+    lam = np.exp(rng.uniform(np.log(1e-5), np.log(1e-2), size=n))
+    kind = rng.choice(["beta", "atom", "inadm", "zrate"], size=n,
+                      p=[0.94, 0.03, 0.02, 0.01])
+    share = rng.uniform(0.0, 1.0, size=n)
+    frames = []
+    for label, shrink in (("gu", 1.0), ("gr", 0.2)):
+        p = shrink / ratio
+        a = shrink * alpha
+        kappa = a / p
+        v = p * (1.0 - p) / (kappa + 1.0)
+        mu = p * m
+        sigma = m * np.sqrt(v)
+        sigma[kind == "atom"] = 0.0
+        inadm = kind == "inadm"
+        sigma[inadm] = 1.2 * np.sqrt(mu[inadm] * (m[inadm] - mu[inadm]))
+        rate = lam.copy()
+        rate[kind == "zrate"] = 0.0
+        frames.append(pd.DataFrame({
+            "event_id": [f"{label}{i:04d}" for i in range(n)],
+            "rate": rate,
+            "max_loss": m,
+            "mean_loss": mu,
+            "sd_indep": sigma * share,
+            "sd_corr": sigma * (1.0 - share),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+
+def write_golden(df: pd.DataFrame, name: str, params: dict, csv_name: str | None = None) -> None:
+    """Write the golden arrays and metadata for ``name``; ``csv_name`` is the
+    fixture CSV the golden is computed from (``name`` when None)."""
     raw, secondary, meta = quantize_reference(
         df["rate"], df["max_loss"], df["mean_loss"], df["sd_indep"],
         df["sd_corr"], event_ids=list(df["event_id"]), **params,
@@ -145,6 +200,7 @@ def write_golden(df: pd.DataFrame, name: str, params: dict) -> None:
                header="raw,secondary", comments="")
     meta_dict = dataclasses.asdict(meta)
     meta_dict["params"] = params
+    meta_dict["fixture"] = csv_name or name
     (golden_dir / f"{name}.meta.json").write_text(
         json.dumps(meta_dict, indent=2), encoding="utf-8"
     )
@@ -313,6 +369,11 @@ def main() -> None:
         # round_trip parsing: bit-identical to what the Rust CSV route sees.
         reread = pd.read_csv(path, float_precision="round_trip")
         write_golden(reread, name, params)
+        survival = SMALL_SURVIVAL_GOLDEN if name == "small" else MEDIUM_SURVIVAL_GOLDEN
+        write_golden(reread, f"{name}_survival", survival, csv_name=name)
+    # No golden yet: the survival tests check this fixture against exact
+    # evaluation; goldens for it arrive with the 2.0.0 default switch.
+    small_alpha_elt().to_csv(FIXTURES_DIR / "small_alpha_elt.csv", index=False)
     write_multiunit_golden()
     write_joint_golden()
     write_terms_parse_golden()

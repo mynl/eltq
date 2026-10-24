@@ -51,6 +51,49 @@ impl BetaFn {
         }
     }
 
+    /// Regularized upper incomplete beta, the survival function 1 - I_x,
+    /// computed directly in each branch of the continued fraction so that
+    /// the upper tail keeps full relative precision (no `1 - cdf`).
+    pub fn sf(&self, x: f64) -> f64 {
+        let (a, b) = (self.alpha, self.beta);
+        if x <= 0.0 {
+            return 1.0;
+        }
+        if x >= 1.0 {
+            return 0.0;
+        }
+        let ln_front = a * x.ln() + b * (-x).ln_1p() - self.ln_beta;
+        let front = ln_front.exp();
+        if x < (a + 1.0) / (a + b + 2.0) {
+            1.0 - front * betacf(a, b, x) / a
+        } else {
+            front * betacf(b, a, 1.0 - x) / b
+        }
+    }
+
+    /// `(sf(y), y f(y))`: the survival function and the density times its
+    /// argument, which share the logarithms of `y` and `1 - y`. The second
+    /// is `x Lambda'`'s per-event factor and stays finite as y -> 0 for
+    /// every alpha > 0.
+    pub fn sf_and_density_times_y(&self, y: f64) -> (f64, f64) {
+        let (a, b) = (self.alpha, self.beta);
+        if y <= 0.0 {
+            return (1.0, 0.0);
+        }
+        if y >= 1.0 {
+            return (0.0, 0.0);
+        }
+        let ln_y = y.ln();
+        let ln_1my = (-y).ln_1p();
+        let front = (a * ln_y + b * ln_1my - self.ln_beta).exp();
+        let sf = if y < (a + 1.0) / (a + b + 2.0) {
+            1.0 - front * betacf(a, b, y) / a
+        } else {
+            front * betacf(b, a, 1.0 - y) / b
+        };
+        (sf, (a * ln_y + (b - 1.0) * ln_1my - self.ln_beta).exp())
+    }
+
     /// Density f(x); zero outside the open interval (callers keep brackets
     /// open, so the endpoint singularities for shapes below one never enter).
     pub fn pdf(&self, x: f64) -> f64 {
@@ -149,6 +192,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sf_matches_statrs_and_keeps_tail_precision() {
+        let shapes = [(1.0, 1.0), (2.5, 7.5), (0.5, 0.5), (300.0, 100.0), (6e-4, 1.4e-3), (1e-3, 1.0), (500.0, 500.0), (40.0, 2.0)];
+        let xs = [1e-12, 1e-6, 0.01, 0.2, 0.5, 0.8, 0.99, 1.0 - 1e-9];
+        for (a, b) in shapes {
+            let ours = BetaFn::new(a, b);
+            let oracle = Beta::new(a, b).unwrap();
+            for &x in &xs {
+                let got = ours.sf(x);
+                // statrs's own sf loses digits as 1 - cdf near 1; hold ours
+                // to the better of the two readings.
+                let want = if x < 0.5 { 1.0 - oracle.cdf(x) } else { oracle.sf(x) };
+                // Large symmetric shapes at the branch switch agree to 1e-12.
+                assert!(
+                    (got - want).abs() <= 1e-15 + 2e-12 * want.abs(),
+                    "sf mismatch a={a} b={b} x={x}: got {got}, want {want}"
+                );
+                let (sf2, dy) = ours.sf_and_density_times_y(x);
+                assert_eq!(sf2, got);
+                assert!((dy - x * ours.pdf(x)).abs() <= 1e-13 * dy.abs().max(1e-300));
+            }
+        }
+        // Deep upper tail: beta(3, 300) at y = 0.3 has S ~ 1e-40, which
+        // 1 - cdf would return as zero.
+        let f = BetaFn::new(3.0, 300.0);
+        let s = f.sf(0.3);
+        assert!(s > 0.0 && s < 1e-30, "{s}");
+        assert!(((1.0 - f.cdf(0.3)) - s).abs() <= 1e-16);
+        // Deep into the representable range (about 1e-194 here) the
+        // survival stays finite and positive.
+        let g = BetaFn::new(2.0, 2000.0);
+        let s = g.sf(0.2);
+        assert!(s > 0.0 && s.is_finite() && s < 1e-150, "{s}");
     }
 
     #[test]

@@ -1,8 +1,13 @@
 """eltq: ferociously fast ELT secondary-uncertainty quantization.
 
 Converts a portfolio event loss table into two evenly spaced, rate-weighted
-loss-grid distributions (``raw`` and ``secondary``) via a mass- and
-mean-preserving linear deposit rule. The mathematical contract lives in
+loss-grid distributions: ``raw``, an atom per event at its conditional mean
+by the mass- and mean-preserving linear deposit rule, and ``secondary``,
+each event's conditional loss as a beta on [0, M] with sd sigma_I + sigma_C,
+bucketed from the portfolio exceedance curve by the nearest rule (the
+survival method; the K-point quantiles method remains selectable). The
+exceedance curve itself is available through ``exceedance_curve``. The
+mathematical contract lives in
 ``secondary-uncertainty-mathematical-specification.md``.
 
 Backends: computation normally happens in the Rust extension ``eltq._eltq``
@@ -26,10 +31,12 @@ from os import PathLike
 
 import numpy as np
 
-from eltq._meta import JointMeta, Meta, MultiMeta, RowIssues
+from eltq._meta import (
+    DEFAULT_NODES_PER_DECADE, CurveMeta, GridMeta, JointMeta, Meta, MultiMeta, RowIssues,
+)
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "1.12.0"
+__version__ = "2.0.0"
 
 try:
     from eltq._eltq import (
@@ -53,6 +60,10 @@ try:
         from eltq._eltq import multiunit_views as _rust_multiunit_views
     except ImportError:  # extension older than 1.10.0
         _rust_multiunit_views = None
+    try:
+        from eltq._eltq import exceedance_curve as _rust_exceedance_curve
+    except ImportError:  # extension older than 1.17.0
+        _rust_exceedance_curve = None
 
     BACKEND = "rust"
 except ImportError:
@@ -70,6 +81,7 @@ except ImportError:
     __rust_version__ = None
     _rust_joint_two_units = None
     _rust_multiunit_views = None
+    _rust_exceedance_curve = None
 
 if BACKEND == "rust":
     try:
@@ -97,6 +109,10 @@ __all__ = [
     "quantize_dataframe",
     "quantize_into",
     "quantize_to_npy",
+    "exceedance_curve",
+    "ExceedanceCurve",
+    "CurveMeta",
+    "GridMeta",
     "joint_two_units",
     "multiunit_views",
     "multiunit_views_dataframe",
@@ -111,6 +127,8 @@ __all__ = [
 ]
 
 _CANONICAL_COLUMNS = ("rate", "max_loss", "mean_loss", "sd_indep", "sd_corr")
+_METHODS = ("quantiles", "survival")
+_OVERFLOW_POLICIES = ("top_bucket", "drop", "error")
 
 
 def _build_meta(meta_dict: dict, event_ids=None) -> Meta:
@@ -122,6 +140,19 @@ def _build_meta(meta_dict: dict, event_ids=None) -> Meta:
             examples = [event_ids[row] for row in examples]
         diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
     return Meta(diagnostics=diagnostics, **meta_dict)
+
+
+def _check_method_options(method, nodes_per_decade, overflow) -> int:
+    """Validate the method keywords; return the resolved node density."""
+    if method not in _METHODS:
+        raise EltqError(f"unknown method {method!r} (expected quantiles or survival)")
+    if overflow not in _OVERFLOW_POLICIES:
+        raise EltqError(
+            f"unknown overflow {overflow!r} (expected top_bucket, drop, or error)")
+    density = DEFAULT_NODES_PER_DECADE if nodes_per_decade is None else int(nodes_per_decade)
+    if density < 1:
+        raise EltqError(f"nodes_per_decade must be >= 1, got {nodes_per_decade}")
+    return density
 
 
 def _column(name: str, values) -> np.ndarray:
@@ -182,11 +213,13 @@ def quantize_arrays(
     *,
     bucket_size,
     grid_length=None,
+    method="survival",
     quadrature_points=32,
+    nodes_per_decade=None,
+    overflow="top_bucket",
     normalize=False,
     mean_is_loss_rate=False,
-    variance_policy="clamp",
-    clamp_factor=0.999,
+    variance_policy="bernoulli",
     threads=None,
     chunk_rows=None,
     event_ids=None,
@@ -201,17 +234,40 @@ def quantize_arrays(
     bucket_size : float
         Grid spacing h (> 0).
     grid_length : int, optional
-        Number of grid nodes n; auto-derived as ceil(max M / h) + 1 when None.
+        Number of grid nodes n; auto-derived as ceil(max M / h) + 1 when
+        None, which covers every loss. A shorter explicit length is a
+        window, handled by ``overflow``.
+    method : {"survival", "quantiles"}, default "survival"
+        How the ``secondary`` grid is built. ``survival``: the portfolio
+        exceedance rate evaluated exactly at log-spaced nodes, interpolated
+        monotonically and bucketed by the nearest rule, each event's
+        endpoint handled per event (spec section 5A). ``quantiles``: K
+        midpoint beta quantiles per event, deposited by the linear rule
+        (spec section 5); it cuts every event's survival function at 1/(2K),
+        which loses expected loss at small alpha.
     quadrature_points : int, default 32
-        Number K of midpoint beta quantiles per nondegenerate event.
+        Number K of midpoint beta quantiles per nondegenerate event
+        (``quantiles`` method).
+    nodes_per_decade : int, optional
+        Node density of the ``survival`` method; the package default when
+        None.
+    overflow : {"top_bucket", "drop", "error"}, default "top_bucket"
+        What happens to mass above the top bucket's upper edge, (n - 1/2) h,
+        when ``grid_length`` is a window: added to the top node (rate exact,
+        mean understated), discarded (rate short), or a ``GridOverflowError``.
+        Either non-error policy reports the overflow's rate and displaced
+        moment in ``meta.rate_above_grid`` and ``meta.mean_above_grid``.
     normalize : bool, default False
         Divide both outputs by the total contributing rate.
     mean_is_loss_rate : bool, default False
         Interpret mean_loss as a rate on [0, 1], scaled by max_loss.
-    variance_policy : {"clamp", "error", "drop", "atom"}, default "clamp"
-        Treatment of rows with inadmissible beta variance.
-    clamp_factor : float, default 0.999
-        Clamp target as a fraction of the admissible sigma bound.
+    variance_policy : {"bernoulli", "error", "drop", "atom"}, default "bernoulli"
+        Treatment of rows with inadmissible beta variance, sigma^2 >= mu (M - mu).
+        ``bernoulli`` replaces the row by the variance maximizer on [0, M]:
+        two atoms, rate (1 - p) at 0 and rate p at M with p = mu / M, so the
+        rate and mean are exact. ``error`` raises; ``drop`` removes the row;
+        ``atom`` collapses it to an atom at mu. The ``clamp`` of versions
+        before 2.0.0 (sigma clamped to 0.999 of the bound) is refused.
     threads : int, optional
         Worker threads; None uses all cores. Results are bitwise identical
         for any thread count. Ignored by the reference backend.
@@ -234,6 +290,7 @@ def quantize_arrays(
         )
     )
     ids = list(event_ids) if event_ids is not None else None
+    density = _check_method_options(method, nodes_per_decade, overflow)
     common = {
         "bucket_size": bucket_size,
         "grid_length": grid_length,
@@ -241,14 +298,14 @@ def quantize_arrays(
         "normalize": normalize,
         "mean_is_loss_rate": mean_is_loss_rate,
         "variance_policy": variance_policy,
-        "clamp_factor": clamp_factor,
     }
+    survival = {"method": method, "nodes_per_decade": density, "overflow": overflow}
     if BACKEND == "rust":
         raw, secondary, meta_dict = _rust_quantize_arrays(
-            *cols, **common, threads=threads, chunk_rows=chunk_rows
+            *cols, **common, **survival, threads=threads, chunk_rows=chunk_rows
         )
         return raw, secondary, _build_meta(meta_dict, ids)
-    return _reference.quantize_reference(*cols, **common, event_ids=ids)
+    return _reference.quantize_reference(*cols, **common, **survival, event_ids=ids)
 
 
 def quantize_csv(
@@ -256,11 +313,13 @@ def quantize_csv(
     *,
     bucket_size,
     grid_length=None,
+    method="survival",
     quadrature_points=32,
+    nodes_per_decade=None,
+    overflow="top_bucket",
     normalize=False,
     mean_is_loss_rate=False,
-    variance_policy="clamp",
-    clamp_factor=0.999,
+    variance_policy="bernoulli",
     threads=None,
     chunk_rows=None,
     columns: dict[str, str] | None = None,
@@ -272,8 +331,10 @@ def quantize_csv(
     optional); ``columns`` maps canonical names to the actual header names,
     e.g. ``{"rate": "annual_rate"}``. Unparseable numeric cells become NaN
     and surface in the ``nonfinite`` diagnostic category. On the Rust backend
-    parsing and computation both run in Rust.
+    parsing and computation both run in Rust. Keywords are those of
+    ``quantize_arrays``.
     """
+    density = _check_method_options(method, nodes_per_decade, overflow)
     common = {
         "bucket_size": bucket_size,
         "grid_length": grid_length,
@@ -281,18 +342,17 @@ def quantize_csv(
         "normalize": normalize,
         "mean_is_loss_rate": mean_is_loss_rate,
         "variance_policy": variance_policy,
-        "clamp_factor": clamp_factor,
     }
+    survival = {"method": method, "nodes_per_decade": density, "overflow": overflow}
     if BACKEND == "rust":
         raw, secondary, meta_dict = _rust_quantize_csv(
-            path, **common, threads=threads, chunk_rows=chunk_rows,
+            path, **common, **survival, threads=threads, chunk_rows=chunk_rows,
             columns=columns,
         )
         return raw, secondary, _build_meta(meta_dict)
     data, ids = _read_csv_fallback(path, columns)
-    return _reference.quantize_reference(
-        *(data[key] for key in _CANONICAL_COLUMNS), **common, event_ids=ids
-    )
+    cols = tuple(data[key] for key in _CANONICAL_COLUMNS)
+    return _reference.quantize_reference(*cols, **common, **survival, event_ids=ids)
 
 
 def _quantize_source(source, options):
@@ -401,6 +461,170 @@ def quantize_dataframe(df, *, event_id_column: str = "event_id", **options):
         event_ids=event_ids,
         **options,
     )
+
+
+class ExceedanceCurve:
+    """The portfolio exceedance curve of an ELT (spec section 5A).
+
+    Built by ``exceedance_curve``. ``loss`` holds the nodes and
+    ``exceedance_rate`` the exact exceedance rate of the beta events at
+    them; ``atom_loss`` and ``atom_rate`` the atoms (degenerate rows, policy
+    atoms, both atoms of a Bernoulli row), which ``exceedance`` adds as
+    steps. ``meta`` is a ``CurveMeta``. A curve built once serves any number
+    of grids with ``bucket_size >= 2 min_loss``.
+    """
+
+    def __init__(self, backend, meta: CurveMeta):
+        self._backend = backend
+        self.meta = meta
+
+    @property
+    def loss(self) -> np.ndarray:
+        return np.asarray(self._backend.loss, dtype=np.float64)
+
+    @property
+    def exceedance_rate(self) -> np.ndarray:
+        return np.asarray(self._backend.exceedance_rate, dtype=np.float64)
+
+    @property
+    def atom_loss(self) -> np.ndarray:
+        return np.asarray(self._backend.atom_loss, dtype=np.float64)
+
+    @property
+    def atom_rate(self) -> np.ndarray:
+        return np.asarray(self._backend.atom_rate, dtype=np.float64)
+
+    def exceedance(self, x) -> np.ndarray:
+        """``Lambda(x)``, the rate of events with loss above ``x``, atoms
+        included; NaN below ``min_loss``, 0 above the largest loss."""
+        x = np.ascontiguousarray(x, dtype=np.float64)
+        return np.asarray(self._backend.exceedance(x.ravel()), dtype=np.float64).reshape(x.shape)
+
+    def grid(self, bucket_size, grid_length=None, *, normalize=False,
+             overflow="top_bucket"):
+        """The secondary grid at ``bucket_size`` (at least twice
+        ``min_loss``) with ``grid_length`` nodes, derived to cover the
+        largest loss when None, under the overflow policy; returns
+        ``(array, GridMeta)``."""
+        if overflow not in _OVERFLOW_POLICIES:
+            raise EltqError(
+                f"unknown overflow {overflow!r} (expected top_bucket, drop, or error)")
+        secondary, meta = self._backend.grid(
+            float(bucket_size), None if grid_length is None else int(grid_length),
+            normalize=bool(normalize), overflow=overflow)
+        if not isinstance(meta, GridMeta):
+            meta = GridMeta(**meta)
+        return np.asarray(secondary, dtype=np.float64), meta
+
+    def oep_pml(self, return_periods) -> np.ndarray:
+        """The occurrence exceedance loss at each return period ``T``
+        under Poisson occurrence: the loss ``x`` with
+        ``Lambda(x) = -log(1 - 1 / T)``, found by bisection in log loss
+        (an atom's loss when the step at that atom jumps the target). NaN
+        where the target rate exceeds ``Lambda(min_loss)``, that is, below
+        the curve's range; 0 for ``T <= 1``."""
+        t = np.ascontiguousarray(return_periods, dtype=np.float64)
+        shape = t.shape
+        t = t.ravel()
+        out = np.full(t.shape, np.nan)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            target = np.where(t > 1.0, -np.log1p(-1.0 / t), np.inf)
+        lo_x = self.meta.min_loss
+        hi_x = max(self.meta.max_loss, lo_x * (1.0 + 1e-12))
+        top = float(self.exceedance(np.array([lo_x]))[0])
+        solve = (t > 1.0) & (target <= top)
+        out[t <= 1.0] = 0.0
+        if not solve.any():
+            return out.reshape(shape)
+        lo = np.full(solve.sum(), np.log(lo_x))
+        hi = np.full(solve.sum(), np.log(hi_x))
+        goal = target[solve]
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            above = self.exceedance(np.exp(mid)) > goal
+            lo = np.where(above, mid, lo)
+            hi = np.where(above, hi, mid)
+            if np.all(hi - lo <= 1e-15 * np.abs(hi)):
+                break
+        # The bracket is a rounding step wide: an atom inside it is the
+        # step that jumps the target, and its loss is the answer.
+        x_lo, x_hi = np.exp(lo), np.exp(hi)
+        found = x_hi.copy()
+        atoms = np.sort(self.atom_loss)
+        if atoms.size:
+            i = np.minimum(np.searchsorted(atoms, x_lo, side="left"), atoms.size - 1)
+            inside = atoms[i] <= x_hi
+            found[inside] = atoms[i][inside]
+        out[solve] = found
+        return out.reshape(shape)
+
+
+def exceedance_curve(
+    rate,
+    max_loss,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    *,
+    min_loss,
+    nodes_per_decade=None,
+    mean_is_loss_rate=False,
+    variance_policy="bernoulli",
+    threads=None,
+    chunk_rows=None,
+    event_ids=None,
+) -> ExceedanceCurve:
+    """Build the portfolio exceedance curve of an ELT from ``min_loss`` up.
+
+    Parameters
+    ----------
+    rate, max_loss, mean_loss, sd_indep, sd_corr : array_like
+        The ELT columns, as for ``quantize_arrays``.
+    min_loss : float
+        The curve's lowest node, the smallest loss it answers for; a grid
+        made from it needs ``bucket_size >= 2 * min_loss``. Required: there
+        is no natural default.
+    nodes_per_decade : int, optional
+        Node density; the package default when None.
+    mean_is_loss_rate, variance_policy, threads, chunk_rows, event_ids
+        As for ``quantize_arrays``.
+
+    Returns
+    -------
+    ExceedanceCurve
+    """
+    cols = tuple(
+        _column(name, values)
+        for name, values in zip(
+            _CANONICAL_COLUMNS, (rate, max_loss, mean_loss, sd_indep, sd_corr)
+        )
+    )
+    ids = list(event_ids) if event_ids is not None else None
+    density = DEFAULT_NODES_PER_DECADE if nodes_per_decade is None else int(nodes_per_decade)
+    if density < 1:
+        raise EltqError(f"nodes_per_decade must be >= 1, got {nodes_per_decade}")
+    if _rust_exceedance_curve is not None:
+        backend = _rust_exceedance_curve(
+            *cols, min_loss=float(min_loss), nodes_per_decade=density,
+            mean_is_loss_rate=mean_is_loss_rate, variance_policy=variance_policy,
+            threads=threads, chunk_rows=chunk_rows,
+        )
+        meta_dict = backend.meta()
+        diagnostics = {}
+        for category, entry in meta_dict.pop("diagnostics").items():
+            examples = entry["examples"]
+            if ids is not None and examples:
+                examples = [ids[row] for row in examples]
+            diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
+        return ExceedanceCurve(backend, CurveMeta(diagnostics=diagnostics, **meta_dict))
+    from eltq import reference as _ref
+
+    backend, meta = _ref.exceedance_curve_reference(
+        *cols, min_loss=float(min_loss), nodes_per_decade=density,
+        mean_is_loss_rate=mean_is_loss_rate, variance_policy=variance_policy,
+        event_ids=ids,
+    )
+    return ExceedanceCurve(backend, meta)
 
 
 _MULTI_COLUMNS = ("event_id", "unit_id", "rate", "mean_loss", "sd_indep",

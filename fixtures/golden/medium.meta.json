@@ -8,9 +8,9 @@
   "raw_mass": 5.170967861486127,
   "raw_mean": 1754027.42806614,
   "secondary_mass": 5.170967861486094,
-  "secondary_mean": 1753463.7883678097,
-  "quadrature_secondary_mean": 1753463.7883678097,
-  "secondary_mean_error": -563.639698330313,
+  "secondary_mean": 1753338.0850620894,
+  "quadrature_secondary_mean": 1753338.0850620894,
+  "secondary_mean_error": -689.3430040506646,
   "input_rows": 5000,
   "valid_rows": 4909,
   "diagnostics": {
@@ -44,7 +44,7 @@
         "ev00740"
       ]
     },
-    "sigma_clamped": {
+    "variance_bernoulli": {
       "count": 189,
       "examples": [
         "ev00036",
@@ -60,8 +60,23 @@
       ]
     }
   },
+  "method": "quantiles",
+  "nodes": null,
+  "nodes_per_decade": null,
+  "interpolation_error": null,
+  "overflow": "top_bucket",
+  "rate_above_grid": {
+    "raw": 0.0,
+    "secondary": 0.0
+  },
+  "mean_above_grid": {
+    "raw": 0.0,
+    "secondary": 0.0
+  },
   "params": {
     "bucket_size": 5000.0,
+    "method": "quantiles",
     "quadrature_points": 32
-  }
+  },
+  "fixture": "medium"
 }

@@ -8,9 +8,9 @@
   "raw_mass": 0.15699999999999997,
   "raw_mean": 4.2451,
   "secondary_mass": 0.157,
-  "secondary_mean": 4.169460171800538,
-  "quadrature_secondary_mean": 4.169460171800538,
-  "secondary_mean_error": -0.07563982819946169,
+  "secondary_mean": 4.194460171800532,
+  "quadrature_secondary_mean": 4.194460171800532,
+  "secondary_mean_error": -0.05063982819946755,
   "input_rows": 17,
   "valid_rows": 16,
   "diagnostics": {
@@ -24,7 +24,7 @@
         "on_node"
       ]
     },
-    "sigma_clamped": {
+    "variance_bernoulli": {
       "count": 2,
       "examples": [
         "inadmissible_1",
@@ -38,8 +38,23 @@
       ]
     }
   },
+  "method": "quantiles",
+  "nodes": null,
+  "nodes_per_decade": null,
+  "interpolation_error": null,
+  "overflow": "top_bucket",
+  "rate_above_grid": {
+    "raw": 0.0,
+    "secondary": 0.0
+  },
+  "mean_above_grid": {
+    "raw": 0.0,
+    "secondary": 0.0
+  },
   "params": {
     "bucket_size": 0.5,
+    "method": "quantiles",
     "quadrature_points": 8
-  }
+  },
+  "fixture": "small"
 }

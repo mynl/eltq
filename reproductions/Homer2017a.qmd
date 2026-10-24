@@ -251,7 +251,7 @@ GT(shown, formatters=dict(zip(shown.columns, ['{x:,.0f}', '{x:.2f}', '{x:,.1f}',
                                               '{x:.4g}', '{x:.4g}', '{x:.4g}', '{x:,.1f}'])))
 ```
 
-Event 2 has $\sigma = 1{,}200$ against a bound of 1,187, and equation 33 gives $a = -0.00125$: no beta on $[0, 5000]$ has the moments the paper's Table 3 asks for. The default variance policy of `eltq` clamps $\sigma$ to 0.999 of the bound and flags the row in its `sigma_clamped` diagnostic. The beta that results, $\alpha = 0.00012$ and $\beta = 0.0019$, is for every practical purpose a loss of zero with probability 94% and of 5,000 with probability 6%. Events 1 and 3 are admissible, but with coefficients of variation of 2 and 3.5 their betas are U-shaped as well, with $\alpha = 0.19$ and $0.028$: most of the probability near zero, and the rest spread toward the exposure.
+Event 2 has $\sigma = 1{,}200$ against a bound of 1,187, and equation 33 gives $a = -0.00125$: no beta on $[0, 5000]$ has the moments the paper's Table 3 asks for. The default variance policy of `eltq` (from 2.0.0) replaces such a row by the two-point law that attains the bound, a loss of zero with probability 94% and of 5,000 with probability 6%, and flags it in its `variance_bernoulli` diagnostic; the chapter's figures were computed with the policy of 1.12.0, which clamped $\sigma$ to 0.999 of the bound and kept a beta with $\alpha = 0.00012$ and $\beta = 0.0019$, the same two atoms for every practical purpose. Events 1 and 3 are admissible, but with coefficients of variation of 2 and 3.5 their betas are U-shaped as well, with $\alpha = 0.19$ and $0.028$: most of the probability near zero, and the rest spread toward the exposure.
 
 ```{python}
 #| label: tbl-homer2017a-table10

@@ -695,5 +695,167 @@
       }
     },
     "peak_rss_mb": 230.9
+  },
+  {
+    "timestamp": "2026-10-24T09:05:35+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "mixture",
+    "rows": 1000000,
+    "bucket_size": 5000.0,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "1.15.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 1001,
+        "elapsed_s": 0.7841,
+        "rows_per_s": 1275393,
+        "secondary_mean_error_rel": -0.00025578863543973936,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 0.0,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 25,
+        "grid_length": 1001,
+        "elapsed_s": 0.45,
+        "rows_per_s": 2222143,
+        "secondary_mean_error_rel": -7.548113464449383e-05,
+        "interpolation_error": 0.00010903553462856355,
+        "nodes": 84,
+        "mass_error": 0.0,
+        "ratio_to_k32": 0.57
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 50,
+        "grid_length": 1001,
+        "elapsed_s": 0.6348,
+        "rows_per_s": 1575253,
+        "secondary_mean_error_rel": -6.735818004391356e-05,
+        "interpolation_error": 1.1694344930382236e-05,
+        "nodes": 167,
+        "mass_error": 0.0,
+        "ratio_to_k32": 0.81
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 100,
+        "grid_length": 1001,
+        "elapsed_s": 0.9624,
+        "rows_per_s": 1039061,
+        "secondary_mean_error_rel": -6.686867958378018e-05,
+        "interpolation_error": 2.8867433514045663e-06,
+        "nodes": 332,
+        "mass_error": 0.0,
+        "ratio_to_k32": 1.23
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 150,
+        "grid_length": 1001,
+        "elapsed_s": 1.3206,
+        "rows_per_s": 757212,
+        "secondary_mean_error_rel": -6.686068255393719e-05,
+        "interpolation_error": 1.5376495505723601e-06,
+        "nodes": 497,
+        "mass_error": 2.2737367544323206e-13,
+        "ratio_to_k32": 1.68
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "peak_working_set_mb": 137.3
+  },
+  {
+    "timestamp": "2026-10-24T09:06:14+00:00",
+    "suite": "survival_sweep",
+    "portfolio": "small_alpha",
+    "rows": 1000000,
+    "bucket_size": 100.0,
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "1.15.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "runs": [
+      {
+        "method": "quantiles",
+        "quadrature_points": 32,
+        "grid_length": 10001,
+        "elapsed_s": 1.0057,
+        "rows_per_s": 994288,
+        "secondary_mean_error_rel": -0.20473953881133802,
+        "interpolation_error": null,
+        "nodes": null,
+        "mass_error": 5.638867150992155e-11,
+        "ratio_to_k32": 1.0
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 25,
+        "grid_length": 10001,
+        "elapsed_s": 1.4703,
+        "rows_per_s": 680144,
+        "secondary_mean_error_rel": -0.005993396302190889,
+        "interpolation_error": 7.886620999672975e-06,
+        "nodes": 109,
+        "mass_error": 0.0,
+        "ratio_to_k32": 1.46
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 50,
+        "grid_length": 10001,
+        "elapsed_s": 1.7558,
+        "rows_per_s": 569527,
+        "secondary_mean_error_rel": -0.005991606243416769,
+        "interpolation_error": 4.872528029095652e-07,
+        "nodes": 217,
+        "mass_error": 2.2737367544323206e-13,
+        "ratio_to_k32": 1.75
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 100,
+        "grid_length": 10001,
+        "elapsed_s": 2.6636,
+        "rows_per_s": 375429,
+        "secondary_mean_error_rel": -0.005991493537514686,
+        "interpolation_error": 1.2661134433046237e-06,
+        "nodes": 432,
+        "mass_error": 0.0,
+        "ratio_to_k32": 2.65
+      },
+      {
+        "method": "survival",
+        "nodes_per_decade": 150,
+        "grid_length": 10001,
+        "elapsed_s": 3.6376,
+        "rows_per_s": 274905,
+        "secondary_mean_error_rel": -0.005991487543942978,
+        "interpolation_error": 1.0234815786194525e-06,
+        "nodes": 647,
+        "mass_error": 0.0,
+        "ratio_to_k32": 3.62
+      }
+    ],
+    "determinism_bitwise_across_threads": true,
+    "peak_working_set_mb": 150.5
   }
 ]

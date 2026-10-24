@@ -144,6 +144,7 @@ pub fn prepare_unit(
                 plan.sigma_used = sigma;
                 plan.notes.push("sigma_clamped");
             }
+            VariancePolicy::Bernoulli => return Err(Error::BernoulliPolicyUnavailable),
         }
     }
     let (alpha, beta) = beta_params(m, mu, sigma * sigma);
@@ -238,6 +239,7 @@ pub fn classify_unit_row(
                     sigma: factor * v_max.sqrt(),
                 })
             }
+            VariancePolicy::Bernoulli => Err(Error::BernoulliPolicyUnavailable),
         };
     }
     Ok(RowClass {
@@ -472,7 +474,7 @@ impl JointConfig {
             n2,
             z_nodes: 1001,
             z_rule: ZRule::Midpoint,
-            variance_policy: VariancePolicy::default(),
+            variance_policy: VariancePolicy::clamp_default(),
         }
     }
 }
@@ -680,9 +682,14 @@ mod tests {
             prepare_unit(&bad, "u", VariancePolicy::Error),
             Err(Error::UnitInadmissibleVariance { .. })
         ));
-        let clamped = prepare_unit(&bad, "u", VariancePolicy::default()).unwrap();
+        let clamped = prepare_unit(&bad, "u", VariancePolicy::clamp_default()).unwrap();
         assert_eq!(clamped.notes, vec!["sigma_clamped"]);
         assert!(clamped.sigma_used < (30.0_f64 * 70.0).sqrt());
+        // The Bernoulli treatment belongs to the one-row route for now.
+        assert!(matches!(
+            prepare_unit(&bad, "u", VariancePolicy::Bernoulli),
+            Err(Error::BernoulliPolicyUnavailable)
+        ));
         assert_eq!(prepare_unit(&bad, "u", VariancePolicy::Atom).unwrap().kind, UnitKind::Atom);
         assert_eq!(prepare_unit(&bad, "u", VariancePolicy::Drop).unwrap().kind, UnitKind::Drop);
         assert!(matches!(

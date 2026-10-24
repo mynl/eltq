@@ -88,7 +88,7 @@ def test_normalize(impl):
 
 def test_k_equals_one_uses_median(impl):
     raw, secondary, meta = run(impl, elt([GOOD]), bucket_size=0.5,
-                               quadrature_points=1)
+                               quadrature_points=1, method="quantiles")
     assert math.isclose(secondary.sum(), GOOD[0], rel_tol=1e-12)
     # Single quadrature point is the conditional median, not the mean.
     median = float(secondary @ grid_of(meta)) / GOOD[0]
@@ -109,14 +109,16 @@ def test_empty_input(impl):
     assert raw.sum() == 0.0 and secondary.sum() == 0.0
 
 
-def test_clamped_rows_conserve_mass_and_stay_finite(impl):
-    # sigma far beyond admissible: clamp produces an extreme U-shaped beta.
+def test_far_inadmissible_rows_are_bernoulli(impl):
+    # sigma far beyond admissible: the Bernoulli pair carries the rate.
     rows = [(0.01, 1000.0, 300.0, 900.0, 0.0)]
     raw, secondary, meta = run(impl, elt(rows), bucket_size=1.0)
-    assert diag_count(meta, "sigma_clamped") == 1
+    assert diag_count(meta, "variance_bernoulli") == 1
     assert np.isfinite(secondary).all()
     assert (secondary >= 0.0).all()
     assert math.isclose(secondary.sum(), 0.01, rel_tol=1e-12)
+    assert math.isclose(secondary[0], 0.01 * 0.7, rel_tol=1e-15)
+    assert math.isclose(secondary[1000], 0.01 * 0.3, rel_tol=1e-15)
 
 
 def test_bad_config_rejected(impl):
@@ -129,3 +131,9 @@ def test_bad_config_rejected(impl):
         run(impl, good, bucket_size=1.0, variance_policy="nonsense")
     with pytest.raises(impl.base_error):
         run(impl, good, bucket_size=1.0, grid_length=0)
+    with pytest.raises(impl.base_error):
+        run(impl, good, bucket_size=1.0, method="nonsense")
+    with pytest.raises(impl.base_error):
+        run(impl, good, bucket_size=1.0, overflow="nonsense")
+    with pytest.raises(impl.base_error):
+        run(impl, good, bucket_size=1.0, method="survival", nodes_per_decade=0)

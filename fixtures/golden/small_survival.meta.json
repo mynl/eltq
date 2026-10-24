@@ -1,0 +1,59 @@
+{
+  "bucket_size": 0.5,
+  "grid_length": 201,
+  "quadrature_points": null,
+  "normalized": false,
+  "total_rate": 0.157,
+  "analytic_aal": 4.2451,
+  "raw_mass": 0.15699999999999997,
+  "raw_mean": 4.2451,
+  "secondary_mass": 0.157,
+  "secondary_mean": 4.245011304074607,
+  "quadrature_secondary_mean": null,
+  "secondary_mean_error": -8.869592539273441e-05,
+  "input_rows": 17,
+  "valid_rows": 16,
+  "diagnostics": {
+    "degenerate_atom": {
+      "count": 5,
+      "examples": [
+        "sigma_zero",
+        "mu_zero",
+        "mu_max",
+        "m_zero",
+        "on_node"
+      ]
+    },
+    "variance_bernoulli": {
+      "count": 2,
+      "examples": [
+        "inadmissible_1",
+        "inadmissible_2"
+      ]
+    },
+    "zero_rate": {
+      "count": 1,
+      "examples": [
+        "zero_rate"
+      ]
+    }
+  },
+  "method": "survival",
+  "nodes": 262,
+  "nodes_per_decade": 100,
+  "interpolation_error": 0.00019158809271853957,
+  "overflow": "top_bucket",
+  "rate_above_grid": {
+    "raw": 0.0,
+    "secondary": 0.0
+  },
+  "mean_above_grid": {
+    "raw": 0.0,
+    "secondary": 0.0
+  },
+  "params": {
+    "bucket_size": 0.5,
+    "method": "survival"
+  },
+  "fixture": "small"
+}

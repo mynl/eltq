@@ -1,5 +1,7 @@
 //! Per-category row diagnostics and result metadata.
 
+use crate::config::{Method, Overflow};
+
 /// Maximum number of representative row indices retained per category.
 pub const MAX_EXAMPLES: usize = 10;
 
@@ -23,10 +25,12 @@ pub enum Category {
     VarianceDropped,
     /// Inadmissible variance collapsed to an atom by policy.
     VarianceAtom,
+    /// Inadmissible variance replaced by the Bernoulli maximizer (two atoms).
+    VarianceBernoulli,
 }
 
 impl Category {
-    pub const ALL: [Category; 8] = [
+    pub const ALL: [Category; 9] = [
         Category::Nonfinite,
         Category::NegativeField,
         Category::MeanExceedsMax,
@@ -35,6 +39,7 @@ impl Category {
         Category::SigmaClamped,
         Category::VarianceDropped,
         Category::VarianceAtom,
+        Category::VarianceBernoulli,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -47,6 +52,7 @@ impl Category {
             Category::SigmaClamped => "sigma_clamped",
             Category::VarianceDropped => "variance_dropped",
             Category::VarianceAtom => "variance_atom",
+            Category::VarianceBernoulli => "variance_bernoulli",
         }
     }
 }
@@ -71,7 +77,7 @@ impl RowIssues {
 /// callers holding event ids translate at the API boundary.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Diagnostics {
-    issues: [RowIssues; 8],
+    issues: [RowIssues; 9],
 }
 
 impl Diagnostics {
@@ -109,12 +115,23 @@ impl Diagnostics {
 /// Metadata accompanying the two grid distributions. Masses and means
 /// describe the arrays actually returned (normalized when `normalized`);
 /// `total_rate`, `analytic_aal`, `quadrature_secondary_mean` and
-/// `secondary_mean_error` are always in rate-weighted units.
+/// `secondary_mean_error` are always in rate-weighted units, the last being
+/// the secondary grid's first moment less the analytic AAL under either
+/// method. The quantiles fields are `None` under the survival method and
+/// the survival fields `None` under the quantiles method. Overflow figures
+/// are `[raw, secondary]`.
 #[derive(Debug, Clone)]
 pub struct Meta {
     pub bucket_size: f64,
     pub grid_length: usize,
-    pub quadrature_points: usize,
+    pub method: Method,
+    pub quadrature_points: Option<usize>,
+    pub nodes: Option<usize>,
+    pub nodes_per_decade: Option<usize>,
+    pub interpolation_error: Option<f64>,
+    pub overflow: Overflow,
+    pub rate_above_grid: [f64; 2],
+    pub mean_above_grid: [f64; 2],
     pub normalized: bool,
     pub total_rate: f64,
     pub analytic_aal: f64,
@@ -122,7 +139,7 @@ pub struct Meta {
     pub raw_mean: f64,
     pub secondary_mass: f64,
     pub secondary_mean: f64,
-    pub quadrature_secondary_mean: f64,
+    pub quadrature_secondary_mean: Option<f64>,
     pub secondary_mean_error: f64,
     pub input_rows: usize,
     pub valid_rows: usize,

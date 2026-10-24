@@ -3,7 +3,8 @@
 Run from the repository root (release wheel installed by `uv sync`):
 
     uv run python benchmarks/run_end_to_end.py [--rows 1000000] [--quick]
-        [--scratch-dir PATH]
+        [--scratch-dir PATH] [--method quantiles|survival]
+        [--nodes-per-decade N] [--survival-sweep] [--small-alpha]
 
 Generates a seeded synthetic portfolio ELT (mixture of well-conditioned,
 skewed alpha < 1, concentrated large-parameter, degenerate, inadmissible and
@@ -16,7 +17,12 @@ prints a summary, and appends a machine-readable record to
 - non-kernel overhead (same rows with sigma = 0: validation + deposits only);
 - CSV route (parse + compute) and memory-mapped .npy output;
 - SciPy reference throughput on a subsample, extrapolated for the speedup;
-- bitwise determinism check across thread counts.
+- bitwise determinism check across thread counts;
+- with ``--survival-sweep``, the survival method at 25, 50, 100 and 150
+  nodes per decade against the quantiles method at K = 32, on the mixture
+  portfolio and (``--small-alpha``) on a small-alpha portfolio with the
+  recipe of ``fixtures/small_alpha_elt.csv`` at scale, recording the
+  interpolation error and the secondary mean error of each.
 
 Scratch files (the benchmark CSV) go to --scratch-dir, defaulting to the
 system temp dir; keep them off Synology-synced folders.
@@ -91,6 +97,32 @@ def synthetic_elt(n: int) -> dict[str, np.ndarray]:
     }
 
 
+def small_alpha_elt(n: int) -> dict[str, np.ndarray]:
+    """Small-alpha portfolio at scale: the recipe of the test fixture
+    (alpha loguniform on [0.003, 3], M / mu on [1e2, 1e4] with a tenth of
+    the rows at 1e5), ground-up rows only."""
+    rng = np.random.default_rng(SEED + 1)
+    m = np.exp(rng.uniform(np.log(1e4), np.log(1e6), size=n))
+    ratio = np.exp(rng.uniform(np.log(1e2), np.log(1e4), size=n))
+    deep = rng.random(n) < 0.1
+    m[deep] = 1e6
+    ratio[deep] = 1e5
+    alpha = np.exp(rng.uniform(np.log(0.003), np.log(3.0), size=n))
+    lam = np.exp(rng.uniform(np.log(1e-5), np.log(1e-2), size=n))
+    p = 1.0 / ratio
+    kappa = alpha / p
+    v = p * (1.0 - p) / (kappa + 1.0)
+    sigma = m * np.sqrt(v)
+    share = rng.uniform(0.0, 1.0, size=n)
+    return {
+        "rate": lam,
+        "max_loss": m,
+        "mean_loss": p * m,
+        "sd_indep": sigma * share,
+        "sd_corr": sigma * (1.0 - share),
+    }
+
+
 def cols_tuple(cols: dict[str, np.ndarray]) -> tuple:
     return (cols["rate"], cols["max_loss"], cols["mean_loss"],
             cols["sd_indep"], cols["sd_corr"])
@@ -114,7 +146,7 @@ def beta_row_count(meta) -> int:
         for category, issues in meta.diagnostics.items()
         if category in ("nonfinite", "negative_field", "mean_exceeds_max",
                         "zero_rate", "degenerate_atom", "variance_dropped",
-                        "variance_atom")
+                        "variance_atom", "variance_bernoulli")
     )
     return meta.input_rows - skipped
 
@@ -185,6 +217,63 @@ def scipy_reference_rate(cols: dict, subsample: int, params: dict) -> float:
     return subsample / elapsed
 
 
+def survival_sweep(args) -> None:
+    """Survival at four node densities against quantiles at K = 32, on the
+    mixture portfolio or the small-alpha one; appends a ``survival_sweep``
+    record to the results history."""
+    label = "small_alpha" if args.small_alpha else "mixture"
+    print(f"generating {args.rows:,} {label} rows ...")
+    cols = small_alpha_elt(args.rows) if args.small_alpha else synthetic_elt(args.rows)
+    h = HEADLINE["bucket_size"] if not args.small_alpha else 100.0
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "suite": "survival_sweep",
+        "portfolio": label,
+        "rows": args.rows,
+        "bucket_size": h,
+        "machine": machine_info(),
+        "runs": [],
+    }
+    configs = [{"method": "quantiles", "quadrature_points": 32}]
+    configs += [{"method": "survival", "nodes_per_decade": d} for d in (25, 50, 100, 150)]
+    base = None
+    for params in configs:
+        elapsed, (raw, secondary, meta) = timed(
+            lambda p=params: eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, **p),
+            repeats=2,
+        )
+        run = {
+            **params,
+            "grid_length": meta.grid_length,
+            "elapsed_s": round(elapsed, 4),
+            "rows_per_s": round(args.rows / elapsed),
+            "secondary_mean_error_rel": meta.secondary_mean_error / meta.analytic_aal,
+            "interpolation_error": meta.interpolation_error,
+            "nodes": meta.nodes,
+            "mass_error": abs(meta.secondary_mass - meta.total_rate),
+        }
+        if params["method"] == "quantiles":
+            base = elapsed
+            run["ratio_to_k32"] = 1.0
+        else:
+            run["ratio_to_k32"] = round(elapsed / base, 2)
+        record["runs"].append(run)
+        density = params.get("nodes_per_decade", "-")
+        print(f"{params['method']:>9} density={density:>4}: {elapsed:7.3f} s "
+              f"({run['ratio_to_k32']:>5}x K=32)  mean err {run['secondary_mean_error_rel']:+.2e}  "
+              f"interp err {meta.interpolation_error if meta.interpolation_error is not None else float('nan'):.1e}  "
+              f"nodes {meta.nodes}  n={meta.grid_length}")
+    r1, s1, _ = eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, method="survival", threads=1)
+    r2, s2, _ = eltq.quantize_arrays(*cols_tuple(cols), bucket_size=h, method="survival")
+    record["determinism_bitwise_across_threads"] = bool(np.array_equal(r1, r2) and np.array_equal(s1, s2))
+    print(f"bitwise deterministic across threads (survival): {record['determinism_bitwise_across_threads']}")
+    record["peak_working_set_mb"] = peak_working_set_mb()
+    history = json.loads(RESULTS_PATH.read_text(encoding="utf-8")) if RESULTS_PATH.exists() else []
+    history.append(record)
+    RESULTS_PATH.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    print(f"appended record to {RESULTS_PATH}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=1_000_000)
@@ -193,7 +282,21 @@ def main() -> None:
     parser.add_argument("--scratch-dir", type=Path,
                         default=Path(tempfile.gettempdir()))
     parser.add_argument("--scipy-subsample", type=int, default=20_000)
+    parser.add_argument("--method", choices=["quantiles", "survival"],
+                        default="quantiles",
+                        help="method for the standard runs")
+    parser.add_argument("--nodes-per-decade", type=int, default=None,
+                        help="survival node density for the standard runs")
+    parser.add_argument("--survival-sweep", action="store_true",
+                        help="survival at 25/50/100/150 nodes per decade "
+                             "against quantiles at K = 32, then stop")
+    parser.add_argument("--small-alpha", action="store_true",
+                        help="use the small-alpha portfolio for the sweep")
     args = parser.parse_args()
+
+    if args.survival_sweep:
+        survival_sweep(args)
+        return
 
     print(f"generating {args.rows:,} synthetic rows ...")
     cols = synthetic_elt(args.rows)
@@ -206,10 +309,13 @@ def main() -> None:
 
     # In-memory configurations.
     configs = [HEADLINE] if args.quick else CONFIGS
+    method = {"method": args.method}
+    if args.nodes_per_decade is not None:
+        method["nodes_per_decade"] = args.nodes_per_decade
     headline_rate = None
     for params in configs:
         elapsed, (raw, secondary, meta) = timed(
-            lambda p=params: eltq.quantize_arrays(*cols_tuple(cols), **p),
+            lambda p=params: eltq.quantize_arrays(*cols_tuple(cols), **p, **method),
             repeats=2,
         )
         kernel_rows = beta_row_count(meta)
@@ -217,6 +323,7 @@ def main() -> None:
         run = {
             "kind": "in_memory",
             **params,
+            **method,
             "grid_length": meta.grid_length,
             "elapsed_s": round(elapsed, 4),
             "rows_per_s": round(args.rows / elapsed),

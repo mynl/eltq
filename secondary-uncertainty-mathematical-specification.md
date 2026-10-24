@@ -2,11 +2,11 @@
 
 ## Problem and mathematical specification
 
-Date: 2026-08-14
+Date: 2026-08-14; amended 2026-10-24 for the survival method, the Bernoulli treatment of inadmissible rows and the overflow policies (`dev/done/plan-single-unit-survival-route.md`).
 
 ## 1. Purpose
 
-We require a utility that converts a portfolio event loss table (ELT) into two discrete, evenly spaced, rate-weighted severity distributions. The first distribution represents the original ELT, in which each event produces its conditional mean loss. The second incorporates secondary uncertainty by replacing each conditional mean with a bounded beta severity distribution and approximating that distribution by midpoint quantiles. Both versions are then mapped to the same loss grid using a linear interpolation rule.
+We require a utility that converts a portfolio event loss table (ELT) into two discrete, evenly spaced, rate-weighted severity distributions. The first distribution represents the original ELT, in which each event produces its conditional mean loss. The second incorporates secondary uncertainty by replacing each conditional mean with a bounded beta severity distribution. That distribution is discretized either through the portfolio exceedance rate, evaluated exactly and bucketed onto the grid (section 5A, the default), or by midpoint quantiles mapped to the grid by a linear interpolation rule (section 5). The raw distribution and every atom use the linear rule.
 
 The utility is intended for portfolio-level ELTs, potentially containing approximately one million rows. It is not intended to reconstruct secondary uncertainty from individual locations or policies. The specification describes an RMS-style mathematical transformation based on the fields supplied in a portfolio ELT; it does not claim to reproduce any proprietary model implementation whose undocumented conventions may differ.
 
@@ -87,7 +87,15 @@ or, equivalently,
 $$
 0<\sigma_j^2<\mu_j(M_j-\mu_j).
 $$
-The boundary cases require explicit treatment. If $\sigma_j=0$, the conditional distribution is the atom $X_j=\mu_j$. If $\mu_j=0$, admissibility requires $X_j=0$ almost surely; if $\mu_j=M_j$, admissibility requires $X_j=M_j$ almost surely. A row whose stated variance violates the bounded-variance condition is inconsistent with the beta model and must not be silently altered. The utility must either reject the row or apply a separately selected and fully reported repair policy.
+The boundary cases require explicit treatment. If $\sigma_j=0$, the conditional distribution is the atom $X_j=\mu_j$. If $\mu_j=0$, admissibility requires $X_j=0$ almost surely; if $\mu_j=M_j$, admissibility requires $X_j=M_j$ almost surely.
+
+The variance bound is a property of the support, not of the beta family. On $[0,M]$, $X^2\le MX$, so $\operatorname{Var}X\le M\mu-\mu^2=\mu(M-\mu)$, with equality only when $X^2=MX$ almost surely, that is, for the Bernoulli law on $\{0,M\}$ with $\mathsf P(X=M)=\mu/M$. A row with $\sigma_j^2\ge\mu_j(M_j-\mu_j)$ therefore asserts a variance that no distribution on $[0,M_j]$ can have. It must not be silently altered; the utility applies one selected and fully reported policy:
+
+- `bernoulli` (the default from 1.13.0): the row becomes the variance maximizer, two atoms with rates $\lambda_j(1-p_j)$ at $0$ and $\lambda_jp_j$ at $M_j$, where $p_j=\mu_j/M_j$. Its rate and mean are exact and its variance is the admissible supremum. Reported under `variance_bernoulli`.
+- `error`: the row is rejected with a typed error.
+- `drop`: the row is removed from both outputs. Reported under `variance_dropped`.
+- `atom`: the row contributes a single atom at $\mu_j$. Reported under `variance_atom`.
+- `clamp`: the default until 1.12.0, which set $\sigma_j=0.999\sqrt{\mu_j(M_j-\mu_j)}$ and kept the row as a beta. That beta has $\alpha_j+\beta_j\approx0.002$, the Bernoulli to double precision except that about 5% of its upper mass is smeared across the interior, and the 0.999 is an arbitrary constant standing in for the maximizer. Removed from the one-row route at 2.0.0; the multi-unit route keeps it until that route adopts the Bernoulli treatment.
 
 ## 5. Midpoint-quantile approximation
 
@@ -114,17 +122,63 @@ need not equal $\mu_j$ exactly. The utility must report the resulting first-mome
 
 The calculation involves inverse regularized incomplete-beta evaluations. Referring to them as inverse-gamma evaluations is a transcription error, although random beta sampling can alternatively be expressed using two gamma variates. The required midpoint-quantile rule is deterministic and is defined through the beta quantile function.
 
+The midpoint-quantile rule is the `quantiles` method, selectable but not the default from 2.0.0. The fraction of event $j$'s $K$ points above a loss $x$ is the number of $k$ with $u_k>F_j(x)$ divided by $K$, which is $KS_j(x)$ rounded to the nearest integer and divided by $K$, where $S_j=1-F_j$ is the conditional survival function. The rule therefore sets every event's survival function to zero wherever it is below $1/(2K)$: at $K=32$ an event is cut off above its $1-1/64$ quantile. For a beta with small $\alpha_j$ most of the probability sits near zero and much of the mean sits in an upper tail of small probability, exactly where the rule puts nothing, and the loss of expected value falls only in proportion to $1/K$. Section 5A gives the default method, which has no such cut.
+
+## 5A. Survival-function discretization
+
+The default method (`survival`, from 2.0.0) discretizes the secondary severity measure through the portfolio exceedance rate rather than through per-event points. Split the contributing rows of section 4 into atoms (degenerate rows, rows made atoms by policy, and both atoms of a Bernoulli row) and betas. For the betas define
+$$
+\Lambda(x)=\sum_{j\ \text{beta}}\lambda_jS_j(x),
+\qquad
+\Lambda'(x)=-\sum_{j\ \text{beta}}\frac{\lambda_j}{M_j}f_j\!\left(\frac{x}{M_j}\right),
+$$
+where $S_j(x)=1-I_{x/M_j}(\alpha_j,\beta_j)$ is the conditional survival function of $X_j$ and $f_j$ the density of $\operatorname{Beta}(\alpha_j,\beta_j)$. $\Lambda$ is nonincreasing and adds over events, so contributions computed separately, by chunk or by a later route, combine on common nodes.
+
+**Nodes.** $\Lambda$ is built on nodes $x_0<x_1<\dots<x_m$ spaced geometrically from a lower loss $x_0$ to $x_m=\max_jM_j$, at a density of `nodes_per_decade` nodes per decade; the default density, 100, is the smallest whose exact-edge error is within $10^{-4}$ on every benchmark portfolio (`benchmarks/report-1.16.0.md`). $x_0$ is the smallest loss the consumer uses: for the even grid of section 6 it is $e_0=h/2$. The survival value and the slope share the factor $x^{\alpha}(1-x)^{\beta}/B(\alpha,\beta)$ of the incomplete-beta continued fraction, so the slope costs little beyond the value. A node below $M_j\exp\{[\ln u+\ln\alpha_j+\ln B(\alpha_j,\beta_j)]/\alpha_j\}$, the closed-form lower-tail quantile at a probability $u$ small enough that $F_j<2^{-54}$ there, contributes exactly $\lambda_j$ to $\Lambda$ in double precision, and its contribution to $\Lambda'$, below the rounding of $\Lambda$, is dropped.
+
+**Truncation.** Every survival function has an infinite slope in $\log x$ at its endpoint $M_j$, and the sum of such endings on shared nodes is not interpolable in $x$ wherever one event, or several ending together, carry much of $\Lambda$: measured on this project's own medium golden and benchmark portfolio, a pure interpolant missed by 1% at the 100-year level and by factors in the tail (execution log of `dev/done/plan-single-unit-survival-route.md`). Each event is therefore split at its **truncation node** $x_{k_j}$, the node $Z$ intervals below the first node at or above $M_j$ ($Z=4$, the constant `TAIL_INTERVALS`). The **curve**
+$$
+\tilde\Lambda(x)=\sum_{j\ \text{beta}}\lambda_j\bigl(S_j(x)-S_j(x_{k_j})\bigr)^+
+$$
+carries each event up to its truncation node, where its contribution vanishes continuously, and the **tail**, the mass $\lambda_jS_j(x_{k_j})$ on $(x_{k_j},M_j]$, stays with the event. $\tilde\Lambda$ and its slope $-x\tilde\Lambda'(x)$ are evaluated exactly at the nodes; the slope at a node is one-sided, an event's slope at its truncation node counting on the incoming interval only. An event whose truncation node would lie below $x_0$ is a tail from $x_0$. So $\Lambda(x)=\tilde\Lambda(x)+\sum_{j:\,x<x_{k_j}}\lambda_jS_j(x_{k_j})+\sum_{j:\,x_{k_j}\le x<M_j}\lambda_jS_j(x)$, the last sum over the few events whose tail interval contains $x$.
+
+**Interpolation of the curve.** Between nodes $\tilde\Lambda$ is a cubic Hermite interpolant in $x$ with the exact one-sided slopes, limited by the Fritsch and Carlson conditions so that it never increases: on an interval whose secant slope is zero both end slopes are set to zero, and otherwise the two end slopes $a$ and $b$, in units of the secant slope, are scaled down together whenever $a^2+b^2>9$. Above the last node $\tilde\Lambda=0$. A log-log interpolant was planned and rejected: near a node where several truncated survival functions vanish together the logarithm magnifies the curvature, and it missed by $10^{-2}$ where the plain cubic is within $10^{-5}$. The interpolation error is a reported diagnostic: the exact $\tilde\Lambda$ at 64 log-midpoints spread over the node range against the interpolant, as the largest error relative to the exact $\Lambda$ where $\Lambda>10^{-12}\sum_j\lambda_j$. It is a sample, not a bound; the reference implementation can check every interval midpoint.
+
+**The tails.** Near its endpoint a beta's survival is $S_j(x)=(1-y)^{\beta_j}R_j(y)$ with $R_j$ analytic and nonzero at $y=1$, so $\log S_j$ is nearly linear in $u=\log(M_j-x)$. On its tail interval each event's survival is a monotone cubic Hermite in $u$ with the exact slopes $(1-y)f_j(y)/S_j(y)$, on nodes shrinking the distance to the endpoint by $\sqrt2$ per step from $M_j-x_{k_j}$ down to $x_0/2$, and the exact power law $S_j\propto(M_j-x)^{\beta_j}$ below the last node. The first node's value is the exact $S_j(x_{k_j})$, so the tail joins the curve exactly. This costs about $2\log_2\bigl((M_j-x_{k_j})/x_0\bigr)$ exact evaluations per event plus one cubic per bucket edge inside the tail interval, and follows the survival to a few units in $10^{-6}$ where no interpolant in $x$ can.
+
+**Bucketing (the nearest rule).** With the even grid of section 6 and the half-bucket edges $e_i=(i+\tfrac12)h$, the beta part of the secondary grid is
+$$
+p_0=\sum_{j\ \text{beta}}\lambda_j-\tilde\Lambda(e_0)-\sum_j\lambda_jS_j(x_{k_j}),
+\qquad
+p_i=\tilde\Lambda(e_{i-1})-\tilde\Lambda(e_i)+\sum_{j}\lambda_j\bigl(S_j(e_{i-1})-S_j(e_i)\bigr)\quad(1\le i\le n-1),
+$$
+the last sum over the events whose tail interval meets $(e_{i-1},e_i]$ (with $S_j$ read as $S_j(x_{k_j})$ below the tail interval and $0$ above $M_j$), and the overflow of section 6 is $\tilde\Lambda(e_{n-1})$ plus the tails beyond $e_{n-1}$, its first moment by partial expectations. Atoms are deposited by the linear rule of section 6 as before. Every $p_i\ge0$ because both interpolants are monotone, and the total rate is exact because the sums telescope. Measured on 2026-10-24 (reference implementation, 150 nodes per decade): the bucketed tail sums against the exact $\Lambda$ at every bucket edge where $\Lambda>10^{-12}\sum_j\lambda_j$ are within $4\times10^{-6}$ on the small-alpha fixture, $1.1\times10^{-5}$ on the medium golden and $1.1\times10^{-5}$ on the benchmark portfolio; with nodes alone and a log-log interpolant the same figures were 270, 0.78 and 7.0. The first moment is not exact. In the interior the bucketing error is of order $h^2$ times the slope of the density; from bucket 0, whose mass sits at loss 0, it is $\sum_j\lambda_j\int_0^{h/2}x\,dF_j\approx\sum_j\lambda_j\frac{\alpha_j}{\alpha_j+1}\frac h2F_j(h/2)$, first order in $h$ for $\alpha_j<1$. Both are reported through the secondary mean error of section 7. The linear rule, exact in the mean, was considered and rejected: it inflates the variance of every unit of mass by about $h^2/6$ against the nearest rule's $h^2/12$ (Sheppard's correction), an illusion of exactness. The nearest rule is also the rule the multi-unit route uses for beta units.
+
+**The curve as the primary object.** The nodes cover every loss up to $\max_jM_j$ in about `nodes_per_decade` $\times\log_{10}(\max_jM_j/x_0)$ points, whatever $h$ is. The even grid is made from the curve only when needed, at any $h\ge2x_0$ and any $n$, and the occurrence exceedance probability comes straight from it under Poisson occurrence,
+$$
+\operatorname{OEP}(x)=1-\exp\{-\Lambda(x)-\Lambda_{\text{atoms}}(x)\},
+$$
+where $\Lambda_{\text{atoms}}(x)$ is the total rate of the atoms above $x$. The utility exposes the curve with its atoms so that the OEP points need no grid.
+
+**Determinism and cost.** Rows are processed in fixed chunks; each chunk's partial $\tilde\Lambda$ and slope vectors, and its tail deposits, are folded in chunk order with compensated sums, so results are bitwise identical for any thread count at a fixed chunk size. The cost is one incomplete beta and one density per event per active node, plus the tail work above, several times the cost of the quantiles method at $K=32$; the benchmark report records the measured figures and the chosen default density.
+
 ## 6. Even loss grid and linear discretization
 
 Let the output grid have constant spacing $h>0$ and nodes
 $$
 g_i=ih,\qquad i=0,\ldots,n-1.
 $$
-The configured grid must cover every loss that can be generated, normally by requiring
+When the grid length is derived from the input it covers every loss that can be generated,
 $$
 (n-1)h\geq\max_j M_j.
 $$
-If the grid does not cover the full input support, the utility must stop with a clear error unless the caller has explicitly selected and named an overflow policy. Silent truncation, capping or wraparound is unacceptable.
+A caller may instead ask for a window, a grid length short of that bound, for example because the exposed values run to tens of billions while the losses that matter sit far lower. The rate beyond the top bucket's upper edge $e_{n-1}=(n-\tfrac12)h$ is then the **overflow**: for the survival method $\Lambda(e_{n-1})$ plus the atoms above $e_{n-1}$, for the quantiles method and for the raw output the weight of the points above $e_{n-1}$. A point in $(g_{n-1},e_{n-1}]$ is assigned wholly to $g_{n-1}$, the linear rule having no upper node there. The overflow is handled by a named policy, applied to both outputs and both methods (from 2.0.0; before that the grid had to cover $\max_jM_j$ or the utility stopped with an error):
+
+- `top_bucket` (default): the overflow is added to the top node $g_{n-1}$. The rate is exact, so a Poisson frequency fed from it is unchanged; the occurrence exceedance is exact for every $x\le e_{n-2}$; the first moment is understated by the overflow's displacement to $g_{n-1}$.
+- `drop`: the overflow is discarded. The rate falls short by the overflow and the occurrence exceedance is low by it everywhere; the grid holds nothing it does not mean.
+- `error`: a typed error whenever a contributing $M_j$ exceeds $e_{n-1}$, the condition under which the overflow can be nonzero.
+
+Both non-error policies report, for each output, the overflow's rate and its first moment in excess of $g_{n-1}$ (`rate_above_grid`, `mean_above_grid`), so that a caller who prefers to post-process can. With the grid length derived from the input both figures are exactly zero, so the policy acts only when the caller asks for a window. Silent truncation, capping or wraparound remains unacceptable: the policy is named, and its effect is reported.
 
 For any loss point $x\in[g_i,g_{i+1}]$, the linear rule replaces an atom of weight $w$ at $x$ by weights
 $$
@@ -146,16 +200,18 @@ w_i+w_{i+1}=w,
 \qquad
 w_ig_i+w_{i+1}g_{i+1}=wx.
 $$
-Consequently, the raw grid distribution must preserve the ELT's total rate and expected annual loss up to floating-point summation error. The secondary grid distribution preserves the total rate exactly and preserves the first moment of the midpoint-quantile approximation; its difference from the analytical expected annual loss arises from finite-$K$ quadrature and floating-point error, not from the linear loss-grid rule.
+Consequently, the raw grid distribution must preserve the ELT's total rate and expected annual loss up to floating-point summation error and the reported effect of the overflow policy. The secondary grid distribution preserves the total rate exactly under both methods. Under the quantiles method it preserves the first moment of the midpoint-quantile approximation, so its difference from the analytical expected annual loss arises from finite-$K$ quadrature and floating-point error, not from the linear loss-grid rule; under the survival method the difference is the bucketing error of section 5A. Either way the difference is reported as the secondary mean error.
 
 ## 7. Required outputs
 
 For common $h$ and $n$, the utility must return two length-$n$ arrays:
 
 - `raw`: the linear-grid discretization of $\nu_{\mathrm{raw}}$;
-- `secondary`: the linear-grid discretization of $\nu_{\mathrm{SU},K}$.
+- `secondary`: the bucketing of section 5A under the survival method (the default), or the linear-grid discretization of $\nu_{\mathrm{SU},K}$ under the quantiles method.
 
-The arrays contain nonnegative rate weights by default. The loss associated with element $i$ is $ih$. The output metadata must state at least $h$, $n$, $K$, whether the arrays are normalized, the total input rate, the analytical expected annual loss, the two output masses and first moments, the finite-$K$ secondary mean error, the number of valid rows, and counts of every exceptional-row category.
+The arrays contain nonnegative rate weights by default. The loss associated with element $i$ is $ih$. The output metadata must state at least $h$, $n$, the method, whether the arrays are normalized, the total input rate, the analytical expected annual loss, the two output masses and first moments, the secondary mean error, the number of valid rows, and counts of every exceptional-row category. The secondary mean error is defined for both methods as the secondary grid's first moment in rate-weighted units less the analytical expected annual loss. Under the quantiles method the metadata also states $K$ and the quadrature secondary mean; under the survival method the node count, the nodes per decade and the sampled interpolation error. Under either method it states the overflow policy and, for each output, the overflow's rate and first moment above the top node (section 6).
+
+The survival method also exposes the exceedance curve itself: the nodes with the exact $\Lambda$ at them, the atoms with their rates, $\Lambda(x)$ with the atoms included, the even grid at any $h\ge2x_0$ and $n$, and the occurrence exceedance points of section 5A under Poisson occurrence, where a step at an atom that jumps the target answers with that atom's loss.
 
 The normal Python result must be directly usable as NumPy arrays without requiring a textual intermediate representation. A supported output mode must also permit the arrays to reside in, or be reopened from, a NumPy-compatible memory-mapped file.
 
@@ -186,6 +242,15 @@ The acceptance suite must include the following mathematical tests.
 13. Grid overflow: an insufficient grid produces the specified failure or explicit overflow behaviour.
 14. Large-file reference: a large deterministic synthetic ELT agrees with an independent high-accuracy implementation within stated tolerances.
 
+Tests 4, 5 and 7 are tests of the quantiles method and select it explicitly; the others apply to both methods. The survival method adds the following, on a synthetic fixture of small-$\alpha$ events ($\alpha$ from $0.003$ to $3$, $M/\mu$ from $10^2$ to $10^5$, some atoms and inadmissible rows, and a gross-like copy with $\mu$ shrunk and $M$ kept).
+
+15. Exceedance accuracy: the tail sums of the survival grid match the exact incomplete beta at every bucket edge within $10^{-4}$ relative wherever $\Lambda>10^{-12}\sum_j\lambda_j$; the reference's check of every interval midpoint and the sampled interpolation error are both at most $10^{-4}$.
+16. Rate and mean: the secondary mass equals the total rate within $10^{-14}$ relative; with the grid length derived from the input, the secondary mean error relative to the analytical expected annual loss is at most $10^{-4}$ at the fixture's $h$ and falls at least linearly when $h$ is halved twice.
+17. Nonnegativity and determinism: no negative weight; bitwise identical results across thread counts at a fixed chunk size; the two implementations agree on the curve within $10^{-12}$ relative and on the grids within $10^{-12}$ of the total rate.
+18. Overflow: with a grid length short of $\max_jM_j$, for both methods and both outputs, `top_bucket` adds the overflow to the top node and reports its rate and displaced moment, `drop` leaves the mass short by exactly that and reports the same figures, and `error` raises the typed error; with the grid length derived from the input both figures are exactly zero.
+19. The K-point cut: on the same fixture the quantiles method at $K=32$ has $\Lambda=0$ above each event's $1-1/64$ quantile (plus one bucket of linear spread) and a secondary mean error below $-5\%$ of the expected annual loss, while the survival method is within the tolerance of test 16. This documents the defect.
+20. Bernoulli rows: an inadmissible row contributes $\lambda(1-p)$ at $0$ and $\lambda p$ at $M$ in both methods, with rate and mean exact and grid variance $\mu(M-\mu)$ to bucketing tolerance; under the survival method the exceedance curve has an exact step of $\lambda p$ at $M$; the row is reported under `variance_bernoulli`.
+
 ## 10. Performance test cases
 
 The performance suite must include at least:
@@ -207,9 +272,9 @@ Before the utility's public interface is frozen, we must confirm:
 2. whether the exposure field is exactly the conditional maximum loss $M_j$;
 3. **resolved (1.6.0):** the marginal convention is $\sigma_j=\sigma_{I,j}+\sigma_{C,j}$ (Burke 2016, section III.E, step i; see section 4 and `dev/secondary-uncertainty-additivity.md`);
 4. whether the desired default output is a rate measure or a normalized conditional severity probability mass function;
-5. the production defaults for $h$, $n$ and $K$;
-6. the required policy for inadmissible beta moments;
+5. **resolved (2.0.0):** the default method is `survival` at the node density set by the benchmark; the quantiles method stays selectable with $K=32$ by default; $h$ and $n$ remain the caller's (sections 5A and 6);
+6. **resolved (1.13.0):** inadmissible rows become Bernoulli rows by default (section 4);
 7. whether any finite-$K$ moment correction is desired;
-8. whether an explicit overflow bin is ever preferable to requiring full support coverage.
+8. **resolved (2.0.0):** no overflow bin; a named overflow policy, `top_bucket` by default, with the overflow's rate and moment reported (section 6).
 
 These questions affect the mathematical contract and should be resolved identically for every competing implementation used in a head-to-head comparison.

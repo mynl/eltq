@@ -25,9 +25,10 @@ pub enum Error {
     )]
     InadmissibleVariance { row: usize, sigma2: f64, v_max: f64 },
     #[error(
-        "grid of {grid_length} nodes at spacing {bucket_size} covers only \
+        "grid of {grid_length} nodes at spacing {bucket_size} covers losses up to \
          {top}, but the maximum contributing loss is {max_loss}; \
-         grid_length >= {required} required"
+         grid_length >= {required} required (or select the top_bucket or drop \
+         overflow policy)"
     )]
     GridOverflow {
         grid_length: usize,
@@ -42,6 +43,24 @@ pub enum Error {
     ZeroTotalRate,
     #[error("chunk_rows must be >= 1, got {0}")]
     BadChunkRows(usize),
+    #[error("nodes_per_decade must be >= 1, got {0}")]
+    BadNodesPerDecade(usize),
+    #[error("min_loss must be finite and positive, got {0}")]
+    BadMinLoss(f64),
+    #[error(
+        "the clamp variance policy was removed from the one-row route at 2.0.0 \
+         (use bernoulli, error, drop, or atom)"
+    )]
+    ClampPolicyRemoved,
+    #[error(
+        "bucket_size {bucket_size} is below twice the curve's lowest node {min_loss}; \
+         the curve knows nothing below that loss"
+    )]
+    BucketBelowCurve { bucket_size: f64, min_loss: f64 },
+    #[error("unknown method {0:?} (expected quantiles or survival)")]
+    BadMethod(String),
+    #[error("unknown overflow {0:?} (expected top_bucket, drop, or error)")]
+    BadOverflow(String),
     #[error("threads must be >= 1 when given, got {0}")]
     BadThreads(usize),
     #[error("failed to build worker thread pool: {0}")]
@@ -65,6 +84,11 @@ pub enum Error {
     UnitInadmissibleVariance { unit: String, sigma2: f64, v_max: f64 },
     #[error("the drop variance policy is not available for the two-unit joint")]
     BadJointPolicy,
+    #[error(
+        "the bernoulli variance policy is not available for the multi-unit route \
+         (use clamp, error, drop, or atom)"
+    )]
+    BernoulliPolicyUnavailable,
     #[error("terms: {0}")]
     Terms(String),
     #[error("multi-unit structure: {0}")]

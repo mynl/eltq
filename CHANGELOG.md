@@ -3,6 +3,78 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.0.0] - 2026-10-24
+
+Major: the default `secondary` output changes, and the clamp policy leaves the one-row route.
+
+### Changed
+
+- [default] `method="survival"` is the default of `quantize_arrays`, `quantize_csv`, `quantize_dataframe`, `quantize_into`, `quantize_to_npy` and the reference, in Rust (`Config::new`) and in the bindings. The K-point rule stays as `method="quantiles"`; its tail cut (spec section 5) loses tens of percent of the expected loss on small-alpha events, which the survival method does not (`benchmarks/report-1.16.0.md`).
+- The `clamp` variance policy and its `clamp_factor` keyword are removed from the one-row route (`quantize_*`, `exceedance_curve`); `variance_policy="clamp"` raises, in Rust (`Error::ClampPolicyRemoved`) and in Python. The multi-unit route keeps `clamp` with `clamp_factor` and its `sigma_clamped` category, as ruled on 2026-10-24.
+- Goldens: `small` and `medium` now record `method: quantiles`; `small_survival` and `medium_survival` are the same fixtures under the default. The acceptance tests of the K-point rule (4, 5, 7, 9, the dyadic case of 10) select it; test 11's clamp case checks the refusal; test 14 runs all four goldens on both backends and the Rust golden test too.
+- README, the module docstring and the project description describe the secondary grid by the survival method.
+- `reproductions/Homer2017a.qmd`: the sentence on the default variance policy describes the Bernoulli treatment (the chapter's numbers were computed with the clamp of 1.12.0 and say so).
+
+## [1.17.0] - 2026-10-24
+
+### Added
+
+- [curve] `eltq.exceedance_curve(rate, max_loss, mean_loss, sd_indep, sd_corr, *, min_loss, ...)` builds the portfolio exceedance curve once, from `min_loss` up, on either backend. The `ExceedanceCurve` it returns exposes the nodes (`loss`) with the exact exceedance rate of the beta events at them (`exceedance_rate`), the atoms (`atom_loss`, `atom_rate`), a `CurveMeta`, `exceedance(x)` (atoms included; NaN below `min_loss`), `grid(bucket_size, grid_length=None, *, normalize=False, overflow="top_bucket")` returning the secondary grid and a `GridMeta` for any `bucket_size >= 2 min_loss`, and `oep_pml(return_periods)`, the occurrence exceedance loss under Poisson occurrence by bisection, an atom's loss where that atom's step jumps the target.
+- The curve is now the one implementation of the survival method: `quantize(method="survival")` builds it at `min_loss = h / 2` and takes its grid, so the two agree bitwise, and the separate survival pass of 1.15.0 is gone.
+
+### Changed
+
+- The curve keeps each event's tail parameters (about 56 bytes per beta row), so the survival method's peak memory grows by that; the Rust engine's `Classified` rows and `classify_rows` are public for callers that build curves from their own inputs.
+
+## [1.16.0] - 2026-10-24
+
+### Changed
+
+- [benchmark] The survival method's default node density is 100 nodes per decade (was 150): the smallest density whose bucketed tail sums match the exact incomplete beta at every bucket edge within 1e-4 on every benchmark portfolio (50 misses on the J-shaped ones). `benchmarks/report-1.16.0.md` has the measurements.
+- Speed gate met: on the million-row mixture portfolio the survival method at the default density takes 0.96 s against 0.78 s for the quantiles method at K = 32 (1.23 times; the plan's limit was five, its estimate 5 to 14), and 2.65 times on a million-row small-alpha portfolio, where the quantiles method loses 20% of the expected loss and the survival method 0.6% (the first-order bucket-0 error at that grid).
+
+### Added
+
+- `benchmarks/run_end_to_end.py --method`, `--nodes-per-decade`, and `--survival-sweep [--small-alpha]`: the survival method at 25, 50, 100 and 150 nodes per decade against the quantiles method at K = 32, on the mixture portfolio or a million-row small-alpha portfolio, recorded under `"suite": "survival_sweep"` in `benchmarks/results.json`.
+
+## [1.15.0] - 2026-10-24
+
+### Added
+
+- [rust] The survival method in the Rust engine (`crates/eltq-core/src/curve.rs`): the same nodes, truncation, one-sided slopes, monotone cubic and per-event endpoint interpolant as the reference, in chunked passes folded in order, so results are bitwise identical across thread counts at a fixed `chunk_rows`. `method="survival"` no longer needs SciPy on the Rust backend.
+- The overflow policies in the Rust engine for both methods and both outputs, with `rate_above_grid` and `mean_above_grid` reported; `overflow="error"` keeps today's `GridOverflowError`.
+- `BetaFn::sf`, the survival function computed directly in each branch of the continued fraction (full relative precision in the upper tail), and `sf_and_density_times_y` sharing its logarithms.
+- `Config` gains `method`, `nodes_per_decade` and `overflow`; `chunk_rows` is `Option<usize>`, resolved to 65,536 rows for `quantiles` and 4,096 for `survival`. `Meta` carries the method, node count, density, interpolation error, overflow policy and the per-output overflow figures.
+- The per-event endpoint interpolant now steps the distance to the endpoint by sqrt(2) rather than halving it, in both backends: a few units in 1e-6 on an event's tail instead of 2e-5.
+
+### Changed
+
+- `secondary_mean_error` on the Rust backend is the secondary grid's first moment less the analytic AAL under either method (identical to the quadrature figure under `quantiles` to rounding).
+- Spec test 18 runs on both backends under both methods; test 17 compares the backends' survival grids and curves.
+
+## [1.14.0] - 2026-10-24
+
+### Added
+
+- [reference] The survival method in the SciPy reference: `quantize_reference(..., method="survival", nodes_per_decade=150, overflow="top_bucket")` builds the portfolio exceedance rate exactly at geometric nodes, interpolates it by a monotone cubic Hermite with exact one-sided slopes, and buckets it by the nearest rule (spec section 5A). Each event is truncated four node intervals before its endpoint and its tail is carried per event by an interpolant in the distance to the endpoint; without that, no shared interpolant followed the endpoint kinks (execution log of `dev/done/plan-single-unit-survival-route.md`). Accuracy against the exact incomplete beta at every bucket edge, down to 1e-12 of the total rate: within 4e-6 on the new small-alpha fixture and 1.1e-5 on the medium golden and the benchmark portfolio.
+- `quantize_arrays`, `quantize_csv` and their wrappers take `method`, `nodes_per_decade` and `overflow`. On the Rust backend `method="survival"` runs on the reference until 1.15.0 (SciPy required); the overflow policies are honored by the Rust engine from 1.15.0 too, and until then its quantiles method raises on overflow as before.
+- Overflow policies `top_bucket` (default), `drop` and `error` in the reference, for both methods and both outputs, with `meta.rate_above_grid` and `meta.mean_above_grid` per output; the derived grid length still covers every loss, so the policy acts only on an explicit window.
+- `Meta` gains `method`, `nodes`, `nodes_per_decade`, `interpolation_error`, `overflow`, `rate_above_grid` and `mean_above_grid`; `quadrature_points` and `quadrature_secondary_mean` are None under the survival method. `secondary_mean_error` is defined for both methods as the secondary grid's first moment less the analytic AAL (unchanged in value for the quantiles method).
+- Fixture `fixtures/small_alpha_elt.csv` (2,000 small-alpha rows, ground-up and gross-like) and spec tests 15 to 20 in `tests/test_survival.py`, on both backends.
+
+### Changed
+
+- The default method stays `quantiles`; the survival default lands at 2.0.0. The specification's section 5A now describes the truncated-curve design as built.
+
+## [1.13.0] - 2026-10-24
+
+### Changed
+
+- [bernoulli] Rows whose stated variance is inadmissible (sigma^2 >= mu (M - mu)) now become Bernoulli rows by default: two atoms, rate (1 - p) at 0 and rate p at M with p = mu / M, the variance maximizer on [0, M]. Rate and mean are exact; the row is reported under the new `variance_bernoulli` category. The 0.999 sigma clamp stays selectable as `variance_policy="clamp"` on the one-row route until 2.0.0 and remains the multi-unit route's default.
+- The multi-unit route (`multiunit_views`, `joint_two_units`) rejects `variance_policy="bernoulli"` with a typed error until it adopts the treatment (plan "Not in this plan").
+- The `small` and `medium` goldens are regenerated. The secondary mean of `small` rises from 4.169 to 4.194: the two inadmissible rows no longer lose mean to the clamp's smeared beta.
+- The specification was amended in the preceding commit: section 4 proves the variance bound and lists the policies, section 5A specifies the survival method that lands at 2.0.0, section 6 the overflow policies (`dev/done/plan-single-unit-survival-route.md`, now executing).
+
 ## [1.12.0] - 2026-10-22
 
 ### Added

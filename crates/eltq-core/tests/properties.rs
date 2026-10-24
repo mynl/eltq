@@ -6,7 +6,7 @@ use proptest::prelude::*;
 
 /// One synthetic row: rate, max loss, mean position p in [0, 1], and
 /// variance fraction f of the admissible maximum (f >= 1 is inadmissible and
-/// exercises the clamp policy).
+/// exercises the Bernoulli policy).
 fn row_strategy() -> impl Strategy<Value = (f64, f64, f64, f64)> {
     (
         1e-6_f64..1e3,
@@ -67,6 +67,7 @@ proptest! {
     ) {
         let cols = columns(&rows);
         let mut config = Config::new(hint_bucket(&cols[1]));
+        config.method = eltq_core::Method::Quantiles;
         config.quadrature_points = 4;
         let result = quantize(&input(&cols), &config).unwrap();
         let meta = &result.meta;
@@ -76,7 +77,7 @@ proptest! {
         let aal_scale = meta.analytic_aal.abs().max(lambda * 1e-9);
         prop_assert!((meta.raw_mean - meta.analytic_aal).abs() <= 1e-10 * aal_scale);
         prop_assert!(
-            (meta.secondary_mean - meta.quadrature_secondary_mean).abs()
+            (meta.secondary_mean - meta.quadrature_secondary_mean.unwrap()).abs()
                 <= 1e-10 * aal_scale
         );
         prop_assert!(result.raw.iter().all(|&v| v.is_finite() && v >= 0.0));
@@ -90,6 +91,7 @@ proptest! {
     ) {
         let cols = columns(&rows);
         let mut config = Config::new(hint_bucket(&cols[1]));
+        config.method = eltq_core::Method::Quantiles;
         config.quadrature_points = 4;
         let base = quantize(&input(&cols), &config).unwrap();
 

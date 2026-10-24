@@ -5,15 +5,21 @@ spaced, rate-weighted loss-grid distributions:
 
 - **raw** — each event contributes an atom of rate λ at its conditional mean μ;
 - **secondary** — each event's conditional loss is modeled as a beta on
-  [0, M] matching (μ, σ = σ_I + σ_C) and approximated by K equally weighted
-  midpoint quantiles x_k = M·Q(α, β; (k+½)/K).
+  [0, M] matching (μ, σ = σ_I + σ_C); the portfolio exceedance curve of those
+  betas is evaluated exactly on geometric nodes, each event's endpoint handled
+  per event, and bucketed onto the grid g_i = i·h by the nearest rule (the
+  survival method). The K-point midpoint-quantile rule
+  x_k = M·Q(α, β; (k+½)/K) of versions before 2.0.0 remains selectable.
 
-Both are mapped to the grid g_i = i·h by a linear deposit rule that preserves
-mass and first moment exactly. The mathematical contract is
-`secondary-uncertainty-mathematical-specification.md`; the implementation plans
-are `dev/done/plan-implementation.md` (1.0.0-1.5.0) and
+Atoms and the raw grid use a linear deposit rule that preserves mass and first
+moment exactly; the survival grid is exact in rate and reports its first-moment
+error. The exceedance curve is public (`exceedance_curve`). The mathematical
+contract is `secondary-uncertainty-mathematical-specification.md`; the
+implementation plans are `dev/done/plan-implementation.md` (1.0.0-1.5.0),
 `dev/done/plan-multiunit.md` (1.6.0-1.11.0: joint multi-unit secondary
-uncertainty, unit terms, view totals).
+uncertainty, unit terms, view totals) and
+`dev/done/plan-single-unit-survival-route.md` (1.13.0-2.0.0: the survival
+method, Bernoulli rows, overflow policies, the exceedance curve).
 
 ## Install
 
@@ -60,6 +66,12 @@ identical.
 | [multiunit-views] per-event engine, `multiunit_views` | 1.10.0 | done |
 | [ferocious-multiunit] own erf, real FFTs, cross-view sharing, 1M unit-row report | 1.11.0 | done |
 | [pypi-release] wheels on PyPI: Windows, Linux, macOS; CI against the oracle | 1.12.0 | done |
+| [bernoulli] inadmissible-variance rows become Bernoulli rows (two atoms) | 1.13.0 | done |
+| [reference] survival method and overflow policies in the SciPy reference | 1.14.0 | done |
+| [rust] survival method and overflow policies in the Rust engine | 1.15.0 | done |
+| [benchmark] node density set, speed gate met (`benchmarks/report-1.16.0.md`) | 1.16.0 | done |
+| [curve] public exceedance curve: `exceedance_curve`, grids at any spacing, OEP points | 1.17.0 | done |
+| [default] survival is the default method; the clamp leaves the one-row route | 2.0.0 | done |
 
 ## Layout
 
@@ -123,9 +135,16 @@ irrelevant to throughput (each deposit touches two nodes whatever n is):
 n = 1,001, n = 65,536 (2^16) and n = 100,000 all run at the same speed.
 
 Determinism contract: for a fixed input, config (including `chunk_rows`,
-default 65536) and build, output arrays are bitwise reproducible regardless
-of `threads` and work stealing. Reordering input rows changes results only
-within floating-point summation tolerance.
+default 65536 for the quantiles method and 4096 for the survival method) and
+build, output arrays are bitwise reproducible regardless of `threads` and
+work stealing. Reordering input rows changes results only within
+floating-point summation tolerance.
+
+Survival method (`benchmarks/report-1.16.0.md`, Zen 5 desktop): the
+million-row mixture portfolio at the default 100 nodes per decade in 0.96 s
+against 0.78 s for the quantiles method at K = 32, and a million-row
+small-alpha portfolio in 2.7 s against 1.0 s, where the quantiles method
+loses 20% of the expected loss and the survival method 0.6%.
 
 Multi-unit route (`benchmarks/report-1.11.0.md`, same laptop): ~0.91M unit
 rows (100k events x 10 units, typical term sparsity) with all four views at
@@ -144,9 +163,10 @@ import eltq
 
 raw, secondary, meta = eltq.quantize_arrays(
     rate, max_loss, mean_loss, sd_indep, sd_corr,
-    *, bucket_size, grid_length=None, quadrature_points=32,
-    normalize=False, mean_is_loss_rate=False,
-    variance_policy="clamp", clamp_factor=0.999, event_ids=None)
+    *, bucket_size, grid_length=None,
+    method="survival", quadrature_points=32, nodes_per_decade=None,
+    overflow="top_bucket", normalize=False, mean_is_loss_rate=False,
+    variance_policy="bernoulli", event_ids=None)
 
 raw, secondary, meta = eltq.quantize_csv(path, *, bucket_size,
     columns={"rate": "annual_rate"}, ...)      # optional column-name mapping
@@ -158,10 +178,31 @@ meta = eltq.quantize_into(source, *, raw_out, secondary_out, ...)
 
 meta = eltq.quantize_to_npy(source, "grids.npy", *, bucket_size, ...)
     # transactional (2, n) .npy + grids.meta.json; np.load(..., mmap_mode="r")
+
+curve = eltq.exceedance_curve(rate, max_loss, mean_loss, sd_indep, sd_corr,
+    *, min_loss, nodes_per_decade=None, ...)   # the survival curve, built once
+curve.loss, curve.exceedance_rate              # nodes and the exact rate there
+curve.atom_loss, curve.atom_rate, curve.meta   # atoms; CurveMeta
+curve.exceedance(x)                            # Lambda(x), atoms included
+curve.oep_pml([10, 100, 250])                  # OEP losses, Poisson occurrence
+secondary, gmeta = curve.grid(bucket_size, grid_length=None, overflow="top_bucket")
+    # any bucket_size >= 2 min_loss; what quantize(method="survival") returns
 ```
 
 `source` for the last two: a CSV path, a DataFrame with canonical columns, or
 a `(rate, max_loss, mean_loss, sd_indep, sd_corr)` tuple.
+
+**Methods.** `method="survival"` (the default from 2.0.0) evaluates the
+portfolio exceedance rate exactly at `nodes_per_decade` geometric nodes,
+interpolates it monotonically and buckets it by the nearest rule, with each
+event's endpoint handled per event (spec section 5A); both backends compute
+the same function. `method="quantiles"` (the default before 2.0.0) replaces
+each beta event by K midpoint quantiles deposited by the linear rule; it cuts
+every event's survival function at 1/(2K), which loses tens of percent of the
+expected loss for small-alpha events (spec section 5). `overflow` names what happens to mass
+above the top bucket when `grid_length` is a window: `top_bucket` (default,
+rate exact), `drop`, or `error`; the overflow's rate and displaced moment are
+reported in `meta` either way.
 
 Arrays are borrowed zero-copy (contiguous float64; the wrapper converts
 explicitly otherwise), compute releases the interpreter, and results hand
@@ -252,28 +293,39 @@ Structurally invalid rows are dropped and reported (never silently): nonfinite
 fields, negative fields, μ > M. Zero-rate rows carry no mass and are skipped.
 Degenerate rows (σ = 0, μ = 0, μ = M, or M = 0) contribute a single atom at μ.
 
-Rows with inadmissible beta variance (σ² ≥ μ(M − μ)) follow `variance_policy`:
+Rows with inadmissible beta variance (σ² ≥ μ(M − μ), a variance no
+distribution on [0, M] can have) follow `variance_policy`:
 
-- `clamp` (default) — σ clamped to 0.999·√(μ(M − μ)), reported;
+- `bernoulli` (default) — the variance maximizer on [0, M]: two atoms, rate
+  (1 − p) at 0 and rate p at M with p = μ/M; rate and mean exact, reported;
 - `error` — typed error;
 - `drop` — row dropped from both outputs, reported;
 - `atom` — collapsed to an atom at μ, reported.
 
+The `clamp` of versions before 2.0.0 (σ clamped to 0.999 of the bound, the row
+kept as a beta) is refused on this route. The multi-unit route keeps `clamp`
+as its default, with `clamp_factor`, and does not accept `bernoulli` yet.
+
 Diagnostics report per-category counts plus up to 10 representative event ids:
 `nonfinite`, `negative_field`, `mean_exceeds_max`, `zero_rate`,
-`degenerate_atom`, `sigma_clamped`, `variance_dropped`, `variance_atom`.
+`degenerate_atom`, `variance_dropped`, `variance_atom`, `variance_bernoulli`
+(and `sigma_clamped` on the multi-unit route).
 
-Grid coverage requires (n − 1)·h ≥ max contributing M; with `grid_length=None`
-the length is auto-derived as ceil(max M / h) + 1. An insufficient explicit
-grid raises `GridOverflowError` — no silent truncation, no overflow bin.
+With `grid_length=None` the length is derived as ceil(max M / h) + 1, which
+covers every loss. A shorter explicit grid is a window: the mass above the top
+bucket's upper edge follows `overflow` (`top_bucket`, `drop`, or `error`,
+which raises `GridOverflowError`), and its rate and displaced moment are
+reported either way. No silent truncation, no overflow bin.
 
 ## Output
 
 Two length-n `float64` arrays (weights at losses i·h; rate-weighted by
 default, `normalize=True` divides both by the total contributing rate Λ) plus
-metadata: h, n, K, normalized flag, Λ, analytic AAL, both output masses and
-first moments, the quadrature secondary mean and its finite-K error vs the
-AAL, row counts, and the diagnostics above.
+metadata: h, n, the method (with K and the quadrature secondary mean under
+`quantiles`, the node count, density and interpolation error under
+`survival`), normalized flag, Λ, analytic AAL, both output masses and first
+moments, the secondary mean error vs the AAL, the overflow policy and figures,
+row counts, and the diagnostics above.
 
 ## Open questions (spec §11)
 

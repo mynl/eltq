@@ -54,12 +54,17 @@ def test_03_linear_rule_mass_and_moment(impl):
     assert math.isclose(float(raw @ grid_of(meta)), lam * x, rel_tol=1e-13)
 
 
+# Tests 4, 5, 7 and 9 are tests of the quantiles method and select it; the
+# survival method (the default from 2.0.0) is tested in test_survival.py.
+QUANTILES = {"method": "quantiles"}
+
+
 # [4] Uniform beta (alpha = beta = 1): midpoint points x_k = M (k + 1/2) / K.
 def test_04_uniform_beta(impl):
     lam, m, k_pts = 0.008, 96.0, 8
     rows = [(lam, m, m / 2.0, m / math.sqrt(12.0), 0.0)]
     raw, secondary, meta = run(impl, elt(rows), bucket_size=1.0,
-                               quadrature_points=k_pts)
+                               quadrature_points=k_pts, **QUANTILES)
     expected = np.zeros(meta.grid_length)
     for k in range(k_pts):
         expected[int(m * (k + 0.5) / k_pts)] += lam / k_pts  # nodes 6, 18, ...
@@ -71,9 +76,9 @@ def test_05_symmetry(impl):
     m, h, n = 10.0, 0.5, 21
     sigma = math.sqrt(0.3 * 3.0 * (m - 3.0))  # admissible for mu = 3 and mu = 7
     _, sec_lo, _ = run(impl, elt([(0.01, m, 3.0, sigma, 0.0)]),
-                       bucket_size=h, grid_length=n)
+                       bucket_size=h, grid_length=n, **QUANTILES)
     _, sec_hi, _ = run(impl, elt([(0.01, m, 7.0, sigma, 0.0)]),
-                       bucket_size=h, grid_length=n)
+                       bucket_size=h, grid_length=n, **QUANTILES)
     assert np.allclose(sec_lo, sec_hi[::-1], rtol=0.0, atol=1e-12)
 
 
@@ -101,7 +106,7 @@ def test_07_k_convergence(impl, mu, frac):
     errors = {}
     for k_pts in (8, 32, 512):
         _, _, meta = run(impl, elt([(0.01, m, mu, sigma, 0.0)]),
-                         bucket_size=0.01, quadrature_points=k_pts)
+                         bucket_size=0.01, quadrature_points=k_pts, **QUANTILES)
         errors[k_pts] = abs(meta.secondary_mean_error)
     floor = 1e-13 * abs(meta.analytic_aal)
     assert errors[512] <= max(errors[8] / 4.0, floor)
@@ -120,7 +125,7 @@ def test_08_mass_conservation(impl):
 # first moment equals the quadrature first moment.
 def test_09_mean_conservation(impl):
     df = load_fixture("medium")
-    raw, secondary, meta = run(impl, df, bucket_size=5000.0)
+    raw, secondary, meta = run(impl, df, bucket_size=5000.0, **QUANTILES)
     g = grid_of(meta)
     assert math.isclose(float(raw @ g), meta.analytic_aal, rel_tol=1e-10)
     assert math.isclose(float(secondary @ g), meta.quadrature_secondary_mean,
@@ -128,21 +133,26 @@ def test_09_mean_conservation(impl):
 
 
 # [10] Scale invariance: scaling all loss quantities and h leaves weights
-# unchanged (bitwise for a dyadic factor).
+# unchanged (bitwise for a dyadic factor under the quantiles method; the
+# survival method's geometric nodes are not dyadic in the loss, so there the
+# invariance holds to rounding).
 def test_10_scale_invariance(impl):
     df = load_fixture("small")
-    base_raw, base_sec, _ = run(impl, df, bucket_size=0.5, quadrature_points=8)
-    for c, exact in ((64.0, True), (3.0, False)):
-        scaled = df.copy()
-        for col in ("max_loss", "mean_loss", "sd_indep", "sd_corr"):
-            scaled[col] *= c
-        raw, sec, _ = run(impl, scaled, bucket_size=0.5 * c, quadrature_points=8)
-        if exact:
-            assert np.array_equal(raw, base_raw)
-            assert np.array_equal(sec, base_sec)
-        else:
-            assert np.allclose(raw, base_raw, rtol=1e-9, atol=1e-15)
-            assert np.allclose(sec, base_sec, rtol=1e-9, atol=1e-12)
+    for method, exact_dyadic in (("quantiles", True), ("survival", False)):
+        base_raw, base_sec, _ = run(impl, df, bucket_size=0.5, quadrature_points=8,
+                                    method=method)
+        for c, exact in ((64.0, exact_dyadic), (3.0, False)):
+            scaled = df.copy()
+            for col in ("max_loss", "mean_loss", "sd_indep", "sd_corr"):
+                scaled[col] *= c
+            raw, sec, _ = run(impl, scaled, bucket_size=0.5 * c, quadrature_points=8,
+                              method=method)
+            if exact:
+                assert np.array_equal(raw, base_raw)
+                assert np.array_equal(sec, base_sec)
+            else:
+                assert np.allclose(raw, base_raw, rtol=1e-9, atol=1e-15)
+                assert np.allclose(sec, base_sec, rtol=1e-9, atol=1e-12)
 
 
 # [11] Invalid beta moments follow the selected policy and appear in
@@ -151,14 +161,27 @@ BAD = (0.005, 100.0, 30.0, 50.0, 0.0)
 GOOD = (0.010, 100.0, 40.0, 15.0, 10.0)
 
 
-def test_11_variance_policy_clamp(impl):
+def test_11_variance_policy_bernoulli(impl):
+    # Default policy: the bad row becomes rate (1 - p) at 0 and rate p at M,
+    # p = 0.3, with its rate and mean exact.
     raw, secondary, meta = run(impl, elt([BAD, GOOD]), bucket_size=0.5)
-    assert diag_count(meta, "sigma_clamped") == 1
+    assert diag_count(meta, "variance_bernoulli") == 1
     assert meta.valid_rows == 2
     assert math.isclose(secondary.sum(), 0.015, rel_tol=1e-12)
-    # Clamped variance stays admissible: secondary mean still near the AAL.
+    # The pair's residual mean error is the good row's K-point quadrature.
     assert math.isclose(float(secondary @ grid_of(meta)), meta.analytic_aal,
                         rel_tol=5e-2)
+    _, bad_only, bad_meta = run(impl, elt([BAD]), bucket_size=0.5)
+    assert bad_only[0] == BAD[0] * 0.7
+    assert bad_only[200] == BAD[0] * 0.3
+    assert np.count_nonzero(bad_only) == 2
+    assert bad_meta.secondary_mean_error == 0.0
+
+
+def test_11_variance_policy_clamp_removed(impl):
+    # The clamp of versions before 2.0.0 is refused on the one-row route.
+    with pytest.raises(impl.base_error):
+        run(impl, elt([BAD, GOOD]), bucket_size=0.5, variance_policy="clamp")
 
 
 def test_11_variance_policy_error(impl):
@@ -195,21 +218,23 @@ def test_12_boundary_means(impl):
     assert np.array_equal(raw, secondary)
 
 
-# [13] Grid overflow: an insufficient grid is a hard, typed error.
+# [13] Grid overflow: an insufficient grid is a hard, typed error under the
+# error policy (the named policies are test 18).
 def test_13_grid_overflow(impl):
     rows = [(0.01, 100.0, 40.0, 15.0, 0.0)]
     with pytest.raises(impl.overflow_error):
-        run(impl, elt(rows), bucket_size=1.0, grid_length=50)
+        run(impl, elt(rows), bucket_size=1.0, grid_length=50, overflow="error")
     # Auto-derived length covers max M exactly: n = ceil(M / h) + 1.
     _, _, meta = run(impl, elt(rows), bucket_size=1.0)
     assert meta.grid_length == 101
 
 
-# [14] Golden-fixture agreement with the independent reference.
-@pytest.mark.parametrize("name", ["small", "medium"])
+# [14] Golden-fixture agreement with the independent reference, under the
+# quantiles method (small, medium) and the survival method (the rest).
+@pytest.mark.parametrize("name", ["small", "medium", "small_survival", "medium_survival"])
 def test_14_golden_fixtures(impl, name):
-    df = load_fixture(name)
     g_raw, g_sec, g_meta = load_golden(name)
+    df = load_fixture(g_meta.get("fixture", name))
     raw, secondary, meta = run(impl, df, **g_meta["params"])
     scale = g_meta["total_rate"]
     assert meta.grid_length == g_meta["grid_length"]
@@ -217,8 +242,13 @@ def test_14_golden_fixtures(impl, name):
     assert np.allclose(secondary, g_sec, rtol=1e-9, atol=1e-13 * scale)
     assert math.isclose(meta.total_rate, g_meta["total_rate"], rel_tol=1e-12)
     assert math.isclose(meta.analytic_aal, g_meta["analytic_aal"], rel_tol=1e-12)
-    assert math.isclose(meta.quadrature_secondary_mean,
-                        g_meta["quadrature_secondary_mean"], rel_tol=1e-9)
+    if g_meta["quadrature_secondary_mean"] is not None:
+        assert math.isclose(meta.quadrature_secondary_mean,
+                            g_meta["quadrature_secondary_mean"], rel_tol=1e-9)
+    else:
+        assert math.isclose(float(secondary @ grid_of(meta)) - meta.analytic_aal,
+                            g_meta["secondary_mean_error"], rel_tol=1e-6,
+                            abs_tol=1e-12 * meta.analytic_aal)
     for category, issues in g_meta["diagnostics"].items():
         assert diag_count(meta, category) == issues["count"], category
     assert meta.valid_rows == g_meta["valid_rows"]

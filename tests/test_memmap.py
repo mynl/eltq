@@ -98,11 +98,17 @@ def test_quantize_into_validation():
             small_columns(), raw_out=good, secondary_out=np.zeros(n),
             grid_length=n + 5, **PARAMS,
         )
-    # Outputs that are too short for the input are a grid overflow.
+    # Outputs that are too short for the input are a window: the overflow
+    # policy applies (top_bucket by default, reported), and ``error`` raises.
+    meta = eltq.quantize_into(
+        small_columns(), raw_out=np.zeros(10), secondary_out=np.zeros(10),
+        **PARAMS,
+    )
+    assert meta.overflow == "top_bucket" and meta.rate_above_grid["raw"] > 0.0
     with pytest.raises(eltq.GridOverflowError):
         eltq.quantize_into(
             small_columns(), raw_out=np.zeros(10), secondary_out=np.zeros(10),
-            **PARAMS,
+            overflow="error", **PARAMS,
         )
     with pytest.raises(eltq.EltqError, match="source must be"):
         eltq.quantize_into(

@@ -11,8 +11,11 @@ pub enum RowKind {
     Drop,
     /// Atom at mu in both raw and secondary.
     Atom,
-    /// Atom at mu in raw; K beta midpoint quantiles in secondary.
+    /// Atom at mu in raw; a beta on [0, M] in secondary.
     Beta,
+    /// Inadmissible variance under the Bernoulli policy: atom at mu in raw;
+    /// `rate (1 - p)` at 0 and `rate p` at M in secondary, `p = mu / M`.
+    Bernoulli,
 }
 
 /// Classification outcome: kind plus the effective mean and variance.
@@ -30,7 +33,8 @@ const DROP: RowPlan = RowPlan {
 };
 
 /// Classify one row, recording any diagnostic. Only the strict variance
-/// policy can fail; structurally invalid rows are dropped and reported.
+/// policy (and the removed clamp) can fail; structurally invalid rows are
+/// dropped and reported.
 /// The flat scalar signature is deliberate for the hot path.
 #[allow(clippy::too_many_arguments)]
 pub fn classify_row(
@@ -88,6 +92,14 @@ pub fn classify_row(
     let v_max = mu * (max_loss - mu);
     if sigma2 >= v_max {
         return match config.variance_policy {
+            VariancePolicy::Bernoulli => {
+                diagnostics.note(Category::VarianceBernoulli, row);
+                Ok(RowPlan {
+                    kind: RowKind::Bernoulli,
+                    mu,
+                    var: v_max,
+                })
+            }
             VariancePolicy::Error => Err(Error::InadmissibleVariance { row, sigma2, v_max }),
             VariancePolicy::Drop => {
                 diagnostics.note(Category::VarianceDropped, row);
@@ -101,14 +113,9 @@ pub fn classify_row(
                     var: 0.0,
                 })
             }
-            VariancePolicy::ClampSigma { factor } => {
-                diagnostics.note(Category::SigmaClamped, row);
-                Ok(RowPlan {
-                    kind: RowKind::Beta,
-                    mu,
-                    var: factor * factor * v_max,
-                })
-            }
+            // The clamp stays in the enum for the multi-unit route; the
+            // one-row route refuses it from 2.0.0 (spec section 4).
+            VariancePolicy::ClampSigma { .. } => Err(Error::ClampPolicyRemoved),
         };
     }
     Ok(RowPlan {
@@ -171,12 +178,16 @@ mod tests {
         let (m, mu, s) = (1.0, 0.4, 0.5);
         let mut c = Config::new(1.0);
 
+        // Default: the Bernoulli maximizer, variance exactly mu (M - mu).
         let (plan, diag) = classify(0.1, m, mu, s, &c);
         let plan = plan.unwrap();
-        assert_eq!(plan.kind, RowKind::Beta);
-        let expected = 0.999 * 0.999 * 0.24;
-        assert!((plan.var - expected).abs() < 1e-15);
-        assert_eq!(diag.get(Category::SigmaClamped).count, 1);
+        assert_eq!(plan.kind, RowKind::Bernoulli);
+        assert_eq!(plan.mu, mu);
+        assert!((plan.var - 0.24).abs() < 1e-15);
+        assert_eq!(diag.get(Category::VarianceBernoulli).count, 1);
+
+        c.variance_policy = VariancePolicy::clamp_default();
+        assert!(matches!(classify(0.1, m, mu, s, &c).0, Err(Error::ClampPolicyRemoved)));
 
         c.variance_policy = VariancePolicy::Error;
         assert!(matches!(
@@ -204,14 +215,14 @@ mod tests {
         assert_eq!(plan.kind, RowKind::Beta);
         assert_eq!(plan.var, 49.0);
         // Each component alone is admissible; their sum is not: 30 + 25 = 55,
-        // 55^2 = 3025 >= 40 * 60 = 2400, so the clamp policy engages.
+        // 55^2 = 3025 >= 40 * 60 = 2400, so the variance policy engages.
         let (plan, diag) = {
             let mut diag = Diagnostics::default();
             let plan = classify_row(0, 0.1, 100.0, 40.0, 30.0, 25.0, &c, &mut diag).unwrap();
             (plan, diag)
         };
-        assert_eq!(plan.kind, RowKind::Beta);
-        assert_eq!(diag.get(Category::SigmaClamped).count, 1);
+        assert_eq!(plan.kind, RowKind::Bernoulli);
+        assert_eq!(diag.get(Category::VarianceBernoulli).count, 1);
     }
 
     #[test]

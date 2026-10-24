@@ -1,4 +1,53 @@
-//! Linear mass- and mean-preserving grid deposit.
+//! Linear mass- and mean-preserving grid deposit, and the overflow policy
+//! for a loss beyond the top bucket's upper edge (spec section 6).
+
+use crate::config::Overflow;
+use crate::sum::Neumaier;
+
+/// The overflow of one output: its rate and its first moment in excess of
+/// the top node, compensated.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OverflowAccumulator {
+    pub rate: Neumaier,
+    pub moment: Neumaier,
+}
+
+impl OverflowAccumulator {
+    pub fn merge(&mut self, other: &OverflowAccumulator) {
+        self.rate.add(other.rate.value());
+        self.moment.add(other.moment.value());
+    }
+}
+
+/// Deposit weight `w` at loss `x` by the linear rule, unless `x` lies above
+/// the top edge `(n - 1/2) h`: then it is overflow, added to the top node
+/// under `TopBucket`, discarded under `Drop`, and recorded either way.
+/// A loss in `(top node, top edge]` goes wholly to the top node (the linear
+/// rule has no upper node there). `Error` never reaches here: `quantize`
+/// checks the maximum contributing loss against the top edge up front.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn place(
+    hist: &mut [f64],
+    x: f64,
+    w: f64,
+    inv_h: f64,
+    top_edge: f64,
+    top_node: f64,
+    policy: Overflow,
+    over: &mut OverflowAccumulator,
+) {
+    if x > top_edge {
+        over.rate.add(w);
+        over.moment.add(w * (x - top_node));
+        if policy == Overflow::TopBucket {
+            let n = hist.len();
+            hist[n - 1] += w;
+        }
+        return;
+    }
+    deposit(hist, x, w, inv_h);
+}
 
 /// Deposit weight `w` at loss `x` onto the even grid with node spacing
 /// `1 / inv_h`, splitting linearly between the two adjacent nodes.

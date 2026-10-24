@@ -12,10 +12,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use eltq_core::csv_input::{CsvColumns, read_elt_csv};
+use std::sync::Arc;
+
 use eltq_core::{
-    Clause, Config, Convolution, EltInput, Error as CoreError, JointConfig, Meta, MultiConfig,
-    MultiInput, UnitSpec, UnitTerms, VariancePolicy, View, ZRule,
-    joint_two_units as core_joint_two_units, multiunit_views as core_multiunit_views, quantize,
+    Clause, Config, Convolution, Curve, EltInput, Error as CoreError, JointConfig, Meta, Method,
+    MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule,
+    build_curve, classify_rows, joint_two_units as core_joint_two_units,
+    multiunit_views as core_multiunit_views, quantize,
 };
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
 use pyo3::create_exception;
@@ -68,8 +71,27 @@ fn to_py_err(py: Python<'_>, error: CoreError) -> PyErr {
     }
 }
 
+/// The one-row route's policies: the clamp is refused here (2.0.0); the
+/// multi-unit route parses its own with `parse_variance_policy`.
+fn parse_one_row_variance_policy(variance_policy: &str) -> PyResult<VariancePolicy> {
+    match variance_policy {
+        "bernoulli" => Ok(VariancePolicy::Bernoulli),
+        "error" => Ok(VariancePolicy::Error),
+        "drop" => Ok(VariancePolicy::Drop),
+        "atom" => Ok(VariancePolicy::Atom),
+        "clamp" => Err(EltqError::new_err(
+            "the clamp variance policy was removed from the one-row route at 2.0.0 \
+             (use bernoulli, error, drop, or atom)",
+        )),
+        other => Err(EltqError::new_err(format!(
+            "unknown variance_policy {other:?} (expected bernoulli, error, drop, or atom)"
+        ))),
+    }
+}
+
 fn parse_variance_policy(variance_policy: &str, clamp_factor: f64) -> PyResult<VariancePolicy> {
     match variance_policy {
+        "bernoulli" => Ok(VariancePolicy::Bernoulli),
         "clamp" => Ok(VariancePolicy::ClampSigma {
             factor: clamp_factor,
         }),
@@ -77,34 +99,39 @@ fn parse_variance_policy(variance_policy: &str, clamp_factor: f64) -> PyResult<V
         "drop" => Ok(VariancePolicy::Drop),
         "atom" => Ok(VariancePolicy::Atom),
         other => Err(EltqError::new_err(format!(
-            "unknown variance_policy {other:?} (expected clamp, error, drop, or atom)"
+            "unknown variance_policy {other:?} (expected bernoulli, clamp, error, drop, or atom)"
         ))),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_config(
+/// The one-row route's keyword arguments, shared by the array and CSV entry
+/// points.
+struct Options<'a> {
     bucket_size: f64,
     grid_length: Option<usize>,
+    method: &'a str,
     quadrature_points: usize,
+    nodes_per_decade: usize,
+    overflow: &'a str,
     normalize: bool,
     mean_is_loss_rate: bool,
-    variance_policy: &str,
-    clamp_factor: f64,
+    variance_policy: &'a str,
     threads: Option<usize>,
     chunk_rows: Option<usize>,
-) -> PyResult<Config> {
-    let variance_policy = parse_variance_policy(variance_policy, clamp_factor)?;
-    let mut config = Config::new(bucket_size);
-    config.grid_length = grid_length;
-    config.quadrature_points = quadrature_points;
-    config.normalize = normalize;
-    config.mean_is_loss_rate = mean_is_loss_rate;
-    config.variance_policy = variance_policy;
-    config.threads = threads;
-    if let Some(chunk_rows) = chunk_rows {
-        config.chunk_rows = chunk_rows;
-    }
+}
+
+fn build_config(py: Python<'_>, o: &Options<'_>) -> PyResult<Config> {
+    let mut config = Config::new(o.bucket_size);
+    config.grid_length = o.grid_length;
+    config.method = Method::parse(o.method).map_err(|e| to_py_err(py, e))?;
+    config.quadrature_points = o.quadrature_points;
+    config.nodes_per_decade = o.nodes_per_decade;
+    config.overflow = Overflow::parse(o.overflow).map_err(|e| to_py_err(py, e))?;
+    config.normalize = o.normalize;
+    config.mean_is_loss_rate = o.mean_is_loss_rate;
+    config.variance_policy = parse_one_row_variance_policy(o.variance_policy)?;
+    config.threads = o.threads;
+    config.chunk_rows = o.chunk_rows;
     Ok(config)
 }
 
@@ -118,7 +145,20 @@ fn meta_to_dict<'py>(
     let dict = PyDict::new(py);
     dict.set_item("bucket_size", meta.bucket_size)?;
     dict.set_item("grid_length", meta.grid_length)?;
+    dict.set_item("method", meta.method.as_str())?;
     dict.set_item("quadrature_points", meta.quadrature_points)?;
+    dict.set_item("nodes", meta.nodes)?;
+    dict.set_item("nodes_per_decade", meta.nodes_per_decade)?;
+    dict.set_item("interpolation_error", meta.interpolation_error)?;
+    dict.set_item("overflow", meta.overflow.as_str())?;
+    let per_output = |values: [f64; 2]| -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("raw", values[0])?;
+        d.set_item("secondary", values[1])?;
+        Ok(d)
+    };
+    dict.set_item("rate_above_grid", per_output(meta.rate_above_grid)?)?;
+    dict.set_item("mean_above_grid", per_output(meta.mean_above_grid)?)?;
     dict.set_item("normalized", meta.normalized)?;
     dict.set_item("total_rate", meta.total_rate)?;
     dict.set_item("analytic_aal", meta.analytic_aal)?;
@@ -130,24 +170,7 @@ fn meta_to_dict<'py>(
     dict.set_item("secondary_mean_error", meta.secondary_mean_error)?;
     dict.set_item("input_rows", meta.input_rows)?;
     dict.set_item("valid_rows", meta.valid_rows)?;
-    let diagnostics = PyDict::new(py);
-    for (category, issues) in meta.diagnostics.iter_nonzero() {
-        let entry = PyDict::new(py);
-        entry.set_item("count", issues.count)?;
-        match ids {
-            Some(ids) => entry.set_item(
-                "examples",
-                issues
-                    .examples
-                    .iter()
-                    .map(|&row| ids[row].clone())
-                    .collect::<Vec<_>>(),
-            )?,
-            None => entry.set_item("examples", issues.examples.clone())?,
-        }
-        diagnostics.set_item(category.as_str(), entry)?;
-    }
-    dict.set_item("diagnostics", diagnostics)?;
+    dict.set_item("diagnostics", diagnostics_to_dict(py, &meta.diagnostics, ids)?)?;
     Ok(dict)
 }
 
@@ -166,10 +189,10 @@ fn contiguous<'a>(name: &str, array: &'a PyReadonlyArray1<'_, f64>) -> PyResult<
 
 #[pyfunction]
 #[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *,
-    bucket_size, grid_length=None, quadrature_points=32, normalize=false,
-    mean_is_loss_rate=false, variance_policy="clamp",
-    clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
-    chunk_rows=None))]
+    bucket_size, grid_length=None, method="survival", quadrature_points=32,
+    nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE, overflow="top_bucket",
+    normalize=false, mean_is_loss_rate=false, variance_policy="bernoulli",
+    threads=None, chunk_rows=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantize_arrays<'py>(
     py: Python<'py>,
@@ -180,25 +203,29 @@ fn quantize_arrays<'py>(
     sd_corr: PyReadonlyArray1<'py, f64>,
     bucket_size: f64,
     grid_length: Option<usize>,
+    method: &str,
     quadrature_points: usize,
+    nodes_per_decade: usize,
+    overflow: &str,
     normalize: bool,
     mean_is_loss_rate: bool,
     variance_policy: &str,
-    clamp_factor: f64,
     threads: Option<usize>,
     chunk_rows: Option<usize>,
 ) -> PyResult<QuantizeReturn<'py>> {
-    let config = build_config(
+    let config = build_config(py, &Options {
         bucket_size,
         grid_length,
+        method,
         quadrature_points,
+        nodes_per_decade,
+        overflow,
         normalize,
         mean_is_loss_rate,
         variance_policy,
-        clamp_factor,
         threads,
         chunk_rows,
-    )?;
+    })?;
     let input = EltInput {
         rate: contiguous("rate", &rate)?,
         max_loss: contiguous("max_loss", &max_loss)?,
@@ -218,36 +245,40 @@ fn quantize_arrays<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, *, bucket_size, grid_length=None,
-    quadrature_points=32, normalize=false, mean_is_loss_rate=false,
-    variance_policy="clamp", clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR,
-    threads=None, chunk_rows=None, columns=None))]
+#[pyo3(signature = (path, *, bucket_size, grid_length=None, method="survival",
+    quadrature_points=32, nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE,
+    overflow="top_bucket", normalize=false, mean_is_loss_rate=false,
+    variance_policy="bernoulli", threads=None, chunk_rows=None, columns=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantize_csv<'py>(
     py: Python<'py>,
     path: PathBuf,
     bucket_size: f64,
     grid_length: Option<usize>,
+    method: &str,
     quadrature_points: usize,
+    nodes_per_decade: usize,
+    overflow: &str,
     normalize: bool,
     mean_is_loss_rate: bool,
     variance_policy: &str,
-    clamp_factor: f64,
     threads: Option<usize>,
     chunk_rows: Option<usize>,
     columns: Option<HashMap<String, String>>,
 ) -> PyResult<QuantizeReturn<'py>> {
-    let config = build_config(
+    let config = build_config(py, &Options {
         bucket_size,
         grid_length,
+        method,
         quadrature_points,
+        nodes_per_decade,
+        overflow,
         normalize,
         mean_is_loss_rate,
         variance_policy,
-        clamp_factor,
         threads,
         chunk_rows,
-    )?;
+    })?;
     let mut csv_columns = CsvColumns::default();
     if let Some(mapping) = columns {
         for (key, value) in mapping {
@@ -280,6 +311,181 @@ fn quantize_csv<'py>(
         result.secondary.into_pyarray(py),
         meta,
     ))
+}
+
+/// Diagnostics as a dict of `{category: {count, examples}}`, examples as
+/// 0-based rows or as event ids when `ids` is given.
+fn diagnostics_to_dict<'py>(
+    py: Python<'py>,
+    diagnostics: &eltq_core::Diagnostics,
+    ids: Option<&[String]>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    for (category, issues) in diagnostics.iter_nonzero() {
+        let entry = PyDict::new(py);
+        entry.set_item("count", issues.count)?;
+        match ids {
+            Some(ids) => entry.set_item(
+                "examples",
+                issues.examples.iter().map(|&row| ids[row].clone()).collect::<Vec<_>>(),
+            )?,
+            None => entry.set_item("examples", issues.examples.clone())?,
+        }
+        dict.set_item(category.as_str(), entry)?;
+    }
+    Ok(dict)
+}
+
+/// The exceedance curve of an ELT (spec section 5A): built once, it answers
+/// exceedance queries and makes the even grid at any `bucket_size >= 2
+/// min_loss`. Arrays are copied out on access; the curve itself is shared.
+#[pyclass(name = "ExceedanceCurve", module = "eltq._eltq", frozen)]
+struct PyCurve {
+    inner: Arc<Curve>,
+    config: Config,
+}
+
+#[pymethods]
+impl PyCurve {
+    #[getter]
+    fn loss<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.inner.loss.clone().into_pyarray(py)
+    }
+
+    #[getter]
+    fn exceedance_rate<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.inner.exceedance_rate.clone().into_pyarray(py)
+    }
+
+    #[getter]
+    fn atom_loss<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.inner.atom_loss.clone().into_pyarray(py)
+    }
+
+    #[getter]
+    fn atom_rate<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.inner.atom_rate.clone().into_pyarray(py)
+    }
+
+    /// The curve's metadata as a dict (diagnostic examples as 0-based rows).
+    fn meta<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let c = &self.inner;
+        let dict = PyDict::new(py);
+        dict.set_item("min_loss", c.min_loss)?;
+        dict.set_item("max_loss", c.max_loss)?;
+        dict.set_item("nodes", c.nodes())?;
+        dict.set_item("nodes_per_decade", c.nodes_per_decade)?;
+        dict.set_item("interpolation_error", c.interpolation_error)?;
+        dict.set_item("total_rate", c.total_rate)?;
+        dict.set_item("analytic_aal", c.analytic_aal)?;
+        dict.set_item("input_rows", c.input_rows)?;
+        dict.set_item("valid_rows", c.valid_rows)?;
+        dict.set_item("diagnostics", diagnostics_to_dict(py, &c.diagnostics, None)?)?;
+        Ok(dict)
+    }
+
+    /// `Lambda(x)` with the atoms included, elementwise; NaN below `min_loss`.
+    fn exceedance<'py>(&self, py: Python<'py>, x: PyReadonlyArray1<'py, f64>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let xs = contiguous("x", &x)?;
+        let curve = Arc::clone(&self.inner);
+        let out: Vec<f64> = py.detach(move || xs.iter().map(|&v| curve.exceedance(v)).collect());
+        Ok(out.into_pyarray(py))
+    }
+
+    /// The secondary grid at `bucket_size` with `grid_length` nodes (derived
+    /// when None) under the overflow policy; returns `(array, meta_dict)`.
+    #[pyo3(signature = (bucket_size, grid_length=None, *, normalize=false, overflow="top_bucket"))]
+    fn grid<'py>(
+        &self,
+        py: Python<'py>,
+        bucket_size: f64,
+        grid_length: Option<usize>,
+        normalize: bool,
+        overflow: &str,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyDict>)> {
+        let policy = Overflow::parse(overflow).map_err(|e| to_py_err(py, e))?;
+        let curve = Arc::clone(&self.inner);
+        let config = self.config.clone();
+        let outcome = py
+            .detach(move || curve.grid(bucket_size, grid_length, policy, &config))
+            .map_err(|e| to_py_err(py, e))?;
+        let mut secondary = outcome.secondary;
+        // Compensated, as `quantize` sums them, so the two agree bitwise.
+        let moment = eltq_core::sum::grid_moment(&secondary, bucket_size);
+        let mass = eltq_core::sum::sum(&secondary);
+        if normalize {
+            if self.inner.total_rate <= 0.0 {
+                return Err(to_py_err(py, CoreError::ZeroTotalRate));
+            }
+            for w in secondary.iter_mut() {
+                *w /= self.inner.total_rate;
+            }
+        }
+        let dict = PyDict::new(py);
+        dict.set_item("bucket_size", bucket_size)?;
+        dict.set_item("grid_length", outcome.grid_length)?;
+        dict.set_item("normalized", normalize)?;
+        dict.set_item("overflow", policy.as_str())?;
+        dict.set_item("secondary_mass", if normalize { mass / self.inner.total_rate } else { mass })?;
+        dict.set_item("secondary_mean", if normalize { moment / self.inner.total_rate } else { moment })?;
+        dict.set_item("secondary_mean_error", moment - self.inner.analytic_aal)?;
+        dict.set_item("rate_above_grid", outcome.overflow.rate.value())?;
+        dict.set_item("mean_above_grid", outcome.overflow.moment.value())?;
+        Ok((secondary.into_pyarray(py), dict))
+    }
+}
+
+/// Build the exceedance curve from `min_loss` up (spec section 5A).
+#[pyfunction]
+#[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *, min_loss,
+    nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE, mean_is_loss_rate=false,
+    variance_policy="bernoulli", threads=None, chunk_rows=None))]
+#[allow(clippy::too_many_arguments)]
+fn exceedance_curve<'py>(
+    py: Python<'py>,
+    rate: PyReadonlyArray1<'py, f64>,
+    max_loss: PyReadonlyArray1<'py, f64>,
+    mean_loss: PyReadonlyArray1<'py, f64>,
+    sd_indep: PyReadonlyArray1<'py, f64>,
+    sd_corr: PyReadonlyArray1<'py, f64>,
+    min_loss: f64,
+    nodes_per_decade: usize,
+    mean_is_loss_rate: bool,
+    variance_policy: &str,
+    threads: Option<usize>,
+    chunk_rows: Option<usize>,
+) -> PyResult<PyCurve> {
+    // The bucket size is irrelevant to the curve; a valid placeholder.
+    let config = build_config(py, &Options {
+        bucket_size: 2.0 * min_loss,
+        grid_length: None,
+        method: "survival",
+        quadrature_points: 32,
+        nodes_per_decade,
+        overflow: "top_bucket",
+        normalize: false,
+        mean_is_loss_rate,
+        variance_policy,
+        threads,
+        chunk_rows,
+    })?;
+    let input = EltInput {
+        rate: contiguous("rate", &rate)?,
+        max_loss: contiguous("max_loss", &max_loss)?,
+        mean_loss: contiguous("mean_loss", &mean_loss)?,
+        sd_indep: contiguous("sd_indep", &sd_indep)?,
+        sd_corr: contiguous("sd_corr", &sd_corr)?,
+    };
+    let curve = py
+        .detach(|| {
+            let classified = classify_rows(&input, &config)?;
+            build_curve(&input, &config, &classified, min_loss)
+        })
+        .map_err(|e| to_py_err(py, e))?;
+    Ok(PyCurve {
+        inner: Arc::new(curve),
+        config,
+    })
 }
 
 type JointReturn<'py> = (
@@ -517,6 +723,8 @@ fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("MultiUnitError", py.get_type::<MultiUnitError>())?;
     m.add_function(wrap_pyfunction!(quantize_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(quantize_csv, m)?)?;
+    m.add_class::<PyCurve>()?;
+    m.add_function(wrap_pyfunction!(exceedance_curve, m)?)?;
     m.add_function(wrap_pyfunction!(joint_two_units, m)?)?;
     m.add_function(wrap_pyfunction!(multiunit_views, m)?)?;
     Ok(())

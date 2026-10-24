@@ -293,6 +293,9 @@ def test_row_policies_and_diagnostics(multi):
     assert diag_count(m_atom, "variance_atom") == 1 and m_atom.grid_length == 1031
     with pytest.raises(multi.variance_error):
         run_multi(multi, [good, bad], bucket_size=1.0, variance_policy="error")
+    # The Bernoulli treatment (1.13.0) belongs to the one-row route for now.
+    with pytest.raises(multi.base_error):
+        run_multi(multi, [good, bad], bucket_size=1.0, variance_policy="bernoulli")
     _, m_zero = run_multi(multi, [("z", "a", 0.0, 300.0, 40.0, 30.0, 1000.0), good],
                           bucket_size=1.0)
     assert diag_count(m_zero, "zero_rate") == 1 and m_zero.valid_events == 1

@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use eltq_core::{Category, Config, EltInput, quantize};
+use eltq_core::{Category, Config, EltInput, Method, quantize};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
@@ -74,15 +74,20 @@ fn assert_arrays_close(label: &str, got: &[f64], want: &[f64], rtol: f64, atol: 
 }
 
 fn check_golden(name: &str) {
-    let cols = read_elt(name);
-    let (golden_raw, golden_secondary) = read_golden_arrays(name);
     let meta_json: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(fixtures_dir().join(format!("golden/{name}.meta.json"))).unwrap(),
     )
     .unwrap();
+    // The fixture CSV the golden was computed from (its own name before 2.0.0).
+    let cols = read_elt(meta_json["fixture"].as_str().unwrap_or(name));
+    let (golden_raw, golden_secondary) = read_golden_arrays(name);
 
     let mut config = Config::new(meta_json["params"]["bucket_size"].as_f64().unwrap());
-    config.quadrature_points = meta_json["params"]["quadrature_points"].as_u64().unwrap() as usize;
+    if let Some(k) = meta_json["params"]["quadrature_points"].as_u64() {
+        config.quadrature_points = k as usize;
+    }
+    // Goldens written before 1.15.0 carry no method: they are quantiles.
+    config.method = Method::parse(meta_json["params"]["method"].as_str().unwrap_or("quantiles")).unwrap();
     let input = EltInput {
         rate: &cols.rate,
         max_loss: &cols.max_loss,
@@ -104,12 +109,9 @@ fn check_golden(name: &str) {
     let rel = |got: f64, want: f64| (got - want).abs() / want.abs().max(f64::MIN_POSITIVE);
     assert!(rel(meta.total_rate, total_rate) < 1e-12);
     assert!(rel(meta.analytic_aal, meta_json["analytic_aal"].as_f64().unwrap()) < 1e-12);
-    assert!(
-        rel(
-            meta.quadrature_secondary_mean,
-            meta_json["quadrature_secondary_mean"].as_f64().unwrap()
-        ) < 1e-9
-    );
+    if let Some(want) = meta_json["quadrature_secondary_mean"].as_f64() {
+        assert!(rel(meta.quadrature_secondary_mean.unwrap(), want) < 1e-9);
+    }
 
     // Diagnostics: identical per-category counts (and no unexpected ones).
     let golden_diag = meta_json["diagnostics"].as_object().unwrap();
@@ -135,4 +137,14 @@ fn small_golden() {
 #[test]
 fn medium_golden() {
     check_golden("medium");
+}
+
+#[test]
+fn small_survival_golden() {
+    check_golden("small_survival");
+}
+
+#[test]
+fn medium_survival_golden() {
+    check_golden("medium_survival");
 }

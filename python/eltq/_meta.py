@@ -4,6 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+#: Default node density of the survival method (nodes per decade of loss),
+#: shared by both backends: the smallest density whose exact-edge error is
+#: within 1e-4 on every benchmark portfolio (`benchmarks/report-1.16.0.md`).
+DEFAULT_NODES_PER_DECADE = 100
+
+#: Survival method: the number of node intervals before an event's endpoint
+#: that are left to its exact tail rather than to the interpolated curve
+#: (spec section 5A). Shared by both backends.
+TAIL_INTERVALS = 4
+
+
+def _zero_per_output() -> dict:
+    return {"raw": 0.0, "secondary": 0.0}
+
 
 @dataclass
 class RowIssues:
@@ -20,13 +34,23 @@ class Meta:
     Masses and means describe the arrays actually returned (normalized when
     ``normalized``); ``total_rate``, ``analytic_aal``,
     ``quadrature_secondary_mean`` and ``secondary_mean_error`` are always in
-    rate-weighted units. Diagnostic examples are event ids when available,
-    0-based row indices otherwise.
+    rate-weighted units. ``secondary_mean_error`` is the secondary grid's
+    first moment less ``analytic_aal`` under either method. Diagnostic
+    examples are event ids when available, 0-based row indices otherwise.
+
+    ``method`` is ``quantiles`` or ``survival``. Under ``quantiles``,
+    ``quadrature_points`` and ``quadrature_secondary_mean`` are set and the
+    survival fields are None; under ``survival`` the reverse: ``nodes`` (the
+    node count), ``nodes_per_decade`` and ``interpolation_error`` (the
+    sampled relative error of the interpolant). ``overflow`` is the policy
+    applied; ``rate_above_grid`` and ``mean_above_grid`` give, per output,
+    the overflow's rate and its first moment in excess of the top node (both
+    exactly zero when the grid length was derived from the input).
     """
 
     bucket_size: float
     grid_length: int
-    quadrature_points: int
+    quadrature_points: int | None
     normalized: bool
     total_rate: float
     analytic_aal: float
@@ -34,11 +58,57 @@ class Meta:
     raw_mean: float
     secondary_mass: float
     secondary_mean: float
-    quadrature_secondary_mean: float
+    quadrature_secondary_mean: float | None
     secondary_mean_error: float
     input_rows: int
     valid_rows: int
     diagnostics: dict[str, RowIssues]
+    method: str = "quantiles"
+    nodes: int | None = None
+    nodes_per_decade: int | None = None
+    interpolation_error: float | None = None
+    overflow: str = "top_bucket"
+    rate_above_grid: dict = field(default_factory=_zero_per_output)
+    mean_above_grid: dict = field(default_factory=_zero_per_output)
+
+
+@dataclass
+class CurveMeta:
+    """Metadata of an exceedance curve: its node range and count, the
+    sampled interpolation error, the totals over the contributing rows and
+    the row diagnostics. ``total_rate`` and ``analytic_aal`` are in
+    rate-weighted units."""
+
+    min_loss: float
+    max_loss: float
+    nodes: int
+    nodes_per_decade: int
+    interpolation_error: float
+    total_rate: float
+    analytic_aal: float
+    input_rows: int
+    valid_rows: int
+    diagnostics: dict[str, RowIssues]
+
+
+@dataclass
+class GridMeta:
+    """Metadata of a grid made from an exceedance curve. ``secondary_mass``
+    and ``secondary_mean`` describe the array returned (normalized when
+    ``normalized``); ``secondary_mean_error`` is the grid's first moment in
+    rate units less the curve's analytic AAL; the overflow figures are the
+    rate beyond the top bucket and its first moment in excess of the top
+    node."""
+
+    bucket_size: float
+    grid_length: int
+    normalized: bool
+    overflow: str
+    secondary_mass: float
+    secondary_mean: float
+    secondary_mean_error: float
+    rate_above_grid: float
+    mean_above_grid: float
 
 
 @dataclass

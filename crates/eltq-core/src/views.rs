@@ -160,7 +160,7 @@ impl MultiConfig {
             z_rule: ZRule::Midpoint,
             views: View::ALL.to_vec(),
             normalize: false,
-            variance_policy: VariancePolicy::default(),
+            variance_policy: VariancePolicy::clamp_default(),
             threads: None,
             chunk_rows: DEFAULT_MULTI_CHUNK_ROWS,
             roll_up_diagnostic: false,
@@ -1005,7 +1005,7 @@ pub fn multiunit_views(
                         sd_corr: units.iter().map(|u| input.sd_corr[u.row]).sum(),
                         max_loss: units.iter().map(|u| input.max_loss[u.row]).sum(),
                     };
-                    let rolled_plan = prepare_unit(&rolled, "rolled", VariancePolicy::default())?;
+                    let rolled_plan = prepare_unit(&rolled, "rolled", VariancePolicy::clamp_default())?;
                     let rolled_pmf = marginal_pmf(&rolled_plan, h, pmf.len());
                     let (sd_exact, sd_rolled) = (sd_of(pmf, h), sd_of(&rolled_pmf, h));
                     let (q_exact, q_rolled) = (quantile_of(pmf, h, 0.99), quantile_of(&rolled_pmf, h, 0.99));
@@ -1201,7 +1201,7 @@ mod tests {
         let result = multiunit_views(&input(&r), &terms, &config).unwrap();
         let plan = |row: usize| {
             let spec = input(&r).spec(row);
-            let class = classify_unit_row(row, &spec, VariancePolicy::default(), &mut Diagnostics::default()).unwrap();
+            let class = classify_unit_row(row, &spec, VariancePolicy::clamp_default(), &mut Diagnostics::default()).unwrap();
             UnitPlan::from_row(&class, &spec)
         };
         let p1 = marginal_pmf(&plan(0), 10.0, 101);

@@ -27,7 +27,7 @@ def elt_impl():
 def test_csv_route_matches_array_route(name):
     df = load_fixture(name)
     params = {"bucket_size": 0.5 if name == "small" else 5000.0,
-              "quadrature_points": 8 if name == "small" else 32}
+              "method": "quantiles", "quadrature_points": 8 if name == "small" else 32}
     raw_a, sec_a, meta_a = run(elt_impl(), df, **params)
     raw_c, sec_c, meta_c = eltq.quantize_csv(FIXTURES_DIR / f"{name}_elt.csv",
                                              **params)
