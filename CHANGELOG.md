@@ -3,6 +3,12 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.0.1] - 2026-10-24
+
+### Fixed
+
+- [oep-pml] `ExceedanceCurve.oep_pml` returned the largest atom's loss at every return period whose answer lies above every atom (the clipped atom search). It now returns the bisection answer there; an atom whose step jumps the target is still returned as before (`dev/done/plan-survival-tail-cost.md`, finding 3).
+
 ## [2.0.0] - 2026-10-24
 
 Major: the default `secondary` output changes, and the clamp policy leaves the one-row route.

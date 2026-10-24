@@ -281,3 +281,27 @@ def test_curve_oep_pml():
             assert math.isclose(curve.exceedance(np.array([x]))[0], target, rel_tol=1e-9)
     # Below the curve's range: the target exceeds Lambda(min_loss).
     assert np.isnan(curve.oep_pml(np.array([1.0 + 1e-9]))[0])
+
+
+def test_curve_oep_pml_above_every_atom():
+    """An answer above the largest atom is the bisection answer, not that
+    atom (2.0.1; `dev/done/plan-survival-tail-cost.md`, finding 3)."""
+    import eltq
+
+    # One wide beta and one atom at 1e5, below every solved point.
+    curve = eltq.exceedance_curve(np.array([0.5, 1e-3]), np.array([1e7, 1e5]),
+                                  np.array([2e5, 1e5]), np.array([6e5, 0.0]),
+                                  np.zeros(2), min_loss=50.0)
+    assert curve.atom_loss.tolist() == [1e5]
+    periods = np.array([10.0, 100.0, 1000.0])
+    pml = curve.oep_pml(periods)
+    assert np.all(pml > 1e5)
+    for t, x in zip(periods, pml):
+        target = -math.log1p(-1.0 / t)
+        assert math.isclose(curve.exceedance(np.array([x]))[0], target, rel_tol=1e-9)
+    # The atom's step still wins where it jumps the target: Lambda just
+    # below the atom is 0.501 + the beta, just above it loses the 1e-3.
+    below = curve.exceedance(np.array([1e5 * (1.0 - 1e-9)]))[0]
+    above = curve.exceedance(np.array([1e5]))[0]
+    t_atom = 1.0 / -math.expm1(-0.5 * (below + above))
+    assert curve.oep_pml(np.array([t_atom]))[0] == 1e5

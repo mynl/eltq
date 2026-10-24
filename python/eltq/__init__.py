@@ -36,7 +36,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 try:
     from eltq._eltq import (
@@ -552,9 +552,13 @@ class ExceedanceCurve:
         found = x_hi.copy()
         atoms = np.sort(self.atom_loss)
         if atoms.size:
-            i = np.minimum(np.searchsorted(atoms, x_lo, side="left"), atoms.size - 1)
-            inside = atoms[i] <= x_hi
-            found[inside] = atoms[i][inside]
+            # The first atom at or above x_lo, if any; an answer above every
+            # atom has none (2.0.1: the clipped index used to return the
+            # largest atom there).
+            j = np.searchsorted(atoms, x_lo, side="left")
+            inside = j < atoms.size
+            inside[inside] = atoms[j[inside]] <= x_hi[inside]
+            found[inside] = atoms[j[inside]]
         out[solve] = found
         return out.reshape(shape)
 
