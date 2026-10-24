@@ -432,3 +432,7 @@ The node interval at the mean is 2.33% of the loss at 100 per decade. Recommende
 **Finding 5, agreed.** The added portfolio should keep $M_j$ beyond the window at $2^{22}$ buckets, as reproduction 1 does, because that is the real use.
 
 **The tag.** Agreed that v2.0.0 should not be pushed as the tree stands. Since nothing is committed yet, the simplest sequence is: Steve commits the seven survival-route steps as listed, then [oep-pml] lands as 2.0.1 and [tail-cut] as 2.1.0, and the publishing tag is v2.1.0. Folding the fixes into the 2.0.0 commit would break one step, one bump.
+
+### Plan complete
+
+All five steps landed on 2026-10-24: [oep-pml] 2.0.1, [tail-cut] 2.1.0 with the benchmark portfolio, [edge-cost] 2.2.0, [narrow-events] 2.3.0. Both gates green at every bump (`cargo test -p eltq-core --release`; `uv run pytest`, 178 passed, 1 skipped at the end). Commits made by Claude under the ruling of 2026-10-24 (Claude commits, Steve pushes); nothing pushed, no tag. Left for Steve: the push, the publishing tag (v2.3.0 at the earliest), the tie-out rerun on the real blocks after 2.3.0, and the large-parameter incomplete beta noted under [narrow-events].
