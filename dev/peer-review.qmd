@@ -1,0 +1,506 @@
+---
+title: "Peer review of eltq: single-unit secondary uncertainty"
+subtitle: "Algorithm correctness, algorithm efficiency, and Rust implementation"
+date: 2026-10-25
+format:
+  html:
+    toc: true
+    number-sections: true
+execute:
+  eval: false
+---
+
+## Assessment and scope
+
+**Recommendation: retain the survival-curve architecture, but make substantial numerical corrections before treating it as generally accurate over the accepted parameter domain.** The implementation is fast and thoughtfully structured. The discovery process described in the implementation article solved real problems; returning to 32 equally weighted quantiles would reintroduce them. However, several remaining shortcuts produce incorrect answers on admissible, reproducible single-row inputs. Passing the current tests, conserving mass, and reporting a small interpolation diagnostic do not establish correctness.
+
+There is also substantial performance headroom. One configuration change alone improved measured quantile throughput by **4.74 times** on a 262,144-row portfolio. The Rust code uses multiple cores effectively on the survival route, but the principal special-function arithmetic remains scalar. It does not yet exploit all relevant CPU capabilities, and some avoidable work precedes the question of SIMD.
+
+This review covers version **2.3.2**, commit `cf28041db7ae5778c7fda88acb56257bb2ddc6da`, principally `curve.rs`, `incbeta.rs`, `batched.rs`, `beta.rs`, `quantize.rs`, validation, deposition, and the Python interface. It concerns one unit, with many independent event rows; it does not audit multi-unit dependence, financial terms, or the downstream `aggregate` FFT implementation. The two supplied articles and the repository specification provide the intended mathematics:
+
+- [Secondary uncertainty method](D:/Projects/aggregate/secondary-uncertainty/secondary-uncertainty-method.qmd).
+- [Implementation article](D:/Projects/aggregate/secondary-uncertainty/secondary-uncertainty-eltq-implementation.qmd).
+- [Mathematical specification](../secondary-uncertainty-mathematical-specification.md).
+
+All numerical examples below are synthetic. No source code, fixtures, or benchmark records in the repository were changed. Scratch scripts, builds, and test outputs were placed outside the repository. Reproductions appear at the end of this report.
+
+The main findings are:
+
+| ID | Priority | Finding | Evidence |
+|:---|:---|:---|:---|
+| A1 | High | The large-shape step approximation destroys resolvable uncertainty and can misallocate half the event rate. | Symmetric beta: correct bucket split $0.5/0.5$, returned $0/1$. |
+| A2 | High | Endpoint power-law extrapolation starts before its asymptotic regime. | Correct edge survival $0.68268949$, grid survival $0.05401092$, diagnostic zero. |
+| A3 | High for claimed accuracy | Fixed node density and 64 diagnostic samples do not control interpolation error. | $22.8\%$ relative survival error with reported error $1.63\times10^{-5}$. |
+| I1 | High | Rust loses the overflow moment of events whose endpoint survival underflows. | Reported zero; exact excess moment $0.0005796480662$. Python reference gets this case right. |
+| I2 | High robustness | The continued fraction silently returns unconverged values; changing node density can expose them in the public API. | Returned bucket weights $[-0.45082991,1.45082991]$. |
+| I3 | Medium, extreme domain | Small survival probabilities can still be calculated by cancellation; finite monetary inputs can overflow or underflow intermediate arithmetic. | A nonmonotone rare-event curve; scale-equivalent betas misclassified as Bernoulli or atoms. |
+| P1 | High performance | Quantile chunk size can leave most cores idle. | 0.652 s to 0.137 s by changing `chunk_rows`, with the same method and $K$. |
+| P2 | Medium performance | Repeated searches, special-function setup, allocations, and grid passes remain. | Source inspection, timing decomposition, and optimized assembly inspection. |
+
+“High” means a demonstrated error in returned probabilities or material metadata, or a demonstrated substantial performance opportunity. It does not imply that every realistic portfolio exhibits that failure.
+
+## Algorithm correctness
+
+### The central mathematics is sound
+
+For one unit, summing the standard deviations is the stipulated model convention, not a numerical error:
+
+$$
+\sigma_j=\sigma_{I,j}+\sigma_{C,j},\qquad
+\kappa_j=\frac{\mu_j(M_j-\mu_j)}{\sigma_j^2}-1,
+\qquad
+(\alpha_j,\beta_j)=\kappa_j(p_j,1-p_j),\quad p_j=\mu_j/M_j.
+$$
+
+The code implements these equations. Replacing an inadmissible variance by the Bernoulli law on $\{0,M_j\}$ preserves the mean and realizes the greatest feasible variance. It is a defensible, explicit model repair, as the method article explains. It does **not** preserve the supplied variance, and maximal variance does not make every exceedance probability conservative. The existing diagnostic for that repair should remain visible to consumers.
+
+Write the total contributing event rate as $R=\sum_j\lambda_j$ and the strict exceedance rate as $\Lambda(x)=\sum_j\lambda_j\Pr(X_j>x)$. Then
+
+$$
+\operatorname{OEP}(x)=1-\exp[-\Lambda(x)]
+$$
+
+is correct under the stated independent Poisson event model. Raw atoms, Bernoulli atoms, and continuous beta contributions must all be included with that convention.
+
+The split between the shared truncated curve and individual endpoint tails is also an exact identity before numerical approximation. For a truncation point $x_k$, monotonicity gives
+
+$$
+S(x)=[S(x)-S(x_k)]^+ +
+\begin{cases}
+S(x_k),&x<x_k,\\
+S(x),&x\ge x_k.
+\end{cases}
+$$
+
+Keeping each truncation kink on a node, with distinct incoming and outgoing derivatives, addresses the earlier interpolation failure for a substantive mathematical reason. The narrow-event separation likewise addresses a real resolution problem. The question is whether the implementations of these pieces have adequate error control.
+
+The quantile method is correctly understood as an approximation. Before grid deposition, its equally weighted midpoint construction gives a survival staircase with absolute error at most $1/(2K)$. That is a poor relative error guarantee in a rare tail, and says little about lost first moment when $M$ is large. Linear deposition preserves the mean of the **computed quantile approximation**, not necessarily the original beta. Its availability as an explicitly selected method is useful; it should not be the universal accuracy fallback.
+
+### A1. The step threshold is mathematically unjustified {#sec-a1}
+
+**Location:** [curve.rs](../crates/eltq-core/src/curve.rs), constant at line 251 and branch at lines 623–638.
+
+The narrow route substitutes a step at the mean whenever $\alpha+\beta>10^{15}$. The accompanying comment says the density cannot be resolved in double precision. That is not true at this threshold. For a symmetric beta with $\alpha+\beta\simeq2.5\times10^{15}$, its standard deviation in loss-ratio units is $10^{-8}$, approximately eight orders of magnitude larger than the spacing of floating-point numbers near $0.5$.
+
+Take a single event with rate 1, $M=1$, $\mu=0.5$, and $\sigma=10^{-8}$. On a grid with $h=0.2$, the mean is exactly the edge between the nodes at 0.4 and 0.6. Symmetry gives $S(0.5)=0.5$ **exactly**, independently of any special-function oracle. Almost all the mass belongs equally to these two buckets.
+
+| Standard deviation | Returned weight at 0.4 | Returned weight at 0.6 | Returned mean |
+|---:|---:|---:|---:|
+| $0$ | 0.5 | 0.5 | 0.5 |
+| $10^{-8}$ | 0 | 1 | 0.6 |
+| $2\times10^{-8}$ | 0.499999999764 | 0.500000000236 | 0.500000000047 |
+
+For the middle row the curve returns $S(0.5)=0$, and `interpolation_error` is zero. Both repository backends reproduce the bad bucket split. This is not the unavoidable error of rounding a continuous loss to a grid: exact nearest-rule probabilities give the half-and-half split. It is an additional error introduced by the step shortcut.
+
+Nor does a large sum of shape parameters alone measure concentration relative to the mean. With a very small $p$, one can have an enormous $\beta$ while retaining a financially meaningful coefficient of variation. A threshold on $\alpha+\beta$ conflates distinct conditioning problems.
+
+**Required correction:** retain a standardized-coordinate distribution evaluation, using a validated large-parameter approximation when appropriate. For a grid-only shortcut, check whether the distribution's retained bulk fits within a bucket and bound its probability of crossing the nearest edge. A mean lying on an edge requires an actual probability calculation however small the standard deviation. For the public curve, an atom approximation needs an explicit approximation contract; it cannot be justified by grid resolution.
+
+### A2. The endpoint extrapolation is not uniformly valid {#sec-a2}
+
+**Location:** `TailInterpolant::new` and `eval`, [curve.rs](../crates/eltq-core/src/curve.rs), lines 142–195; the minimum distance is set at line 1026.
+
+The endpoint interpolant stops adding nodes at a distance controlled by $x_0/2$, where $x_0=h/2$ for an ordinary quantization. Beyond its last node it extrapolates a pure power law. But the beta survival's endpoint expansion, with $t=1-x/M$, is
+
+$$
+S(x)=\frac{t^\beta}{\beta B(\alpha,\beta)}
+\left[1-\frac{(\alpha-1)\beta}{\beta+1}t
++O(\alpha^2t^2)\right].
+$$
+
+Small $t$ in absolute units is insufficient when $\alpha$ is large. Neither $h/4$ nor the last few geometric nodes establishes that the omitted correction is small. Moreover, a bucket edge can fall arbitrarily close to $M$, so coarse grid spacing does not make this issue disappear.
+
+Reproduction: $M=1$, rate 1, $\alpha=10^6$, $\beta=0.5$, with the input mean and standard deviation derived from those shapes. Set
+
+$$
+h=\frac{1-0.5/10^6}{999.5}=0.0010004997498749375,
+\qquad n=1001.
+$$
+
+At edge $e_{999}=0.9999995$:
+
+| Quantity | Value |
+|:---|---:|
+| Independent incomplete-beta survival | 0.682689492117 |
+| `curve.exceedance` | 0.682689492086 |
+| Grid tail above that edge | 0.054010923224 |
+| Reported interpolation error | 0 |
+
+The grid moves approximately **0.629 of the event's rate across the wrong edge**. The curve query is accurate here because it evaluates this tail directly; the grid uses the extrapolation. The rate cut is not responsible: the probabilities are large. A related $\operatorname{Beta}(10^6,1)$ example has the elementary oracle $S(x)=-\operatorname{expm1}(10^6\log x)$ and exhibits the same failure.
+
+**Required correction:** establish an asymptotic validity criterion involving both shapes and distance, or extend the interpolation table to cover the actual queried edges. Direct special-function evaluation for a small number of edges outside the validated table is another reasonable fallback. Endpoint-heavy distributions deserve explicit tests whether or not both shapes exceed 1. Simply increasing the global node density does not certify the extrapolation.
+
+### A3. The default node rule leaves an accuracy gap {#sec-a3}
+
+**Location:** [curve.rs](../crates/eltq-core/src/curve.rs), lines 557, 623, and 864–875.
+
+The regular/narrow boundary is approximately $\sigma/\mu=0.02329$ at the default density. A beta just wider than that threshold can still have substantial curvature within one node interval, especially in its upper tail. Monotonicity of a cubic is not an accuracy bound.
+
+For $\alpha=1800$, $\beta=10^6$, $M=1$, and `min_loss` equal to $10^{-4}$ times the mean, the default curve gives, at $x=0.001944568270403778$:
+
+$$
+S_{\rm exact}=0.0003252159380341,
+\qquad
+S_{\rm curve}=0.0002510638806885.
+$$
+
+That is **22.8% relative error**. The diagnostic is only $1.6329608661\times10^{-5}$, below the familiar $10^{-4}$ benchmark threshold. This example has a coefficient of variation around 2.35%; it is not a near-Bernoulli singularity. Scaling all monetary fields produces the same issue in ordinary monetary units.
+
+The specification correctly calls the diagnostic a sample, not a bound. Nevertheless, its practical interpretation needs tightening. It measures only the shared-curve interpolation, at 64 selected midpoints, relative to sampled total beta survival. It does not independently validate:
+
+- the narrow-event approximation;
+- the endpoint interpolant and its extrapolation;
+- the incomplete-beta values that generated the nodes and samples;
+- grid subtraction, overflow moments, or all unsampled intervals.
+
+Increasing the exposure-to-mean range spreads those 64 samples over more decades and can miss the few intervals containing the loss distribution. The two zero diagnostics in A1 and A2 are structural omissions, not unlucky rounding.
+
+**Required correction:** introduce an accuracy target and a response when it is not met. Candidate responses are local node refinement, routing a broader set of concentrated events to direct evaluation, and validating each tail segment separately. Use a mixed absolute/relative rate tolerance so effort is spent on financially relevant probabilities. Adaptive midpoint checks are useful evidence, although a midpoint check alone is still not a rigorous maximum-error bound. Treat 100 nodes per decade as an empirically good starting mesh, not a general guarantee.
+
+### Separate the approximation errors
+
+The computation has at least five distinct errors: model repair, special-function evaluation, curve/tail approximation, tail truncation, and grid discretization. A single mean error and one sampled curve diagnostic cannot certify all five.
+
+The rate-floor argument is reasonable **if the survival evaluations are accurate**. With $N$ truncated events and per-event cut $\tau=10^{-20}R_\beta$, the total displaced rate is at most $N\tau$. For a million events that is $10^{-14}R_\beta$. The corresponding conservative first-moment bound is $\tau\sum_j M_j$, so negligible probability does not automatically establish negligible monetary loss over an unrestricted range of exposures. A practical error budget should track both quantities.
+
+OEP probability errors satisfy $|\Delta\operatorname{OEP}|\le |\Delta\Lambda|$. A PML's loss error, however, is locally about $|\Delta\Lambda|/|\Lambda'(x)|$ away from atoms. Flat survival regions can turn a small rate error into an appreciable loss error. Bisection to near machine precision on the interpolant does not remove that error.
+
+Nearest-rule discretization has a valid purpose and an inherent tradeoff. For a fully covered exact distribution it moves each loss by at most $h/2$, hence changes the rate-weighted first moment by at most $Rh/2$. It does not preserve AAL exactly. First-bucket singularities and endpoint or narrow distributions invalidate casual use of smooth-density second-order error arguments. The reported mean error is useful, but opposite errors can cancel. If exact AAL is required, a separately specified integrated linear projection using bucket masses and partial first moments is an alternative; it would deliberately change the discretization and its variance properties.
+
+Three statements in the implementation article should be qualified:
+
+1. The implemented survival method does approximate events: interpolation, truncated bulk integration, power-law extrapolation, and the step shortcut are approximations. “Exact at every bucket edge” and the table's accuracy down to $10^{-300}$ are not properties of this entire pipeline.
+2. With atoms at zero, $\Lambda(0)$ is **not** the total catalogue rate $R$. One must either retain zero severities and normalize by $R$, as the code does, or thin them out and normalize consistently. The article's introductory equality $\Lambda(0)=\sum_j\lambda_j$ needs that qualification.
+3. The curve-vector fold uses ordinary additions. Neumaier compensation is used for selected scalar totals, not the vectors of node values and slopes. The parallel-computation description currently overstates the scope of compensated summation.
+
+## Algorithm efficiency
+
+### The architecture is appropriate, but no single path is fastest for every task
+
+Let $N$ be the number of rows, $L$ the shared node count, $G$ the output grid length, $C_j$ the number of costly node evaluations for event $j$, and $W_j$ the number of tail or narrow-event edges walked. The intended survival cost is roughly
+
+$$
+O\!\left(\sum_j C_j\,c_\beta + NL_{\rm cheap}
++\sum_j W_j\,c_{\rm edge}+G\log L\right),
+$$
+
+plus diagnostic evaluations, sorting, allocation, and folding. The present shared-grid interpolation searches an interval for each edge, explaining the $G\log L$ term. Narrow-event quadrature has a higher edge cost than the endpoint cubic. Lower-tail skipping removes expensive function calls, but the code still visits skipped nodes and accumulates their plateau contributions.
+
+This is a major improvement over $NG$ independent incomplete-beta calls. Shared geometric nodes, per-event constants, endpoint separation, stopping at the grid window, and the rate cut are all sound efficiency choices. The later span-limited histograms and smaller survival chunks address real memory and scheduling costs. I would preserve those decisions.
+
+There are nevertheless several useful alternatives or extensions:
+
+**Compute only what the caller requests.** A handful of exceedance values does not inherently require a complete reusable curve. Direct parallel summation at specified thresholds may beat hundreds of nodes per event and is also an excellent independent check. For PMLs, use the curve to obtain brackets and, where requested, refine the final answers by direct sums. This separates fast exploration from a specified final tolerance. Repeated grids do favor retaining the curve.
+
+**Choose numerical formulas by regime, with error checks.** The present single continued-fraction formula is simple, but it is not a universal optimum. Power-series, complement, recurrence, and large-parameter branches can improve both accuracy and throughput. Elementary power-law cases are especially cheap. Boost's incomplete-beta implementation documents such domain-dependent choices, based on DiDonato and Morris's Algorithm 708; it is a useful comparison implementation, not evidence that a particular replacement will be faster here. [Boost incomplete-beta implementation notes](https://www.boost.org/doc/libs/latest/libs/math/doc/html/math_toolkit/sf_beta/ibeta_function.html).
+
+**Adapt work to the requested error.** A uniformly dense mesh spends effort in nearly flat regions and can still miss a difficult transition. Local refinement or a validated per-event approximation can use fewer evaluations for the same accuracy. The proposed design must be benchmarked on mixed portfolios, because too much per-event machinery can lose the advantage of aggregating first. A realistic catalogue is an essential performance test; it is not a complete adversarial numerical test.
+
+**Make concentrated-event queries reusable.** The grid walk integrates narrow-event density incrementally, which is good. Arbitrary curve queries instead reconstruct a kernel and integrate from a bulk edge on each call. On 10,000 identical narrow events, one query at the common mean took 20.3 ms and 100 identical queries took 2.03 s. Those are warmed median times. Bisection repeatedly incurs similar work in that region. Caching a validated standardized representation, grouping exactly identical event laws, deduplicating query points, or batching sorted queries could reduce this cost. Approximate grouping needs its own error control; exact grouping only needs careful summation and determinism handling.
+
+**Do not require direct evaluation at every output edge everywhere.** Fixing A1–A3 need not discard shared curves. Exceptional edges and distributions can use a more robust route while well-resolved regions retain cheap interpolation. A wholesale return to brute force would sacrifice the principal benefit of the design.
+
+### The next benchmark suite should measure equal accuracy
+
+The current historical speed comparison with $K=32$ is informative about cost, but not about efficiency at a common error target. In the cases motivating the survival method, $K=32$ delivers a materially different answer. An optimization should be compared against the current method at matched bounds on relevant exceedance rates, AAL, and PML losses.
+
+Include portfolios dominated by ordinary betas, very small $\alpha$, endpoint-heavy betas, concentrated betas on both sides of each routing threshold, and mixtures of those regimes. Vary the grid window independently of the largest exposure. Report curve construction, grid construction, query time, and peak memory separately. Include small and medium row counts as well as one million: the default quantile chunk problem is largely hidden by million-row-only headlines.
+
+## Implementation correctness and efficiency
+
+### I1. Overflow moments are lost when endpoint survival underflows {#sec-i1}
+
+**Location:** [curve.rs](../crates/eltq-core/src/curve.rs), tail retention at line 711 and overflow-moment loop at lines 1005–1015.
+
+Only events with positive survival at the truncation node are retained in `self.tails`. Later, the shared curve's overflow moment is computed by iterating over that list. A zero endpoint-tail value does not mean the event has zero survival at an earlier grid-window edge. Its shared-curve contribution may be substantial there, but the information needed for its moment has been discarded.
+
+For a rate-one $\operatorname{Beta}(2,1000)$ event on $[0,1]$, with $h=10^{-4}$ and $n=20$, the top node is 0.0019 and the top edge is 0.00195. The correct overflow quantities are
+
+$$
+r_{\rm over}=S(0.00195)=0.4189102615568,
+$$
+
+$$
+m_{\rm over}
+=\frac{2}{1002}\,S_{3,1000}(0.00195)
+-0.0019\,S_{2,1000}(0.00195)
+=0.0005796480662291.
+$$
+
+Rust reports rate 0.4189102630810, consistent with the curve approximation, but **zero** overflow mean. The Python reference reports the correct nonzero mean because its grouped event records retain this information. Scaling $M$ to one million makes the missing excess moment approximately 579.65 per unit event rate; this is not an underflow-sized monetary effect.
+
+The step approximation has a separate overflow-moment failure: $M=1$, $\mu=0.55$, $\sigma=10^{-9}$, $h=0.2$, $n=3$ reports secondary overflow rate 1 and excess moment zero. The correct excess moment is approximately 0.15. Its zero-width integration interval cannot recover the moment of the substituted step.
+
+**Required correction:** retain the event information needed for window moments independently of whether an endpoint tail is positive. Handle any deliberately substituted atom consistently in probability and partial expectation. Add assertions against analytical partial moments under both overflow policies. This also demonstrates why comparing only the output arrays against the reference is insufficient.
+
+### I2. Special-function failure is not surfaced {#sec-i2}
+
+**Location:** [incbeta.rs](../crates/eltq-core/src/incbeta.rs), lines 16 and 164–206; [batched.rs](../crates/eltq-core/src/batched.rs), iterative inverse routines.
+
+`betacf` returns its current value after 400 iterations without a convergence flag. The resulting probability can lie outside $[0,1]$. Freshly compiled Rust calls gave:
+
+| $a=b$ | `BetaFn::sf(0.5)` | Exact |
+|---:|---:|---:|
+| $10^6$ | 0.499999999661 | 0.5 |
+| $10^7$ | 0.500757097706 | 0.5 |
+| $10^8$ | 0.614875545355 | 0.5 |
+| $10^9$ | 1.450829907873 | 0.5 |
+
+The normal default routing protects many such events by using the narrow kernel. It does not make the continued fraction generally safe. In particular, the narrow decision depends on `nodes_per_decade`. Raising the density can return an event to the regular path and expose the failing kernel.
+
+Public reproduction: a symmetric beta with $a=b=10^9$, `bucket_size=1`, `grid_length=2`, and `nodes_per_decade=200000` returns
+
+$$
+[-0.450829907873,\;1.450829907873]
+$$
+
+instead of $[0.5,0.5]$. Its total mass is exactly 1, illustrating that mass conservation alone can coexist with a grossly invalid distribution. The density is deliberately large, but it is an accepted configuration; increasing it should not switch off numerical safeguards.
+
+**Required correction:** make special-function routing depend on its own numerical validity, independently of interpolation resolution. Return convergence status and validate finite probability range. Use a robust fallback or a typed error on failure. Clipping the final probabilities is not a repair for an unconverged continued fraction. The inverse routines likewise need a justified acceptance criterion when their iteration limit is exhausted; returning a best-so-far point is not evidence of convergence.
+
+### I3. Numerical-domain claims exceed the implemented safeguards
+
+**Small survival probabilities.** In the lower-$x$ branch, `BetaFn::sf` and `sf_and_density_times_y` still calculate `1 - front * fraction / alpha`. The switch chooses the convenient continued-fraction direction; it does not guarantee that this is the numerically small probability. With tiny $\alpha$, the CDF can already be very close to 1 below that switch.
+
+For $a=10^{-16}$, $b=1$, $x=0.1$, the elementary answer is
+
+$$
+S(x)=-\operatorname{expm1}(a\log x)=2.302585092994\times10^{-16}.
+$$
+
+The fresh Rust kernel returned $5.551115123126\times10^{-15}$. In public-curve probes at this shape, survival even increased between selected ascending losses. These probabilities are below the configured diagnostic floor, so this is lower priority for ordinary PMLs than A1–A3. It still refutes a universal claim of full relative precision in small survival probabilities. Evaluate the numerically small probability directly, or use a stable logarithmic complement where appropriate.
+
+**Monetary scaling.** [validate.rs](../crates/eltq-core/src/validate.rs), lines 78–91, squares the monetary standard deviation and forms $\mu(M-\mu)$. Avoiding $M^2$ does not avoid overflow of these two products. Scale the admissible row $(M,\mu,\sigma)=(1,0.4,0.1)$ and its grid by $10^{160}$: both methods classify it as Bernoulli. Scale it by $10^{-200}$: both classify it as an atom. All supplied fields remain finite. The intermediate arithmetic has changed the model. These scales are not ordinary insurance amounts; their significance is that the stated domain is wider than the checked domain. Use scaled ratios and explicit intermediate checks, or document and enforce a supported range.
+
+**Large-parameter cumulants.** `Cumulants::of`, [batched.rs](../crates/eltq-core/src/batched.rs), line 62, computes `a*b / (s*s*(s+1))`. Its comment promises products of no more than two parameters, but the denominator contains three. It can overflow around $s=10^{103}$, below the advertised $10^{150}$ range, collapsing a representable standard deviation to zero for sufficiently asymmetric shapes. Ratio-based formulas and explicit range tests are needed before claiming the full range. This is a source-level range defect, separate from the practical parameter cases covered by the current tests.
+
+**Top half-bucket.** [deposit.rs](../crates/eltq-core/src/deposit.rs), lines 27–63, deliberately caps an atom between the top node and the top edge. For rate 1, $M=100$, $\mu=49.25$, $\sigma=0$, $h=1$, and $n=50$, the raw mean is 49, while both overflow fields are zero. This behavior is documented in the implementation but conflicts with an unconditional claim that raw AAL loss is explained by reported overflow. Either report this extra boundary displacement or qualify the first-moment contract explicitly.
+
+### What the implementation already does well
+
+The code separates the Rust numerical core from conversion and metadata. Input columns use a structure-of-arrays layout. The normal NumPy route borrows contiguous inputs, releases the Python interpreter during computation, and transfers completed Rust vectors into NumPy without an output-array copy. Fixed chunks, worker-private partials, and ordered folding avoid hot-loop locks and give a clear reproducibility contract. Special-function constants are reused across an event's evaluations. Narrow grids integrate incrementally between edges. The release profile enables thin LTO and one code-generation unit.
+
+These are substantial strengths. The existence of a SciPy reference, golden fixtures, synthetic portfolios, and explicit overflow policies is also valuable. The main testing weakness is the dependence of the oracle on the same routing and approximation decisions. The reference catches I1 if its metadata is checked, but it agrees with A1's wrong step approximation. A reference that shares an approximation is an implementation comparator, not an independent oracle for that approximation.
+
+### P1. A measured scheduling improvement {#sec-p1}
+
+The following timings use the repository's `synthetic_elt(262144)` generator, its fixed seed 20260814, bucket size 5,000, and $K=32$. Each result is the median of three calls after a warm-up. The machine is an AMD Ryzen 9 9950X3D2, 16 cores and 32 logical processors, under Windows. The installed compiled 2.3.2 extension was used; no source was changed.
+
+| Threads | Quantiles, default chunk 65,536 | Quantiles, chunk 4,096 | Survival, default chunk 256 |
+|---:|---:|---:|---:|
+| 1 | 2.542 s | 2.542 s | 4.233 s |
+| 8 | 0.649 s | 0.335 s | 0.590 s |
+| 16 | 0.655 s | 0.206 s | 0.375 s |
+| 32 | 0.652 s | 0.137 s | 0.268 s |
+
+The default quantile pass creates four chunks for this input, so more than four worker threads cannot help. With chunk size 4,096 it creates 64 tasks and uses the machine much better. The measured 32-thread improvement is **4.74 times**, without changing $K$, deposition, or the beta algorithm. The largest secondary-bin difference between these configurations was $4.66\times10^{-15}$ of total rate; analytical AAL was identical. Chunking changes addition grouping, so the bitwise contract applies separately to each fixed chunk size.
+
+Smaller chunks are not universally better. Each quantile chunk owns **two full-grid histograms**. At one million rows, the default produces 16 chunks. For $G=2^{24}$, those partials alone can occupy 4 GiB when simultaneously retained, in addition to the final arrays and other data. With many smaller chunks and a 64-chunk wave, that becomes 16 GiB. The README's suggestion that grid length is irrelevant to throughput is therefore too broad: deposits are local, but initialization and reduction are proportional to grid length.
+
+**Recommendation:** choose or recommend chunk sizes jointly with row count and grid length, and bound waves by memory as well as worker count. To preserve results across thread counts, a new default chunking rule should depend on input/configuration, not the number of workers. The current explicit option already permits the demonstrated improvement on small grids.
+
+### P2. Remove avoidable work before pursuing wider arithmetic
+
+The following opportunities are established by code inspection. Unless a measurement is stated, the speedup remains to be measured.
+
+| Opportunity | Current work | Proposed direction |
+|:---|:---|:---|
+| Shared-grid interpolation | `Curve::grid` calls a binary-search interpolator for every ascending edge, stores a full `values` vector, then differences it. | Walk intervals once; precompute interval polynomial coefficients; write successive differences directly. Parallelize disjoint output ranges if worthwhile. |
+| Repeated grid scans | `quantize` computes the secondary first moment before normalization, then computes it again for metadata, alongside separate mass and raw-moment scans. | Reuse totals and combine compatible scans. Preserve the required summation order or explicitly revalidate numerical tolerances. |
+| Survival plus density | `sf_and_density_times_y` shares logarithms but evaluates two exponentials. | In a safe range, obtain $y f(y)$ as `front / (1-y)`. Retain a logarithmic fallback when front-factor underflow would lose a representable density. |
+| Large-parameter quantiles | Each event recomputes the same $K$ normal quantiles and their polynomial terms. | Precompute the normal scores once per quantization configuration; apply each event's cumulants to those scores. |
+| Tail queries | `exceedance_betas` reconstructs `BetaFn`, including $\log B$, for each active event on each query. | Retain validated per-event constants or cached query representations where the memory tradeoff pays. |
+| Tail table evaluation | `at_ascending` computes `log(d)` for cursor movement, then `eval` computes it again. | Pass the computed logarithm into the evaluator. |
+| Tail histogram spans | Spans are allocated from geometric endpoint ranges before the rate-floor decision. | Treat negligible tails as point deposits when sizing buffers; use actual active spans. |
+| Worker scratch | Every chunk allocates its partial vectors and releases them after folding. | Reuse bounded scratch buffers while retaining fixed chunk identities and fold order. |
+| Explicit thread pools | `run_chunks` creates a pool for each invocation when `threads` is supplied, including empty passes. | Reuse a pool for a top-level operation; return immediately for empty work. |
+| Memmap/export | `quantize_into` first allocates backend outputs, then copies; `quantize_to_npy` additionally stacks both outputs. | Offer direct output-buffer filling or sequential writing if peak memory and export cost matter. |
+
+The shared-grid opportunity is measurable even without event work: building a grid from a one-event curve with no retained endpoint tails took median 17.8 ms at $2^{20}$ buckets and 95.5 ms at $2^{22}$; the latter varied from 70.5 to 147.7 ms in three calls. These include the grid API's allocation and metadata work and should not be interpreted as isolated cubic timings. This serial cost becomes more visible as the event kernel improves.
+
+The always-on 64 diagnostic samples also deserve profiling. They add special-function evaluations independent of the number of useful nodes an event reaches. Do not simply remove diagnostics to improve a headline time: replace them with a more informative, configurable validation strategy and report its cost.
+
+### Rust and modern CPU capabilities
+
+**The answer to “is it using all possible capabilities?” is no.** The useful question is which additional capabilities improve this workload while preserving accuracy.
+
+An optimized `x86-64-v3` assembly inspection of the current source showed scalar `vaddsd`, `vmulsd`, and `vdivsd` arithmetic in `betacf`, and scalar calls to `log`, `log1p`, and two `exp` calls in `sf_and_density_times_y`. AVX-encoded scalar instructions do not constitute SIMD evaluation of several beta functions. The inspected assembly was an optimized test-profile build, not a disassembly of the installed wheel; the source's scalar dependency chain is nevertheless clear.
+
+The most promising SIMD target is a batch of independent node evaluations for the same event: shapes and normalization are shared, memory access is regular, and each vector lane can retain the scalar iteration order. Another option is batching events within the same numerical regime. Variable continued-fraction iteration counts require masked lanes or careful grouping. Interleaving several independent scalar chains can also hide division latency before introducing explicit vectors. The large-parameter expansion and fixed-order quadrature are simpler vectorization candidates than the safeguarded inverse walk.
+
+This needs a real implementation and benchmark. There is no basis here to promise a fourfold or eightfold speedup: convergence divergence, scalar transcendental calls, memory traffic, and frequency behavior can dominate. A vector math implementation must be checked for the small-tail accuracy this program requires.
+
+The distributed x86 wheels target `x86-64-v3`, which does not enable AVX-512. The reviewed Zen 5 machine offers further vector capability; AMD describes the full 512-bit datapath in its Zen 5 family. A carefully dispatched AVX-512 kernel could exploit it while retaining an AVX2 path. A native build flag alone does not transform this branch-heavy scalar kernel into a vector algorithm. [AMD's Zen 5 vector discussion](https://www.amd.com/en/blogs/2025/leadership-hpc-performance-with-5th-generation-amd.html), [Rust target CPU options](https://doc.rust-lang.org/rustc/codegen-options/index.html#target-cpu).
+
+Explicit `mul_add` may help selected polynomial and exponent calculations, with different rounding that must be checked. It is not a license for general floating-point reassociation: the compensated sums and some numerical safeguards depend on evaluation order. Rust documents fused multiply-add's single-rounding semantics. [Rust `f64::mul_add`](https://doc.rust-lang.org/std/primitive.f64.html#method.mul_add).
+
+Profile-guided optimization is a reasonable later experiment for branch layout and inlining after the algorithmic issues are fixed. Train it on several parameter regimes and evaluate held-out portfolios; a profile consisting of ordinary betas alone would be a poor representation. The repository already has sensible LTO settings, so “enable optimization” is not a meaningful recommendation by itself. [Rust PGO workflow](https://doc.rust-lang.org/rustc/profile-guided-optimization.html).
+
+I would not start with GPU execution, pervasive unsafe indexing, or lower precision. The demonstrated scheduling gain, redundant scalar work, numerical routing, and grid memory traffic have a clearer case. No hardware-counter profile or SIMD prototype was run in this review, so the CPU proposals above are opportunities, not measured performance claims.
+
+## Verification and recommended order of work
+
+### What was checked
+
+- **95 Rust tests passed**: 81 unit tests, four main golden tests, five property tests, and five other golden/parser tests included by the core test command.
+- **111 Python tests passed and one was skipped** across acceptance, contract, survival, determinism, Python API, memmap, and fallback tests. The skipped case is the redundant reference parametrization of a package-level curve test.
+- The new probes used exact symmetry, elementary beta cases, SciPy special functions, reference metadata, and direct calls into freshly compiled Rust. An exploratory shape sweep covered 35 logarithmically spaced $\alpha$ values and 41 $\beta$ values, supplemented with targeted boundary cases. Its role was to find counterexamples, not certify the whole domain.
+- Timing used the existing compiled extension and synthetic inputs, with no changes to the repository benchmark history. The scheduling table uses warmed medians, not the fastest isolated run.
+
+The environment was Python 3.14.7, NumPy 2.5.2, SciPy 1.18.0, and Rust 1.99.1. An initial native-target test build failed inside `libm` with a Windows assembly/unwind error, `Missing .seh_endepilogue`. A fresh build with `RUSTFLAGS='-C target-cpu=x86-64-v3'` succeeded and passed the tests. This build issue is recorded as a verification limitation, not attributed to the numerical code. All target directories were in scratch space.
+
+Scratch evidence was retained at `C:/Users/steve/AppData/Local/Temp/eltq-peer-review-e75abdec`; it is temporary and is not required to understand or reproduce the findings below.
+
+The report's Python examples were syntax-checked and its numerical reproduction block was run directly. A scratch copy converted successfully to HTML through Quarto's Pandoc. Full themed Quarto rendering was blocked by access to its local Sass cache database; this did not affect the numerical checks or the report source.
+
+### Order of work
+
+1. **Correct A1, A2, and I1, and prevent silent special-function failure.** These have small, decisive reproductions and affect returned probabilities or monetary metadata.
+2. **Define numerical accuracy in terms of requested outputs.** Separate interpolation, tail, kernel, cut, and discretization errors; make the response to inadequate accuracy explicit.
+3. **Strengthen independent regression coverage.** Include means exactly on bucket edges and displaced by a few ulps; endpoint-heavy shapes around $\beta=1$; both sides of every routing threshold; windows ending well before $M$; positive overflow with endpoint-tail underflow; and node-density changes. Check partial moments and probability range as well as total mass. Use symmetry and closed forms where available, plus selected high-precision checks.
+4. **Take the scheduling and redundant-work gains.** Provide grid-aware chunk guidance, avoid empty pools and repeated normal scores, reduce repeated grid scans, and improve ascending-edge traversal. Measure peak memory as well as time.
+5. **Profile the remaining numerical kernel, then evaluate SIMD and PGO.** Hold accuracy and deterministic reduction requirements fixed during those comparisons.
+
+The discovery process should continue, but the next step should be to replace additional unexplained thresholds with tested validity conditions. That is how the implementation becomes both more trustworthy and easier to optimize.
+
+## Reproduction appendix
+
+These snippets are deliberately non-executing in this report. Run them in a scratch directory using the repository's environment. They print failures rather than altering the implementation or tests.
+
+### Numerical counterexamples
+
+```python
+import numpy as np
+from scipy import special
+import eltq
+from eltq import reference
+
+def row(mu, sd, maximum=1.0, rate=1.0):
+    return tuple(np.array([v], dtype=np.float64)
+                 for v in (rate, maximum, mu, sd, 0.0))
+
+def beta_row(a, b, maximum=1.0):
+    p = a / (a + b)
+    sd = maximum * np.sqrt(p * (1 - p) / (a + b + 1))
+    return row(maximum * p, sd, maximum)
+
+# A1: exact symmetry requires a half-and-half split at the edge 0.5.
+cols = row(0.5, 1e-8)
+_, grid, meta = eltq.quantize_arrays(
+    *cols, bucket_size=0.2, grid_length=6)
+curve = eltq.exceedance_curve(*cols, min_loss=0.1)
+print("A1", grid, curve.exceedance([0.5]), meta.interpolation_error)
+# [0, 0, 0, 1, 0, 0], [0], 0; correct central weights are 0.5, 0.5.
+
+# A2: the grid tail and direct curve disagree at a relevant bucket edge.
+a, b = 1e6, 0.5
+cols = beta_row(a, b)
+h = (1 - b / a) / 999.5
+edge = 999.5 * h
+_, grid, meta = eltq.quantize_arrays(
+    *cols, bucket_size=h, grid_length=1001)
+curve = eltq.exceedance_curve(*cols, min_loss=h / 2)
+print("A2", grid[1000], special.betaincc(a, b, edge),
+      curve.exceedance([edge]), meta.interpolation_error)
+# Approximately 0.05401092, 0.68268949, [0.68268949], 0.
+
+# A3: the sampled diagnostic misses a large interpolation error.
+a, b = 1800.0, 1e6
+cols = beta_row(a, b)
+curve = eltq.exceedance_curve(*cols, min_loss=(a / (a + b)) * 1e-4)
+x = 0.001944568270403778
+got = float(curve.exceedance([x])[0])
+exact = special.betaincc(a, b, x)
+print("A3", got, exact, got / exact - 1, curve.meta.interpolation_error)
+# Approximately 0.000251064, 0.000325216, -0.228009, 1.63296e-5.
+
+# I1: overflow moment remains material after endpoint survival underflows.
+a, b, h, n = 2.0, 1000.0, 1e-4, 20
+cols = beta_row(a, b)
+edge, top = (n - 0.5) * h, (n - 1) * h
+over_rate = special.betaincc(a, b, edge)
+over_mean = (a / (a + b) * special.betaincc(a + 1, b, edge)
+             - top * over_rate)
+for name, fn in (("Rust", eltq.quantize_arrays),
+                 ("reference", reference.quantize_reference)):
+    _, _, meta = fn(*cols, bucket_size=h, grid_length=n)
+    print("I1", name, meta.rate_above_grid, meta.mean_above_grid)
+print("I1 exact", over_rate, over_mean)
+# Rust secondary excess moment 0; reference and exact 0.000579648066229.
+
+# I1, separate step case: the secondary overflow moment is also lost.
+_, _, meta = eltq.quantize_arrays(
+    *row(0.55, 1e-9), bucket_size=0.2, grid_length=3)
+print("I1 step", meta.rate_above_grid, meta.mean_above_grid)
+# Secondary rate 1, excess moment 0; correct excess moment about 0.15.
+
+# I2: increasing density changes routing and exposes an unconverged CF.
+_, grid, meta = eltq.quantize_arrays(
+    *beta_row(1e9, 1e9), bucket_size=1.0, grid_length=2,
+    nodes_per_decade=200000)
+print("I2", grid, meta.narrow_events)
+# Approximately [-0.45082991, 1.45082991], 0 narrow events.
+
+# I3: scale-equivalent inputs become different probability laws.
+for scale in (1.0, 1e160, 1e-200):
+    _, grid, meta = eltq.quantize_arrays(
+        *row(0.4 * scale, 0.1 * scale, scale),
+        bucket_size=0.1 * scale, grid_length=11)
+    print("I3 scale", scale, grid, meta.diagnostics)
+
+# Top half-bucket: first-moment loss with both overflow fields zero.
+_, _, meta = eltq.quantize_arrays(
+    *row(49.25, 0.0, 100.0), bucket_size=1.0, grid_length=50)
+print("Top half-bucket", meta.raw_mean, meta.analytic_aal,
+      meta.rate_above_grid, meta.mean_above_grid)
+```
+
+The public Rust kernel counterexample can also be reproduced without Python:
+
+```rust
+use eltq_core::incbeta::BetaFn;
+
+fn main() {
+    for a in [1e6, 1e7, 1e8, 1e9] {
+        println!("{a}: {}", BetaFn::new(a, a).sf(0.5));
+    }
+    let a = 1e-16_f64;
+    let x = 0.1_f64;
+    println!("small tail: {}, exact: {}",
+        BetaFn::new(a, 1.0).sf(x), -(a * x.ln()).exp_m1());
+}
+```
+
+### Scheduling benchmark
+
+Importing the benchmark module accesses its generator; the following does not invoke its command-line runner or append to `benchmarks/results.json`.
+
+```python
+import importlib.util
+import statistics
+import time
+from pathlib import Path
+import eltq
+
+repo = Path(r"V:\dev\eltq")
+spec = importlib.util.spec_from_file_location(
+    "eltq_benchmark_generator", repo / "benchmarks/run_end_to_end.py")
+generator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(generator)
+cols = generator.cols_tuple(generator.synthetic_elt(262144))
+
+for method, chunk in (("quantiles", None), ("quantiles", 4096),
+                      ("survival", None)):
+    for threads in (1, 8, 16, 32):
+        def run():
+            return eltq.quantize_arrays(
+                *cols, bucket_size=5000.0, method=method,
+                quadrature_points=32, chunk_rows=chunk, threads=threads)
+        run()
+        seconds = []
+        for _ in range(3):
+            start = time.perf_counter()
+            result = run()
+            seconds.append(time.perf_counter() - start)
+        print(method, chunk, threads, statistics.median(seconds))
+```
