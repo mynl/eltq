@@ -76,10 +76,16 @@ Added 2026-10-25 for the quantiles method at large parameters (`dev/done/plan-qu
 Cornish-Fisher asymptotic expansion of a quantile in the cumulants (26.2.49), and 26.5.8 for the
 incomplete beta's continued fraction, which Numerical Recipes takes from it.
 
-**Nothing in `D:\Projects\aggregate\secondary-uncertainty` may be used**: not read for method, not
-cited, not paraphrased. Material that reaches the repository from anywhere else (a conversation,
-a client file, a vendor summary, a memory note) is not a source; if a method or convention cannot
-be traced to the set above or derived mathematically in the specification, it does not go in.
+**Nothing in `D:\Projects\Private`, or anywhere below it, is ever read, listed, searched or cited**
+(Steve, 2026-10-25; the vendor summary and client correspondence moved there from
+`D:\Projects\aggregate\secondary-uncertainty`). Not a directory listing, not a grep, not a path in a
+conversation. The rebuilt `D:\Projects\aggregate\secondary-uncertainty` (from 2026-10-25) holds
+public-sourced documents and technical articles on the eltq method, written to the same
+published-sources rule as this repository: eltq may read, cite and draw on them, cited at the point
+of use with the published source the article itself rests on, and eltq work may be shared into
+that folder. Material that reaches the repository from anywhere else (a conversation, a client
+file, a memory note) is not a source; if a method or convention cannot be traced to the set above,
+to those articles, or derived mathematically in the specification, it does not go in.
 Every convention taken from a source is cited to it at the point of use, as the
 $\sigma_I+\sigma_C$ rule is cited to Burke 2016 section III.E.
 
