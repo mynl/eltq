@@ -1,7 +1,7 @@
 # Plan: chebyshev-z — cutting the shared-factor loop in the multi-unit engine
 
 Date: 2026-08-26
-Status: draft, not started; awaiting go-ahead for [z-study]
+Status: closed 2026-10-25 without starting (Steve: "move cheby"). Superseded by [z-rule] of `dev/plan-multiunit-coupling.md`, which runs the same study with tail metrics and adds the stratified rule; [hybrid-rule] and [chebyshev-z] are reopened only if that study's node count leaves the speed question open.
 
 ## Context
 
