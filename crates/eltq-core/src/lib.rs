@@ -36,7 +36,7 @@ pub mod validate;
 pub mod views;
 
 pub use curve::{
-    Curve, GridOutcome, NARROW_STEP_PARAMETER_SUM, NARROW_STEPS, NarrowEvent, NarrowKernel, TAIL_INTERVALS,
+    Curve, GridOutcome, NARROW_NORMAL_FROM, NARROW_STEPS, NarrowEvent, NarrowKernel, TAIL_INTERVALS,
     TAIL_RATE_FLOOR, build_curve,
 };
 pub use config::{

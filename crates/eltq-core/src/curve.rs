@@ -33,6 +33,7 @@ use crate::deposit::{OverflowAccumulator, place};
 use crate::diagnostics::Diagnostics;
 use crate::error::Error;
 use crate::incbeta::BetaFn;
+use crate::normal;
 use crate::quantize::{Classified, EltInput};
 use crate::sum::Neumaier;
 use crate::validate::RowKind;
@@ -245,10 +246,16 @@ pub struct TailEvent {
 /// narrow event's bulk must reach the rate floor; an event wider than that
 /// (its mass piled at an endpoint) takes the regular route.
 pub const NARROW_STEPS: usize = 40;
-/// Above this `alpha + beta` the density of a narrow event cannot be
-/// resolved in double precision (one ulp of the loss share moves it by
-/// more than a tenth), and the event is a step at its mean.
-pub const NARROW_STEP_PARAMETER_SUM: f64 = 1e15;
+/// From this smaller parameter a narrow event's kernel is the standardized
+/// normal law in closed form instead of the quadrature of its density. The
+/// density's two logarithms are each of size about `40 sqrt(alpha beta /
+/// (alpha + beta))` at the edge of the bulk and cancel, so the quadrature
+/// kernel's error in `log f` is about `4e-15 sqrt(min(alpha, beta))`; the
+/// normal's relative error is its skewness, `2 / sqrt(min(alpha, beta))`,
+/// times a polynomial in `z`. The two cross near 1e16 at about 1e-6 each
+/// (`dev/done/plan-peer-review-response.md`, [atoms]). A row too narrow for
+/// either, `sigma < 2^-48 mu`, is an atom (`validate::ATOM_RESOLUTION`).
+pub const NARROW_NORMAL_FROM: f64 = 1e16;
 
 /// 8-point Gauss-Legendre nodes (the positive half) and weights on [-1, 1].
 const GL_NODES: [f64; 4] = [0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363];
@@ -257,7 +264,9 @@ const GL_WEIGHTS: [f64; 4] = [0.3626837833783620, 0.3137066458778873, 0.22238103
 /// The density of a narrow event relative to its value at the mean,
 /// `f(y) / f(ybar)` in the loss share `y`, from the deviations by `log1p`
 /// so that huge `alpha` and `beta` lose no precision, and its integrals by
-/// 8-point Gauss-Legendre on pieces of at most half a standard deviation.
+/// 8-point Gauss-Legendre on pieces of at most half a standard deviation;
+/// from `NARROW_NORMAL_FROM` the standardized normal law, whose integrals
+/// are closed forms in `erf` and `exp`.
 /// Within about 1e-12 of SciPy up to `alpha + beta` of 1e8 and within the
 /// rounding of `y` itself beyond, where the incomplete beta's continued
 /// fraction (400 iterations) returns garbage near the mean.
@@ -266,14 +275,41 @@ pub struct NarrowKernel {
     alpha: f64,
     beta: f64,
     ybar: f64,
+    sd: f64,
     piece: f64,
+    /// The normal law from `NARROW_NORMAL_FROM`.
+    normal: bool,
 }
 
 impl NarrowKernel {
     pub fn new(alpha: f64, beta: f64) -> Self {
         let ybar = alpha / (alpha + beta);
         let sd = (ybar * (1.0 - ybar) / (alpha + beta + 1.0)).sqrt();
-        NarrowKernel { alpha, beta, ybar, piece: 0.5 * sd }
+        let normal = alpha.min(beta) >= NARROW_NORMAL_FROM;
+        NarrowKernel { alpha, beta, ybar, sd, piece: 0.5 * sd, normal }
+    }
+
+    /// Whether the kernel is the normal law (for the tests and the meta).
+    pub fn is_normal(&self) -> bool {
+        self.normal
+    }
+
+    /// The normal law's `int_lo^hi exp(-z^2 / 2) dy` and the same with `y`,
+    /// `z = (y - ybar) / sd`, through `erfc` on the side where the tail is
+    /// thin so that a far upper-tail difference keeps its relative precision.
+    fn normal_integrals(&self, lo: f64, hi: f64) -> (f64, f64) {
+        let (zl, zh) = ((lo - self.ybar) / self.sd, (hi - self.ybar) / self.sd);
+        let r = std::f64::consts::FRAC_1_SQRT_2;
+        let phi_diff = if zl >= 0.0 {
+            normal::erfc(zl * r) - normal::erfc(zh * r)
+        } else if zh <= 0.0 {
+            normal::erfc(-zh * r) - normal::erfc(-zl * r)
+        } else {
+            normal::erf(zh * r) - normal::erf(zl * r)
+        };
+        let mass = self.sd * (0.5 * std::f64::consts::PI).sqrt() * phi_diff;
+        let moment = self.ybar * mass + self.sd * self.sd * ((-0.5 * zl * zl).exp() - (-0.5 * zh * zh).exp());
+        (mass, moment)
     }
 
     fn ratio(&self, y: f64) -> f64 {
@@ -285,6 +321,9 @@ impl NarrowKernel {
     pub fn integrals(&self, lo: f64, hi: f64) -> (f64, f64) {
         if !(hi > lo) {
             return (0.0, 0.0);
+        }
+        if self.normal {
+            return self.normal_integrals(lo, hi);
         }
         let pieces = ((hi - lo) / self.piece).ceil().max(1.0) as usize;
         let width = (hi - lo) / pieces as f64;
@@ -337,11 +376,9 @@ impl NarrowEvent {
         NarrowKernel::new(self.alpha, self.beta)
     }
 
-    /// `S(x)`: in full below the bulk, nothing at or above it, and by
-    /// quadrature from the nearer edge inside.
+    /// `S(x)`: in full below the bulk, nothing at or above it, and by the
+    /// kernel's integral from the nearer edge inside.
     pub fn survival_at(&self, kernel: &NarrowKernel, x: f64) -> f64 {
-        // A step at the mean (lower == stop) counts nothing at its loss,
-        // as an atom does.
         if x >= self.stop {
             return 0.0;
         }
@@ -630,17 +667,14 @@ pub fn build_curve(
                     // interval goes here, and so does one whose parameters
                     // are both large enough that the continued fraction is
                     // untrustworthy (`is_valid_regime`), whatever the node
-                    // density; beyond NARROW_STEP_PARAMETER_SUM the event is
-                    // a step at its mean.
+                    // density; from NARROW_NORMAL_FROM the kernel is the
+                    // normal law (a row narrower than the resolution of its
+                    // mean never gets here: `validate` made it an atom).
                     let sigma = classified.var_eff[row].sqrt();
                     if (sigma < mu * narrow_ratio || !bf.is_valid_regime()) && alpha > 1.0 && beta > 1.0 {
                         let kernel = NarrowKernel::new(alpha, beta);
-                        let bulk = if alpha + beta > NARROW_STEP_PARAMETER_SUM {
-                            Some((mu, mu, 1.0))
-                        } else {
-                            narrow_bulk(&kernel, m, mu, sigma, lam, narrow_floor)
-                                .map(|(lower, stop)| (lower, stop, kernel.integral(lower / m, stop / m)))
-                        };
+                        let bulk = narrow_bulk(&kernel, m, mu, sigma, lam, narrow_floor)
+                            .map(|(lower, stop)| (lower, stop, kernel.integral(lower / m, stop / m)));
                         if let Some((lower, stop, norm)) = bulk.filter(|b| b.2 > 0.0 && b.2.is_finite()) {
                             let start = lower.max(min_loss);
                             let event = NarrowEvent {
@@ -1303,6 +1337,50 @@ mod tests {
             }
             let half = event.survival_at(&kernel, mu);
             assert!((half - 0.5).abs() < 2e-3 * (1.0 + cv * 100.0), "cv={cv}: {half}");
+        }
+    }
+
+    // [atoms] At the handover to the normal law the two kernels agree on
+    // mass and moment to a few units in 1e-6 (each is about that far from
+    // the truth there, in opposite senses), the survival at the mean of a
+    // symmetric event is a half on either side (the review's A1: a step at
+    // the mean gave 0 at 1e-8 relative width), and the law stays monotone
+    // in [0, 1] to min(alpha, beta) = 1e24.
+    #[test]
+    fn normal_kernel_takes_over_from_the_quadrature() {
+        let m = 1.0;
+        for (alpha, beta) in [(1e16, 1e16), (1e16, 4e17), (3e16, 1e16)] {
+            let below = NarrowKernel::new(alpha * (1.0 - 1e-9), beta * (1.0 - 1e-9));
+            let above = NarrowKernel::new(alpha, beta);
+            assert!(!below.is_normal() && above.is_normal());
+            let ybar = above.ybar;
+            let sd = above.sd;
+            for (lo, hi) in [(ybar - 5.0 * sd, ybar + 5.0 * sd), (ybar, ybar + 2.0 * sd), (ybar + 3.0 * sd, ybar + 9.0 * sd)] {
+                let (m0, m1) = below.integrals(lo, hi);
+                let (n0, n1) = above.integrals(lo, hi);
+                assert!((m0 - n0).abs() <= 5e-6 * n0, "{alpha} {beta}: mass {m0} vs {n0}");
+                assert!((m1 - n1).abs() <= 5e-6 * n1, "{alpha} {beta}: moment {m1} vs {n1}");
+            }
+        }
+        for sigma in [1e-8, 2e-8, 1e-10, 1e-12] {
+            let mu = 0.5;
+            let (alpha, beta) = beta_params(m, mu, sigma * sigma);
+            let kernel = NarrowKernel::new(alpha, beta);
+            let (lower, stop) = narrow_bulk(&kernel, m, mu, sigma, 1.0, 1e-20).unwrap();
+            let norm = kernel.integral(lower / m, stop / m);
+            let event = NarrowEvent { rate: 1.0, max_loss: m, alpha, beta, lower, start: lower, stop, norm, survival: 1.0 };
+            let half = event.survival_at(&kernel, mu);
+            assert!((half - 0.5).abs() <= 1e-9, "sigma={sigma}: {half}");
+            let mut prev = 1.0;
+            for k in -12..=12 {
+                let s = event.survival_at(&kernel, mu + k as f64 * sigma);
+                assert!((0.0..=1.0).contains(&s) && s <= prev, "sigma={sigma} k={k}: {s}");
+                prev = s;
+            }
+            // The partial expectation above the mean: mu / 2 + sigma / sqrt(2 pi).
+            let want = 0.5 * mu + sigma / (2.0 * std::f64::consts::PI).sqrt();
+            let got = event.partial_expectation(&kernel, mu);
+            assert!((got - want).abs() <= 1e-9 * want + 1e-6 * sigma, "sigma={sigma}: {got} vs {want}");
         }
     }
 

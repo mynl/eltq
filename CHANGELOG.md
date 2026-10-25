@@ -3,6 +3,15 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.4] - 2026-10-25
+
+### Fixed
+
+- [atoms] A narrow event with both parameters at or above 1e16 takes the standardized normal law in closed form (own `erf`) instead of a step at its mean; the step, applied above `alpha + beta = 1e15` since 2.3.0, rested on a wrong resolution argument and put a symmetric event whose mean sits on a bucket edge wholly into one bucket where its `sigma = 0` twin split half and half (peer review, finding A1). The quadrature kernel stays below 1e16; the two agree to a few units in 1e-6 at the handover. `NARROW_STEP_PARAMETER_SUM` is retired; `NARROW_NORMAL_FROM` replaces it in both backends.
+- A beta row whose standard deviation is below 2^-48 of its mean (sixteen ulps of the loss at the mean) is an atom at the mean, deposited by the linear rule like its `sigma = 0` twin, under the new diagnostic category `atom_by_resolution` (spec section 4). This also restores the overflow moment the step lost (the review's I1 step case: rate 1, moment 0; now 0.15 exact).
+- The reference backend takes the normal law from 1e16 as well, where SciPy's incomplete beta is itself off by 1e-4 at 1e24, and guards the isolated NaN SciPy returns at the mean when both parameters approach 1e16.
+- Grids unchanged at default settings on every fixture; no fixture holds a row in either regime.
+
 ## [2.3.3] - 2026-10-25
 
 ### Fixed

@@ -37,6 +37,11 @@ const DROP: RowPlan = RowPlan {
 /// dropped and reported.
 /// The flat scalar signature is deliberate for the hot path.
 #[allow(clippy::too_many_arguments)]
+/// `2^-48`: a beta row with `sigma < ATOM_RESOLUTION * mu` is an atom at
+/// `mu` (sixteen ulps of the loss at the mean is the finest width the
+/// standardized coordinate resolves).
+pub const ATOM_RESOLUTION: f64 = 3.552713678800501e-15;
+
 pub fn classify_row(
     row: usize,
     rate: f64,
@@ -83,6 +88,19 @@ pub fn classify_row(
         // mean with sigma > 0 the variance is formally inadmissible; the
         // specified degenerate treatment is the resolution.)
         diagnostics.note(Category::DegenerateAtom, row);
+        return Ok(RowPlan {
+            kind: RowKind::Atom,
+            mu,
+            var: 0.0,
+        });
+    }
+    // A standard deviation below 2^-48 of the mean (sixteen ulps of the loss
+    // at the mean): the standardized coordinate no longer resolves the law
+    // and the row is an atom at mu, reported apart from a stated zero so
+    // that a consumer can tell the two (spec section 4;
+    // `dev/done/plan-peer-review-response.md`, [atoms]).
+    if sigma < mu * ATOM_RESOLUTION {
+        diagnostics.note(Category::AtomByResolution, row);
         return Ok(RowPlan {
             kind: RowKind::Atom,
             mu,
@@ -244,5 +262,21 @@ mod tests {
         let (plan, diag) = classify(0.1, 200.0, 1.5, 40.0, &c);
         assert_eq!(plan.unwrap().kind, RowKind::Drop);
         assert_eq!(diag.get(Category::MeanExceedsMax).count, 1);
+    }
+
+    // [atoms] A standard deviation below 2^-48 of the mean is an atom under
+    // its own category; one ulp above the line stays a beta.
+    #[test]
+    fn unresolvable_width_is_an_atom() {
+        let c = Config::new(1.0);
+        let (plan, diag) = classify(1.0, 1.0, 0.5, 1e-16, &c);
+        let plan = plan.unwrap();
+        assert_eq!(plan.kind, RowKind::Atom);
+        assert_eq!(plan.var, 0.0);
+        assert_eq!(diag.get(Category::AtomByResolution).count, 1);
+        assert_eq!(diag.get(Category::DegenerateAtom).count, 0);
+        let (plan, diag) = classify(1.0, 1.0, 0.5, 0.5 * ATOM_RESOLUTION * (1.0 + 1e-12), &c);
+        assert_eq!(plan.unwrap().kind, RowKind::Beta);
+        assert_eq!(diag.get(Category::AtomByResolution).count, 0);
     }
 }

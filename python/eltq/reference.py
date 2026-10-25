@@ -26,12 +26,12 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.special import betainc, betaincc, betaln, ndtri
+from scipy.special import betainc, betaincc, betaln, ndtri, erfc
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import (DEFAULT_NODES_PER_DECADE, LARGE_PARAMETER_FROM, NARROW_STEP_PARAMETER_SUM,
-                        NARROW_STEPS, TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta, GridMeta, Meta,
-                        RowIssues)
+from eltq._meta import (ATOM_RESOLUTION, DEFAULT_NODES_PER_DECADE, LARGE_PARAMETER_FROM,
+                        NARROW_NORMAL_FROM, NARROW_STEPS, TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta,
+                        GridMeta, Meta, RowIssues)
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -53,6 +53,7 @@ CATEGORIES = (
     "mean_exceeds_max",  # mu > M (after optional loss-rate scaling): row dropped
     "zero_rate",         # rate == 0: row carries no mass, skipped
     "degenerate_atom",   # sigma == 0, mu == 0, mu == M, or M == 0: single atom
+    "atom_by_resolution",  # sigma below 2^-48 of mu, too narrow to resolve: single atom
     "variance_dropped",  # inadmissible variance, row dropped by the drop policy
     "variance_atom",     # inadmissible variance collapsed to an atom by policy
     "variance_bernoulli",  # inadmissible variance replaced by the Bernoulli maximizer
@@ -199,12 +200,74 @@ def _hermite(t: np.ndarray, y0, y1, dx, m0, m1) -> np.ndarray:
             + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * dx * m1)
 
 
+class _BetaLaw:
+    """The conditional law of a beta event in the loss share: survival,
+    distribution and partial expectation ``int_y^1 t dF(t)`` through
+    SciPy's regularized incomplete beta (the partial expectation is the
+    mean times the survival of the beta with ``a + 1``). SciPy returns NaN
+    at isolated points when both parameters approach 1e16 (seen at the
+    mean of Beta(1e16 - 2, 3e17)); such a point takes the normal law, which
+    is within 1e-6 of the beta there."""
+
+    def __init__(self, a: float, b: float):
+        self.a, self.b = a, b
+        self._normal = None
+
+    def _guard(self, out, y, method):
+        out = np.asarray(out, dtype=np.float64)
+        bad = ~np.isfinite(out)
+        if bad.any():
+            if self._normal is None:
+                self._normal = _NormalLaw(self.a, self.b)
+            out = np.where(bad, getattr(self._normal, method)(y), out)
+        return out
+
+    def sf(self, y):
+        return self._guard(betaincc(self.a, self.b, y), y, "sf")
+
+    def cdf(self, y):
+        return self._guard(betainc(self.a, self.b, y), y, "cdf")
+
+    def partial(self, y):
+        return self._guard((self.a / (self.a + self.b)) * betaincc(self.a + 1.0, self.b, y), y, "partial")
+
+
+class _NormalLaw:
+    """The standardized normal law a beta tends to when both parameters are
+    large: from ``min(a, b) = NARROW_NORMAL_FROM`` the skewness
+    ``2 / sqrt(min(a, b))`` is below the rounding of the incomplete beta (SciPy's
+    own is off by 1e-4 at 1e24), so this is the oracle there. Mirrors the
+    Rust engine's normal kernel."""
+
+    def __init__(self, a: float, b: float):
+        self.ybar = a / (a + b)
+        self.sd = math.sqrt(self.ybar * (1.0 - self.ybar) / (a + b + 1.0))
+
+    def _z(self, y):
+        return (np.asarray(y, dtype=np.float64) - self.ybar) / self.sd
+
+    def sf(self, y):
+        return 0.5 * erfc(self._z(y) / math.sqrt(2.0))
+
+    def cdf(self, y):
+        return 0.5 * erfc(-self._z(y) / math.sqrt(2.0))
+
+    def partial(self, y):
+        z = self._z(y)
+        return self.ybar * self.sf(y) + self.sd * np.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+
+
+def _law(a: float, b: float):
+    """The conditional law in the loss share: the beta, or the normal from
+    ``NARROW_NORMAL_FROM`` (spec section 5A)."""
+    return _NormalLaw(a, b) if min(a, b) >= NARROW_NORMAL_FROM else _BetaLaw(a, b)
+
+
 def _tail_moment(lam: float, m: float, a: float, b: float, e: float) -> float:
-    """``lam P(X; X > e)`` for ``X = m Beta(a, b)``: the partial expectation
-    is the mean times the survival function of the beta with ``a + 1``."""
+    """``lam P(X; X > e)`` for ``X = m Beta(a, b)`` (or its normal limit)."""
     if e >= m:
         return 0.0
-    return lam * m * (a / (a + b)) * float(betaincc(a + 1.0, b, e / m))
+    return lam * m * float(_law(a, b).partial(e / m))
 
 
 def _narrow_bulk(a: float, b: float, m: float, mu: float, sigma: float,
@@ -215,12 +278,13 @@ def _narrow_bulk(a: float, b: float, m: float, mu: float, sigma: float,
     up where ``lam S`` is at or below it (``M`` if reached first); None
     when either side needs more than ``NARROW_STEPS`` steps."""
     start = stop = None
+    law = _law(a, b)
     for i in range(1, NARROW_STEPS + 1):
         x = mu - i * sigma
         if x <= 0.0:
             start = 0.0
             break
-        if lam * float(betainc(a, b, x / m)) <= floor:
+        if lam * float(law.cdf(x / m)) <= floor:
             start = x
             break
     for i in range(1, NARROW_STEPS + 1):
@@ -228,7 +292,7 @@ def _narrow_bulk(a: float, b: float, m: float, mu: float, sigma: float,
         if x >= m:
             stop = m
             break
-        if lam * float(betaincc(a, b, x / m)) <= floor:
+        if lam * float(law.sf(x / m)) <= floor:
             stop = x
             break
     if start is None or stop is None:
@@ -500,7 +564,7 @@ class SurvivalCurve:
             for lam, m, a, b, _ in group:
                 out += lam * betaincc(a, b, np.minimum(x / m, 1.0))
         for lam, m, a, b, _, _, _ in self._narrow:
-            out += lam * betaincc(a, b, np.minimum(x / m, 1.0))
+            out += lam * _law(a, b).sf(np.minimum(x / m, 1.0))
         return out
 
     def exceedance_betas(self, x) -> np.ndarray:
@@ -532,7 +596,7 @@ class SurvivalCurve:
             for lam, m, a, b, start, stop, _ in self._narrow:
                 sel = (xi >= start) & (xi < stop)
                 if sel.any():
-                    add[sel] += lam * betaincc(a, b, xi[sel] / m)
+                    add[sel] += lam * _law(a, b).sf(xi[sel] / m)
         out[inside] += add
         return out
 
@@ -642,7 +706,7 @@ class SurvivalCurve:
                                   threshold, survival_at)
             if rest >= n:
                 begin = max(start, top_edge)
-                mass = lam * (float(betaincc(a, b, begin / m)) if begin > start else s)
+                mass = lam * (float(_law(a, b).sf(begin / m)) if begin > start else s)
                 over_moment_terms.append(_tail_moment(lam, m, a, b, begin) - top_node * mass)
 
         for k, group in list(enumerate(self._groups)) + [(0, self._whole)]:
@@ -658,8 +722,8 @@ class SurvivalCurve:
                         return _tail_survival(m, a, b, xk, s, e, x_min)
                 deposit(lam, m, a, b, xk, m, s, survival_at)
         for lam, m, a, b, start, stop, s in self._narrow:
-            def survival_at(e, a=a, b=b, m=m):
-                return betaincc(a, b, e / m)
+            def survival_at(e, law=_law(a, b), m=m):
+                return law.sf(e / m)
             deposit(lam, m, a, b, start, stop, s, survival_at)
         return weights, math.fsum(over_rate_terms), math.fsum(over_moment_terms)
 
@@ -759,17 +823,15 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
         # qualify: an event narrower than a node interval, and one whose
         # parameters are both at or above LARGE_PARAMETER_FROM, where the
         # engine's continued fraction is untrustworthy, whatever the node
-        # density; beyond NARROW_STEP_PARAMETER_SUM the event is a step at
-        # its mean, as in the Rust engine.
+        # density; from NARROW_NORMAL_FROM its law is the normal, as in the
+        # Rust engine (a row narrower than the resolution of its mean is an
+        # atom from the classification).
         if (sigma < mu * narrow_ratio or min(a, b) >= LARGE_PARAMETER_FROM) and a > 1.0 and b > 1.0:
-            if a + b > NARROW_STEP_PARAMETER_SUM:
-                bulk = (max(mu, min_loss), mu)
-            else:
-                bulk = _narrow_bulk(a, b, m, mu, sigma, lam, narrow_floor, min_loss)
+            bulk = _narrow_bulk(a, b, m, mu, sigma, lam, narrow_floor, min_loss)
             if bulk is not None:
                 start, stop = bulk
                 if stop > min_loss:
-                    s = 1.0 if stop <= start else float(betaincc(a, b, start / m))
+                    s = 1.0 if stop <= start else float(_law(a, b).sf(start / m))
                     narrow.append((lam, m, a, b, start, stop, s))
                 continue
         # loss[k] < m <= loss[k + 1], then TAIL_INTERVALS - 1 nodes lower.
@@ -840,6 +902,11 @@ def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
             # inadmissible; the specified degenerate treatment resolves it.)
             kinds[j] = _ATOM
             _note(diagnostics, "degenerate_atom", event_ids[j])
+        elif sigma < mu * ATOM_RESOLUTION:
+            # Too narrow for the standardized coordinate to resolve: an
+            # atom at mu, under its own category (spec section 4).
+            kinds[j] = _ATOM
+            _note(diagnostics, "atom_by_resolution", event_ids[j])
         else:
             v_max = mu * (m - mu)
             if sigma2 >= v_max:

@@ -19,6 +19,8 @@ pub enum Category {
     ZeroRate,
     /// sigma == 0, mu == 0, mu == M, or M == 0: single atom.
     DegenerateAtom,
+    /// sigma below 2^-48 of mu, too narrow to resolve: single atom.
+    AtomByResolution,
     /// Inadmissible variance repaired by the clamp policy.
     SigmaClamped,
     /// Inadmissible variance, row dropped by the drop policy.
@@ -30,12 +32,13 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 9] = [
+    pub const ALL: [Category; 10] = [
         Category::Nonfinite,
         Category::NegativeField,
         Category::MeanExceedsMax,
         Category::ZeroRate,
         Category::DegenerateAtom,
+        Category::AtomByResolution,
         Category::SigmaClamped,
         Category::VarianceDropped,
         Category::VarianceAtom,
@@ -49,6 +52,7 @@ impl Category {
             Category::MeanExceedsMax => "mean_exceeds_max",
             Category::ZeroRate => "zero_rate",
             Category::DegenerateAtom => "degenerate_atom",
+            Category::AtomByResolution => "atom_by_resolution",
             Category::SigmaClamped => "sigma_clamped",
             Category::VarianceDropped => "variance_dropped",
             Category::VarianceAtom => "variance_atom",
@@ -77,7 +81,7 @@ impl RowIssues {
 /// callers holding event ids translate at the API boundary.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Diagnostics {
-    issues: [RowIssues; 9],
+    issues: [RowIssues; 10],
 }
 
 impl Diagnostics {

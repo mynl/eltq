@@ -83,6 +83,7 @@ identical.
 | [ln-beta] `ln B` by Stirling at large parameters; the survival exact to 1e-13 at beta = 8e7 | 2.3.1 | done |
 | [large-parameters] beta quantiles by the Cornish-Fisher expansion from min(alpha, beta) = 2e5; the quantiles method right and finite at every parameter | 2.3.2 | done |
 | [kernel] the incomplete beta reports failure instead of a value; events beyond the fraction's regime routed around it whatever the density | 2.3.3 | done |
+| [atoms] the normal law for narrow events from min(alpha, beta) = 1e16 replaces the step at the mean; rows too narrow to resolve are atoms under `atom_by_resolution` | 2.3.4 | done |
 
 ## Layout
 

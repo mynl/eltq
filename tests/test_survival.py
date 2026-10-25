@@ -491,6 +491,68 @@ def test_30_kernel_validity_routing():
                 assert np.max(np.abs(grids[0] - grids[1])) <= tol, (small, ratio, npd)
 
 
+# [31] Atoms by resolution and the normal kernel: a symmetric event with its
+# mean on a bucket edge splits half and half whatever its width (the
+# review's A1: the step at the mean above alpha + beta = 1e15 put it all in
+# one bucket), a row too narrow to resolve is an atom under its own
+# category, the step case's overflow moment is right, and from
+# min(alpha, beta) = 1e16 the normal law is the oracle on both backends.
+def test_31_atoms_by_resolution_and_normal_kernel():
+    from scipy.stats import norm
+    import eltq
+
+    def row(mu, sd, maximum=1.0, rate=1.0):
+        return tuple(np.array([v], dtype=np.float64) for v in (rate, maximum, mu, sd, 0.0))
+
+    backends = (eltq.quantize_arrays, reference.quantize_reference)
+    # The A1 table, plus a row narrower than the resolution.
+    for sd, category in ((0.0, "degenerate_atom"), (1e-8, None), (2e-8, None), (1e-16, "atom_by_resolution")):
+        for backend in backends:
+            _, sec, meta = backend(*row(0.5, sd), bucket_size=0.2, grid_length=6)
+            assert np.allclose(sec, [0, 0, 0.5, 0.5, 0, 0], atol=1e-9), (sd, backend, sec)
+            if category is not None:
+                assert diag_count(meta, category) == 1, (sd, backend, meta.diagnostics)
+            assert diag_count(meta, "atom_by_resolution") == (1 if sd == 1e-16 else 0)
+    # The exact split for sd = 2e-8 (the review's figure) on the engine.
+    _, sec, _ = eltq.quantize_arrays(*row(0.5, 2e-8), bucket_size=0.2, grid_length=6)
+    assert abs(sec[2] - 0.499999999764) <= 2e-10 and abs(sec[3] - 0.500000000236) <= 2e-10
+    # The I1 step case: overflow rate 1, excess moment mu - top node = 0.15.
+    for backend in backends:
+        _, _, meta = backend(*row(0.55, 1e-9), bucket_size=0.2, grid_length=3)
+        assert math.isclose(meta.rate_above_grid["secondary"], 1.0, rel_tol=1e-12)
+        assert abs(meta.mean_above_grid["secondary"] - 0.15) <= 1e-9, (backend, meta.mean_above_grid)
+    # The mean on an edge and four ulps off it, across the handover to the
+    # normal law, symmetric and lopsided: the bucket split is the normal's.
+    for small in (1e14, 1e16, 1e18, 1e24):
+        for ratio in (1.0, 30.0):
+            a, b = small, small * ratio
+            p = a / (a + b)
+            sd = math.sqrt(p * (1.0 - p) / (a + b + 1.0))
+            h = 0.25 * p
+            edge = 2.5 * h            # the mean sits on e_2 when mu = edge
+            for offset in (0.0, 4.0, -4.0):
+                mu = edge * (1.0 + offset * np.finfo(float).eps)
+                cols = (np.array([1.0]), np.array([mu / p]), np.array([mu]), np.array([sd * mu / p]), np.array([0.0]))
+                z = (edge - mu) / (sd * mu / p)
+                want_below, want_above = norm.cdf(z), norm.sf(z)
+                # The mean's own resolution: its share is recovered from
+                # (M, mu, sigma) to a few ulps, which at 1e24 is 1e-4 of a
+                # standard deviation (the engine and the reference round
+                # alike and agree far more closely than this).
+                tol = 1e-6 + 4.0 * np.finfo(float).eps * p / sd
+                grids = []
+                for backend in backends:
+                    _, sec, meta = backend(*cols, bucket_size=h, grid_length=6)
+                    assert math.isclose(sec.sum(), 1.0, rel_tol=1e-14)
+                    assert abs(sec[2] - want_below) <= tol and abs(sec[3] - want_above) <= tol, (small, ratio, offset, backend, sec)
+                    assert meta.narrow_events == 1
+                    grids.append(sec)
+                # At the handover itself the two backends can recover alpha
+                # on opposite sides of 1e16 and take different kernels, each
+                # within 1e-6 of the truth; 4.3e-9 apart measured.
+                assert np.max(np.abs(grids[0] - grids[1])) <= 1e-8, (small, ratio, offset)
+
+
 def test_curve_matches_quantize_and_exact(impl):
     import eltq
 

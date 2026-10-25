@@ -25,10 +25,18 @@ TAIL_RATE_FLOOR = 1e-20
 #: events take the regular route (spec section 5A). Shared by both backends.
 NARROW_STEPS = 40
 
-#: Survival method: above this ``alpha + beta`` a narrow event's density
-#: cannot be resolved in double precision and the event is a step at its
-#: mean (spec section 5A). Shared by both backends.
-NARROW_STEP_PARAMETER_SUM = 1e15
+#: Survival method: from this smaller parameter a narrow event's kernel is
+#: the standardized normal law in closed form instead of the quadrature of
+#: its density, whose two logarithms cancel to about
+#: ``4e-15 sqrt(min(alpha, beta))`` (spec section 5A). Shared by both
+#: backends; mirrors ``NARROW_NORMAL_FROM`` in ``crates/eltq-core/src/curve.rs``.
+NARROW_NORMAL_FROM = 1e16
+
+#: A beta row whose standard deviation is below this fraction of its mean
+#: (2^-48, sixteen ulps of the loss at the mean) is an atom at the mean,
+#: reported under ``atom_by_resolution`` (spec section 4). Shared by both
+#: backends; mirrors ``ATOM_RESOLUTION`` in ``crates/eltq-core/src/validate.rs``.
+ATOM_RESOLUTION = 2.0 ** -48
 
 #: Quantiles method (and the multi-unit beta units): from this smaller
 #: parameter a beta quantile comes from the Cornish-Fisher expansion in the
