@@ -130,6 +130,12 @@ curve: a net cost of roughly 10% on the curve build at $T=12$, proportional to $
 
 ## Decisions needed (Steve)
 
+**Ruled 2026-10-25 (Steve): all eight as recommended.** $T$ is a knob with default 12; the 15%
+gate; the quantiles default chunk changes in rounding; the order below; a separate
+`atom_by_resolution` category; a 1 GiB wave budget; a typed error on kernel failure; the cap at
+5,000 per decade. The items below are decisions, not proposals. Spec tests are numbered in landing
+order: 30 kernel, 31 atoms, 32 tails, 33 the mesh contract (the draft had the contract as 30).
+
 1. **The accuracy contract.** Proposed: for every beta event, the curve at any loss is within
    $10^{-4}$ relative of the event's exact survival where $S_j\ge10^{-4}$, within $10^{-3}$ where
    $S_j\ge10^{-8}$, and within $3\times10^{-3}$ where $S_j\ge10^{-12}$; the rate exact; the
@@ -264,12 +270,12 @@ applies first.
 - Calibration before the defaults are fixed: the sweep above rerun under the mesh for
   $\alpha\in\{1.5,3,10,10^2,10^3,10^4\}$, coefficients of variation from $5\times10^{-4}$ to $1$,
   $T\in\{8,12,16,20\}$, on both backends, recorded in `benchmarks/report-<version>.md` as the
-  table of this plan with the chosen $T$ marked. The contract of decision 1 is then spec test 30.
+  table of this plan with the chosen $T$ marked. The contract of decision 1 is then spec test 33.
 - Spec section 5A, Nodes and Narrow events: the mesh rule, the knob, the contract, and the narrow
   criterion in local terms; the sentence "the default density, 100, is the smallest whose
   exact-edge error is within $10^{-4}$ on every benchmark portfolio" gains "for the small-$\alpha$
   events those portfolios hold; bell-shaped events set their own density".
-- Tests: test 30 (the contract on one-row portfolios); the A3 case; a block of 300 policies at a
+- Tests: test 33 (the contract on one-row portfolios); the A3 case; a block of 300 policies at a
   common limit with coefficients of variation from $10^{-3}$ to $10^{-1}$ (the regime between the
   old narrow threshold and the base density) against SciPy at every bucket edge; determinism
   (test 17) at the new default; the survival goldens regenerated where bell events move them,
@@ -345,7 +351,7 @@ rule of this project's `CLAUDE.md` (the review itself is not a source; the mathe
 derived):
 
 - The table of five problems and the small-$\alpha$ section: "$S$ exact at every bucket edge, down
-  to $10^{-300}$" becomes "exact at the nodes; between them within the contract of spec test 30".
+  to $10^{-300}$" becomes "exact at the nodes; between them within the contract of spec test 33".
 - The compound Poisson paragraph: $\Lambda(0)=\sum_j\lambda_j$ holds with zero losses kept as
   atoms, which the code does; a sentence says so.
 - The parallel section: the compensated sums are the scalar totals and the chunk fold; the
@@ -374,7 +380,7 @@ derived):
 
 - Every reproduction in the review's appendix, rerun as a test with the review's numbers, gives
   the exact or SciPy answer within the step's stated tolerance, on both backends.
-- Spec test 30 (the contract of decision 1) passes on one-row portfolios across the calibration
+- Spec test 33 (the contract of decision 1) passes on one-row portfolios across the calibration
   grid; tests 15 to 24 still pass; test 17's determinism holds at the new defaults.
 - The sweep table of this plan, rerun under [mesh] at the chosen $T$, is within the contract in
   every band.
@@ -441,4 +447,12 @@ derived):
 
 ## Execution log
 
-(empty; filled as steps land, with the versions assigned)
+### [kernel] 2.3.3 (2026-10-25)
+
+Landed as planned, with three divergences, each recorded here and in the CHANGELOG:
+
+- **The iteration cap rose from 400 to 1,000.** Measured on the way: at the mean the fraction needs about $1.1\sqrt{\alpha+\beta}$ iterations when both parameters are large, 315 at $(2\times10^5,2\times10^5)$ but 443 at $(2\times10^5,6\times10^7)$, so the regime below the $2\times10^5$ threshold was not fully covered by 400 and the existing continuity test at the threshold failed once the fraction reported failure. At 1,000 the fraction converges for $\min(\alpha,\beta)$ to about $2\times10^6$ at every ratio.
+- **The robust inverse walk accepts rather than raises at its cap, under a criterion.** The plan asked for an error. With the fraction converged, its value near the threshold is still only about $5\times10^{-10}$ relative, so the walk's bracket cannot close to $2\varepsilon$ and the cap is reached legitimately; the best point is accepted when its CDF residual is within $10^{-8}$ (`ROBUST_ACCEPT_CDF_ERROR`), otherwise the walk fails typed. This is the justified acceptance criterion the reviewer asked for.
+- **Test 30's backend agreement is $10^{-8}$ of the rate below the threshold** (measured $1.5\times10^{-10}$ at $\min(\alpha,\beta)=10^5$, ratio 20, 1,000 nodes per decade: the fraction's own accuracy against SciPy), $10^{-10}$ at and above it.
+
+Gates: `cargo test -p eltq-core --release` (82 lib tests and the golden, property and parser targets; the release profile because of the rustc 1.99.1 `libm` failure at the test profile), `uv sync --reinstall-package eltq` then `uv run pytest` (181 passed, 1 skipped as before). Grids unchanged at default settings on every fixture; the goldens stand.

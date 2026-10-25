@@ -48,6 +48,12 @@ pub enum Error {
     #[error("min_loss must be finite and positive, got {0}")]
     BadMinLoss(f64),
     #[error(
+        "row {row}: the incomplete beta continued fraction did not converge at \
+         alpha = {alpha}, beta = {beta}; the event lies outside the regime the \
+         shared curve evaluates and was not routed around it"
+    )]
+    IncompleteBetaDiverged { row: usize, alpha: f64, beta: f64 },
+    #[error(
         "the clamp variance policy was removed from the one-row route at 2.0.0 \
          (use bernoulli, error, drop, or atom)"
     )]

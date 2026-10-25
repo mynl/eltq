@@ -614,13 +614,26 @@ pub fn build_curve(
                     }
                     let (alpha, beta) = beta_params(m, mu, classified.var_eff[row]);
                     let bf = BetaFn::new(alpha, beta);
+                    // A NaN from the kernel is an unconverged continued
+                    // fraction: a typed error, never a value (spec section 8).
+                    let checked = |v: f64| -> Result<f64, Error> {
+                        if v.is_nan() {
+                            Err(Error::IncompleteBetaDiverged { row, alpha, beta })
+                        } else {
+                            Ok(v)
+                        }
+                    };
                     // A narrow event: its bulk, a few sigma wide, found by
                     // stepping out from the mean; kept out of the curve.
                     // Only bounded, log-concave densities (both parameters
-                    // above 1) qualify; beyond NARROW_STEP_PARAMETER_SUM the
-                    // event is a step at its mean.
+                    // above 1) qualify. An event narrower than a node
+                    // interval goes here, and so does one whose parameters
+                    // are both large enough that the continued fraction is
+                    // untrustworthy (`is_valid_regime`), whatever the node
+                    // density; beyond NARROW_STEP_PARAMETER_SUM the event is
+                    // a step at its mean.
                     let sigma = classified.var_eff[row].sqrt();
-                    if sigma < mu * narrow_ratio && alpha > 1.0 && beta > 1.0 {
+                    if (sigma < mu * narrow_ratio || !bf.is_valid_regime()) && alpha > 1.0 && beta > 1.0 {
                         let kernel = NarrowKernel::new(alpha, beta);
                         let bulk = if alpha + beta > NARROW_STEP_PARAMETER_SUM {
                             Some((mu, mu, 1.0))
@@ -662,7 +675,7 @@ pub fn build_curve(
                     let above = loss.partition_point(|&v| v < m);
                     let k_signed = above as isize - 1 - (TAIL_INTERVALS as isize - 1);
                     let (k, xk, s) = if k_signed < 0 {
-                        (0_usize, loss[0], bf.sf(loss[0] / m))
+                        (0_usize, loss[0], checked(bf.sf(loss[0] / m))?)
                     } else {
                         let k = k_signed as usize;
                         surv.clear();
@@ -678,7 +691,7 @@ pub fn build_curve(
                                 g.push(0.0);
                             } else {
                                 let (sf, density_y) = bf.sf_and_density_times_y(y);
-                                surv.push(sf);
+                                surv.push(checked(sf)?);
                                 g.push(lam * density_y);
                             }
                         }
@@ -698,11 +711,11 @@ pub fn build_curve(
                         if loss[i] >= m {
                             break;
                         }
-                        p.node_tail[i] += lam * bf.sf(loss[i] / m);
+                        p.node_tail[i] += lam * checked(bf.sf(loss[i] / m))?;
                     }
                     // The diagnostic samples: exact curve and exact total.
                     for (i, &x) in sample_x.iter().enumerate() {
-                        let sf = bf.sf((x / m).min(1.0));
+                        let sf = checked(bf.sf((x / m).min(1.0)))?;
                         p.sample_total[i] += lam * sf;
                         if x < xk {
                             p.sample_curve[i] += lam * (sf - s);

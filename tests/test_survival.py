@@ -441,6 +441,56 @@ def test_24_large_parameters_quantiles():
     assert np.max(np.abs(results[0][1] - results[1][1])) <= 1e-11 * total
 
 
+# [30] Kernel validity: an event with both parameters at or above
+# LARGE_PARAMETER_FROM is kept out of the shared curve whatever the node
+# density, so the engine's continued fraction, which stops converging there,
+# is never asked for a value (the review's I2: raising nodes_per_decade to
+# 200,000 took a symmetric beta with a = b = 1e9 off the narrow route and
+# returned bucket weights of -0.45 and 1.45, mass 1). Both backends agree
+# on the routing; every weight lies in [0, 1]; the rate is exact.
+def test_30_kernel_validity_routing():
+    import eltq
+    from eltq._meta import LARGE_PARAMETER_FROM
+
+    def beta_row(a, b, maximum=1.0):
+        p = a / (a + b)
+        sd = maximum * math.sqrt(p * (1.0 - p) / (a + b + 1.0))
+        return tuple(np.array([v]) for v in (1.0, maximum, maximum * p, sd, 0.0))
+
+    backends = (eltq.quantize_arrays, reference.quantize_reference)
+    # The review's reproduction: the half-and-half split by symmetry.
+    for backend in backends:
+        _, sec, meta = backend(*beta_row(1e9, 1e9), bucket_size=1.0, grid_length=2,
+                               nodes_per_decade=200_000)
+        assert np.allclose(sec, [0.5, 0.5], atol=1e-9), (backend, sec)
+        assert meta.narrow_events == 1
+    # Across the threshold at three densities: weights in [0, 1], the rate
+    # exact. Below the threshold the regular route, where the engine's
+    # fraction is good to about 1e-9 against SciPy (1.5e-10 of the total
+    # measured at min(alpha, beta) = 1e5), so the backends agree within 1e-8;
+    # at and above it the narrow route, whatever the density, where both
+    # backends integrate the same kernel and agree within 1e-10.
+    for small in (1e4, 1e5, LARGE_PARAMETER_FROM, 1e6, 1e9):
+        for ratio in (1.0, 20.0):
+            a, b = small, small * ratio
+            cols = beta_row(a, b)
+            mu = a / (a + b)
+            sd = float(cols[3][0])
+            h = max(sd / 4.0, 1e-6)
+            n = int(math.ceil((mu + 12.0 * sd) / h)) + 2
+            for npd in (100, 1_000, 20_000):
+                grids = []
+                for backend in backends:
+                    _, sec, meta = backend(*cols, bucket_size=h, grid_length=n, nodes_per_decade=npd)
+                    assert np.all(sec >= 0.0) and np.all(sec <= 1.0 + 1e-12), (small, ratio, npd, backend)
+                    assert math.isclose(sec.sum(), 1.0, rel_tol=1e-14)
+                    if small >= LARGE_PARAMETER_FROM:
+                        assert meta.narrow_events == 1, (small, ratio, npd, backend)
+                    grids.append(sec)
+                tol = 1e-10 if small >= LARGE_PARAMETER_FROM else 1e-8
+                assert np.max(np.abs(grids[0] - grids[1])) <= tol, (small, ratio, npd)
+
+
 def test_curve_matches_quantize_and_exact(impl):
     import eltq
 

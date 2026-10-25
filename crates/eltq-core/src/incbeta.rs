@@ -10,10 +10,24 @@
 //! (section 6.1 of the same source), not from three ln Gamma values, whose
 //! cancellation costs seven digits at beta = 1e8
 //! (`dev/done/plan-ln-beta-large-parameters.md`).
+//!
+//! The fraction converges in tens of iterations when one parameter is small
+//! and stops converging when both are large (about 1e-10 near the mean at
+//! alpha + beta = 1e4, nothing usable above 1e7 at the old cap of 400). A fraction that has not
+//! converged after `MAX_CF_ITERS` is reported, never returned as a value:
+//! `betacf` yields `None`, the probabilities become NaN, and the callers
+//! route around the regime through `is_valid_regime` or raise
+//! (`dev/done/plan-peer-review-response.md`, [kernel]).
 
 use statrs::function::gamma::ln_gamma;
 
-const MAX_CF_ITERS: usize = 400;
+use crate::batched::LARGE_PARAMETER_FROM;
+
+/// At the mean the fraction needs about 1.1 sqrt(alpha + beta) iterations
+/// when both parameters are large (315 at 2e5 symmetric, 443 at 2e5 and
+/// 6e7, 526 at 1e6 symmetric): 1,000 covers min(alpha, beta) to about 2e6
+/// at every ratio, ten times the regime the engine evaluates.
+const MAX_CF_ITERS: usize = 1000;
 const CF_EPS: f64 = 1e-16;
 const FPMIN: f64 = 1e-300;
 
@@ -90,10 +104,20 @@ impl BetaFn {
         let ln_front = a * x.ln() + b * (-x).ln_1p() - self.ln_beta;
         let front = ln_front.exp();
         if x < (a + 1.0) / (a + b + 2.0) {
-            front * betacf(a, b, x) / a
+            betacf(a, b, x).map_or(f64::NAN, |cf| front * cf / a)
         } else {
-            1.0 - front * betacf(b, a, 1.0 - x) / b
+            betacf(b, a, 1.0 - x).map_or(f64::NAN, |cf| 1.0 - front * cf / b)
         }
+    }
+
+    /// Whether the continued fraction is trusted at these parameters: false
+    /// from `min(alpha, beta) = LARGE_PARAMETER_FROM` (2e5), the threshold
+    /// from which the quantiles method takes the Cornish-Fisher expansion
+    /// instead of inverting the fraction. The survival method keeps such an
+    /// event out of the shared curve whatever the node density, so that the
+    /// fraction is never asked to work where it fails.
+    pub fn is_valid_regime(&self) -> bool {
+        self.alpha.min(self.beta) < LARGE_PARAMETER_FROM
     }
 
     /// Regularized upper incomplete beta, the survival function 1 - I_x,
@@ -110,9 +134,9 @@ impl BetaFn {
         let ln_front = a * x.ln() + b * (-x).ln_1p() - self.ln_beta;
         let front = ln_front.exp();
         if x < (a + 1.0) / (a + b + 2.0) {
-            1.0 - front * betacf(a, b, x) / a
+            betacf(a, b, x).map_or(f64::NAN, |cf| 1.0 - front * cf / a)
         } else {
-            front * betacf(b, a, 1.0 - x) / b
+            betacf(b, a, 1.0 - x).map_or(f64::NAN, |cf| front * cf / b)
         }
     }
 
@@ -132,9 +156,9 @@ impl BetaFn {
         let ln_1my = (-y).ln_1p();
         let front = (a * ln_y + b * ln_1my - self.ln_beta).exp();
         let sf = if y < (a + 1.0) / (a + b + 2.0) {
-            1.0 - front * betacf(a, b, y) / a
+            betacf(a, b, y).map_or(f64::NAN, |cf| 1.0 - front * cf / a)
         } else {
-            front * betacf(b, a, 1.0 - y) / b
+            betacf(b, a, 1.0 - y).map_or(f64::NAN, |cf| front * cf / b)
         };
         (sf, (a * ln_y + (b - 1.0) * ln_1my - self.ln_beta).exp())
     }
@@ -161,8 +185,9 @@ impl BetaFn {
     }
 }
 
-/// Modified Lentz evaluation of the incomplete-beta continued fraction.
-fn betacf(a: f64, b: f64, x: f64) -> f64 {
+/// Modified Lentz evaluation of the incomplete-beta continued fraction:
+/// `None` when `MAX_CF_ITERS` pass without the step reaching `CF_EPS`.
+fn betacf(a: f64, b: f64, x: f64) -> Option<f64> {
     let qab = a + b;
     let qap = a + 1.0;
     let qam = a - 1.0;
@@ -200,10 +225,10 @@ fn betacf(a: f64, b: f64, x: f64) -> f64 {
         let del = d * c;
         h *= del;
         if (del - 1.0).abs() <= CF_EPS {
-            break;
+            return Some(h);
         }
     }
-    h
+    None
 }
 
 #[cfg(test)]
@@ -337,5 +362,24 @@ mod tests {
         // underflows with it rather than misbehaving.
         let g = BetaFn::new(1e-3, 2.0);
         assert_eq!(g.ln_lower_tail_start(u).exp(), 0.0);
+    }
+
+    // [kernel] The fraction reports failure where both parameters are
+    // large instead of returning an unconverged value (the review's I2:
+    // 1.45 at a = b = 1e9), and the validity flag routes around it.
+    #[test]
+    fn unconverged_fraction_is_reported_not_returned() {
+        assert!(betacf(1e9, 1e9, 0.5).is_none());
+        let bf = BetaFn::new(1e9, 1e9);
+        assert!(bf.sf(0.5).is_nan());
+        assert!(bf.cdf(0.5).is_nan());
+        assert!(bf.sf_and_density_times_y(0.5).0.is_nan());
+        assert!(!bf.is_valid_regime());
+        // One small parameter converges in tens of iterations at any beta.
+        let small = BetaFn::new(0.5, 1e9);
+        assert!(small.is_valid_regime());
+        assert!(small.sf(1e-9).is_finite());
+        assert!(BetaFn::new(1.9e5, 1e7).is_valid_regime());
+        assert!(!BetaFn::new(2e5, 2e5).is_valid_regime());
     }
 }

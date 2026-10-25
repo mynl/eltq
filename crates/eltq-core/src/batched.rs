@@ -29,6 +29,10 @@ use crate::normal;
 
 const MAX_STEP_ITERS: usize = 16;
 const MAX_ROBUST_ITERS: usize = 500;
+/// CDF residual within which a best-so-far point is accepted when the
+/// robust walk exhausts its iterations ([kernel] of
+/// `dev/done/plan-peer-review-response.md`).
+const ROBUST_ACCEPT_CDF_ERROR: f64 = 1e-8;
 
 /// The smaller parameter from which both kernels take the Cornish-Fisher
 /// expansion instead of the walk. Measured against SciPy's `betaincinv`
@@ -382,7 +386,15 @@ fn robust_solve(bf: &BetaFn, u: f64, lo0: f64, hi0: f64, start: f64) -> Result<f
         }
         x = next;
     }
-    Ok(best)
+    // The cap is reached when the CDF's own rounding (about 5e-10 relative
+    // near min(alpha, beta) = 2e5, the fraction converged) exceeds the
+    // target and the bracket cannot close. The best point is accepted only
+    // if its residual is within that rounding; otherwise the walk failed.
+    if best_err <= ROBUST_ACCEPT_CDF_ERROR {
+        Ok(best)
+    } else {
+        Err(KernelError)
+    }
 }
 
 #[cfg(test)]

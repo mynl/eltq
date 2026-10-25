@@ -3,6 +3,15 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.3] - 2026-10-25
+
+### Fixed
+
+- [kernel] The engine's incomplete beta reports a continued fraction that has not converged instead of returning its last iterate: the probabilities become NaN and the survival method raises a typed error naming the row. Before, a symmetric beta with `alpha = beta = 1e9` at 200,000 nodes per decade returned bucket weights of -0.45 and 1.45 (peer review, finding I2).
+- The survival method keeps an event with `min(alpha, beta)` at or above 2e5 out of the shared curve whatever the node density (the narrow route, whose quadrature does not use the fraction), so the fraction is never asked to work where it fails; before, the routing depended on the density alone. Both backends; spec section 5A and test 30.
+- The fraction's iteration cap rises from 400 to 1,000: at the threshold a lopsided event needed 443, so the regime the engine calls valid was not fully covered. No cost where the fraction converges fast, which is everywhere one parameter is small.
+- The quantiles method's robust inverse walk accepts a best-so-far point when it exhausts its iterations only if the point's CDF residual is within 1e-8 (the fraction's own rounding near the threshold); otherwise it fails typed. Grids are unchanged at default settings on every fixture.
+
 ## [2.3.2] - 2026-10-25
 
 ### Fixed

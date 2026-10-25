@@ -1,6 +1,6 @@
 [project]
 name = "eltq"
-version = "2.3.2"
+version = "2.3.3"
 description = "Ferociously fast ELT secondary-uncertainty quantization"
 readme = "README.md"
 authors = [

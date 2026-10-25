@@ -756,9 +756,12 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
             below_rate += lam
             continue
         # Only bounded, log-concave densities (both parameters above 1)
-        # qualify; beyond NARROW_STEP_PARAMETER_SUM the event is a step at
+        # qualify: an event narrower than a node interval, and one whose
+        # parameters are both at or above LARGE_PARAMETER_FROM, where the
+        # engine's continued fraction is untrustworthy, whatever the node
+        # density; beyond NARROW_STEP_PARAMETER_SUM the event is a step at
         # its mean, as in the Rust engine.
-        if sigma < mu * narrow_ratio and a > 1.0 and b > 1.0:
+        if (sigma < mu * narrow_ratio or min(a, b) >= LARGE_PARAMETER_FROM) and a > 1.0 and b > 1.0:
             if a + b > NARROW_STEP_PARAMETER_SUM:
                 bulk = (max(mu, min_loss), mu)
             else:
@@ -944,7 +947,7 @@ def large_parameter_quantiles(a, b, u):
     Both backends take this route when ``min(a, b) >= LARGE_PARAMETER_FROM``
     (spec section 5): the inversion of the incomplete beta drifts there (its
     continued fraction needs about ``sqrt(min(a, b))`` iterations and stops
-    at 400) and fails beyond ``a + b`` of about 5e18, and SciPy's ``ppf`` is
+    at 1,000, 400 before 2.3.3) and fails beyond ``a + b`` of about 5e18, and SciPy's ``ppf`` is
     off by hundreds of standard deviations at ``a = 5e20``. The expansion to
     second order in the cumulants (Abramowitz and Stegun 26.2.49) is within
     4e-9 standard deviations of SciPy at the threshold and improves as

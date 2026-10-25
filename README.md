@@ -82,6 +82,7 @@ identical.
 | [narrow-events] betas narrower than a node interval walked by quadrature | 2.3.0 | done |
 | [ln-beta] `ln B` by Stirling at large parameters; the survival exact to 1e-13 at beta = 8e7 | 2.3.1 | done |
 | [large-parameters] beta quantiles by the Cornish-Fisher expansion from min(alpha, beta) = 2e5; the quantiles method right and finite at every parameter | 2.3.2 | done |
+| [kernel] the incomplete beta reports failure instead of a value; events beyond the fraction's regime routed around it whatever the density | 2.3.3 | done |
 
 ## Layout
 
