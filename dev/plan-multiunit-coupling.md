@@ -78,9 +78,14 @@ the one alternative with a rationale and has no source.
 
 1. Burke's coupling is the default; comonotone, independent and Homer are supported; the
    variance-matched loading is optional and last.
-2. Homer's allocation is capped at $M_k$, as the one-row route caps at $M$; the capped
-   allocations no longer sum to the rolled loss, nothing is reallocated, and the mean lost to the
-   cap is reported.
+2. Homer's allocation is offered both ways, by a keyword `homer_cap` (revised the same day; the
+   first version capped always). Uncapped, as published, $X_k = X_R\mu_k/\mu_R$: the allocations
+   sum to the rolled loss and keep the mean, but a unit can receive more than $M_k$. Capped,
+   $X_k = \min(X_R\mu_k/\mu_R, M_k)$, as the one-row route caps at $M$: no unit exceeds its
+   exposure, the allocations no longer sum to the rolled loss, and the mean falls by the
+   expected excess. Nothing is reallocated and no offset restores the mean. The expected excess
+   over the exposures is reported either way: lost when capped, carried when not. The default is
+   open question 4.
 3. Bivariate outputs are arrays only. The annual bivariate aggregate, its marginals and the
    conditional means are the aggregate package's (`BivariateAggregate(mode="discrete")`,
    `exeqa_df`), fed from eltq's occurrence matrix; eltq writes no DecL.
@@ -157,13 +162,21 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
   already convolves once per event outside the $z$ loop.
 - `homer`: a separate path with no $z$ loop. Per event: roll the rows up by the moment rule,
   classify the rolled row by the one-row rules (beta, two-point, atom), bucket its marginal on
-  the grid by cdf differences, and push it through the composed map
-  $x \mapsto \sum_k \mathrm{term}_k(\min(x \mu_k/\mu_R, M_k))$ per view, compiled like a view
-  map (its breakpoints are the units' breakpoints scaled by $\mu_R/\mu_k$ and the caps). The mean
-  lost to the caps, $\sum_j \lambda_j \mathsf P(\sum_k (X_{R,j}\mu_k/\mu_R - M_k)^+)$, is computed
-  analytically from the rolled beta's limited expected values and reported as
-  `homer_cap_mean_loss`.
-- Tests: spec test 25 for the four couplings, both backends; the multi-unit article's Table 5
+  the grid by cdf differences, and push it through the composed map per view, compiled like a
+  view map: $x \mapsto \sum_k \mathrm{term}_k(x \mu_k/\mu_R)$ uncapped, or
+  $x \mapsto \sum_k \mathrm{term}_k(\min(x \mu_k/\mu_R, M_k))$ with `homer_cap=True` (the
+  breakpoints are the units' breakpoints scaled by $\mu_R/\mu_k$, and the caps when capped). The
+  expected excess over the exposures,
+  $\sum_j \lambda_j \mathsf P(\sum_k (X_{R,j}\mu_k/\mu_R - M_k)^+)$, is computed analytically
+  from the rolled beta's limited expected values and reported in both modes, with the mode
+  (provisional name `homer_excess_mean`, replacing `homer_cap_mean_loss`).
+- `homer_cap` on `multiunit_views` (and wherever `coupling` is accepted), ignored with a warning
+  under the other couplings; echoed in `MultiMeta`.
+- Specification: section 4A's `homer` paragraph, its metadata paragraph, test 25's `homer` clause
+  and item 9 of section 11 state the cap as fixed; amend them to the option of decision 2.
+- Tests: spec test 25 for the four couplings, both backends, with `homer` in both modes: uncapped,
+  the allocations sum to the rolled loss and the mean is exact; capped, each allocation is at
+  most $M_k$ and the mean falls by the reported excess. The multi-unit article's Table 5
   (case A under the three loadings) reproduced within the rule's error.
 
 ### [joint] 2.8.0: bivariate occurrence severities
@@ -232,9 +245,11 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
 
 - *Raise $Q$ under the midpoint rule.* The tail cut shrinks only as $1/Q$ and the cost is linear in
   $Q$; the study decides, but the stratified rule's exact marginals are the better bet.
-- *Homer uncapped, as published.* Rejected (decision 2): the published rule allocates more than a
-  unit's exposure in the paper's own example.
-- *Reallocate the capped excess to other units.* Rejected: a convention of ours with no source.
+- *Homer capped only.* The first version of decision 2, revised: the published rule allocates
+  more than a unit's exposure in the paper's own example, but it is the published rule, so it
+  stays available and the cap is an explicit choice.
+- *Reallocate the capped excess to other units, or offset the mean.* Rejected: a convention of
+  ours with no source.
 - *Variance matching by a pairwise loss correlation rather than a common scale.* Not identifiable
   from one equation per event for $n > 2$ units; the common scale is the minimal one-parameter
   family containing Burke.
@@ -267,6 +282,8 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
    whether `unit_total_severity` defaults to all units.
 3. Whether the convergence study's default $Q$ may differ by rule (the stratified rule at 16
    may beat Gauss-Hermite at 32 on cost), or one $Q$ is set for all rules.
+4. The default of `homer_cap`: `False`, the published rule (proposed, so that `coupling="homer"`
+   reproduces the paper), or `True`, the physically bounded allocation.
 
 ## Execution log
 
