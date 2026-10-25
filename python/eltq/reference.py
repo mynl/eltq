@@ -26,11 +26,12 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.special import betainc, betaincc, betaln
+from scipy.special import betainc, betaincc, betaln, ndtri
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import (DEFAULT_NODES_PER_DECADE, NARROW_STEP_PARAMETER_SUM, NARROW_STEPS,
-                        TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta, GridMeta, Meta, RowIssues)
+from eltq._meta import (DEFAULT_NODES_PER_DECADE, LARGE_PARAMETER_FROM, NARROW_STEP_PARAMETER_SUM,
+                        NARROW_STEPS, TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta, GridMeta, Meta,
+                        RowIssues)
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -937,6 +938,48 @@ def exceedance_curve_reference(
     return curve, meta
 
 
+def large_parameter_quantiles(a, b, u):
+    """Beta quantiles at large parameters by the Cornish-Fisher expansion.
+
+    Both backends take this route when ``min(a, b) >= LARGE_PARAMETER_FROM``
+    (spec section 5): the inversion of the incomplete beta drifts there (its
+    continued fraction needs about ``sqrt(min(a, b))`` iterations and stops
+    at 400) and fails beyond ``a + b`` of about 5e18, and SciPy's ``ppf`` is
+    off by hundreds of standard deviations at ``a = 5e20``. The expansion to
+    second order in the cumulants (Abramowitz and Stegun 26.2.49) is within
+    4e-9 standard deviations of SciPy at the threshold and improves as
+    ``min(a, b) ** -1.5``.
+
+    Parameters
+    ----------
+    a, b : float
+        The beta's shape parameters.
+    u : array_like
+        Probability levels in [0, 1]; 0 and 1 give 0 and 1.
+
+    Returns
+    -------
+    ndarray
+        The quantiles on [0, 1], the same shape as ``u``.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    s = a + b
+    mean = a / s
+    sd = math.sqrt(a * b / (s * s * (s + 1.0)))
+    # (b - a) / sqrt(a b), the shape factor of the odd cumulants, in a form
+    # that stays finite for parameters up to about 1e150.
+    r = math.sqrt(b / a) - math.sqrt(a / b)
+    skew = 2.0 * r * math.sqrt(s + 1.0) / (s + 2.0)
+    kurt = 6.0 * (r * r * (s + 1.0) - (s + 2.0)) / ((s + 2.0) * (s + 3.0))
+    with np.errstate(all="ignore"):
+        z = ndtri(u)
+        z2 = z * z
+        w = (z + skew * (z2 - 1.0) / 6.0 + kurt * z * (z2 - 3.0) / 24.0
+             - skew * skew * z * (2.0 * z2 - 5.0) / 36.0)
+        x = np.clip(mean + sd * w, 0.0, 1.0)
+    return np.where(u <= 0.0, 0.0, np.where(u >= 1.0, 1.0, x))
+
+
 def quantize_reference(
     rate,
     max_loss,
@@ -1068,7 +1111,10 @@ def quantize_reference(
         else:
             a, b = beta_params(m, mu, var_eff[j])
             if method == "quantiles":
-                xs = m * beta_dist.ppf(u, a, b)
+                if min(a, b) >= LARGE_PARAMETER_FROM:
+                    xs = m * large_parameter_quantiles(a, b, u)
+                else:
+                    xs = m * beta_dist.ppf(u, a, b)
                 w = lam / K
                 for x in xs:
                     sec_overflow.place(secondary, x, w)

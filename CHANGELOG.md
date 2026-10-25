@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.2] - 2026-10-25
+
+### Fixed
+
+- [large-parameters] The quantiles method (and the multi-unit beta units) at large parameters: from `min(alpha, beta) = 2e5` every beta quantile comes from the Cornish-Fisher expansion in the beta's cumulants (Abramowitz and Stegun 26.2.49) instead of inverting the engine's incomplete beta, whose continued fraction stops converging there and whose front factor overflows beyond `alpha + beta` of about 5e18. Before, such rows got wrong points silently (a third of the rate at dyadic fractions of M) or failed with "beta quantile evaluation failed"; which of the two depended on rounding, which is why 2.3.1 failed on rows 2.3.0 accepted. Within 4e-9 standard deviations of SciPy on both sides of the threshold (spec section 5, test 24); goldens unchanged; cheaper than the walk it replaces.
+- The reference backend takes the same route: SciPy's `beta.ppf` returns non-monotone points hundreds of standard deviations off at `alpha = 5e20`, so it was no oracle there either.
+- Downstream: 32-point results change for rows with `min(alpha, beta)` above about 5e5, a correction of 2.3.0's points; the survival method is unaffected, such events being narrow.
+
 ## [2.3.1] - 2026-10-24
 
 ### Fixed

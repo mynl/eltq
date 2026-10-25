@@ -71,6 +71,11 @@ Added 2026-10-24 for the incomplete beta at large parameters (`dev/done/plan-ln-
 section 6.1 for $\ln\Gamma$ and Stirling's series and section 6.4 for the incomplete beta, its
 continued fraction and the modified Lentz evaluation.
 
+Added 2026-10-25 for the quantiles method at large parameters (`dev/done/plan-quantiles-large-parameters.md`):
+`Abramowitz1970` (Abramowitz and Stegun, Handbook of Mathematical Functions), section 26.2 for the
+Cornish-Fisher asymptotic expansion of a quantile in the cumulants (26.2.49), and 26.5.8 for the
+incomplete beta's continued fraction, which Numerical Recipes takes from it.
+
 **Nothing in `D:\Projects\aggregate\secondary-uncertainty` may be used**: not read for method, not
 cited, not paraphrased. Material that reaches the repository from anywhere else (a conversation,
 a client file, a vendor summary, a memory note) is not a source; if a method or convention cannot
@@ -102,7 +107,7 @@ finished.
   PyO3 bindings, not a pure-Python uv project. Both `cargo` and the Python tooling are in play.
 - **Overrides single-sourced versioning.** The version appears in `Cargo.toml`,
   `pyproject.toml` and `python/eltq/__init__.py` (`__version__`), and all three must be bumped
-  together (`Cargo.lock` and `uv.lock` follow on build). Currently 2.3.1.
+  together (`Cargo.lock` and `uv.lock` follow on build). Currently 2.3.2.
 - **Speed is a product requirement, not a nice-to-have** — "ferociously fast" is in the project's
   own description, the work has a `[ferocious]` milestone, and there is a benchmark suite.
   Performance regressions are defects. Equally, per the house KISS rule: raise it before trading

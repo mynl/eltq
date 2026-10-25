@@ -1,7 +1,8 @@
-"""Spec tests 15 to 23: the survival method, the overflow policies, the
+"""Spec tests 15 to 24: the survival method, the overflow policies, the
 Bernoulli treatment of inadmissible rows (`dev/done/plan-single-unit-survival-route.md`),
 the tail rate cut and the narrow events (`dev/done/plan-survival-tail-cost.md`),
-and the incomplete beta at large parameters (`dev/done/plan-ln-beta-large-parameters.md`).
+the incomplete beta at large parameters (`dev/done/plan-ln-beta-large-parameters.md`)
+and the quantiles method at large parameters (`dev/done/plan-quantiles-large-parameters.md`).
 
 Every test runs on both backends through the ``impl`` fixture in conftest;
 the oracle checks (``exact_edges``, ``check_every_interval``) call the
@@ -357,6 +358,87 @@ def test_23_large_beta_parameters():
     sel = sel[sums[sel] >= 1e-12 * total]
     want = ref_curve.exact(edges[sel])
     assert np.max(np.abs(sums[sel] - want) / want) <= 1e-5
+
+
+# [24] Large parameters under the quantiles method: from min(alpha, beta) =
+# 2e5 both backends take the Cornish-Fisher expansion (spec section 5),
+# where the inversion of the incomplete beta drifts and then fails (and
+# SciPy's ppf with it, from about 1e20). The expansion against SciPy where
+# SciPy is sound; one-row portfolios across the range on both backends; the
+# row of the 2026-10-25 report; a portfolio.
+def test_24_large_parameters_quantiles():
+    from scipy.special import betaincinv
+    import eltq
+    from eltq._meta import LARGE_PARAMETER_FROM
+
+    u = (np.arange(32) + 0.5) / 32
+    for a in (LARGE_PARAMETER_FROM, 1e6, 1e7):
+        for ratio in (1.0, 3.0, 300.0, 3e4):
+            b = a * ratio
+            sd = math.sqrt(a * b / ((a + b) ** 2 * (a + b + 1.0)))
+            got = reference.large_parameter_quantiles(a, b, u)
+            assert np.max(np.abs(got - betaincinv(a, b, u))) <= 1e-8 * sd, (a, b)
+    backends = (eltq.quantize_arrays, reference.quantize_reference)
+    # One-row portfolios: the walk at 1e5, the expansion from 3e5 up to
+    # parameters where the beta is a normal to double precision.
+    big_m, h = 1e9, 1e3
+    for p in (0.5, 0.25, 0.01):
+        for small in (1e5, 3e5, 1e6, 1e8, 1e12, 1e16, 1e20, 4.7e22, 1e26):
+            s = small / min(p, 1.0 - p)
+            mu = p * big_m
+            sd = big_m * math.sqrt(p * (1.0 - p) / (s + 1.0))
+            skew = 2.0 * (1.0 - 2.0 * p) * math.sqrt(s + 1.0) / ((s + 2.0) * math.sqrt(p * (1.0 - p)))
+            cols = tuple(np.array([v]) for v in (1.0, big_m, mu, sd, 0.0))
+            grids = []
+            for backend in backends:
+                _, sec, meta = backend(*cols, bucket_size=h, method="quantiles")
+                assert math.isclose(sec.sum(), 1.0, rel_tol=1e-14)
+                idx = np.flatnonzero(sec)
+                assert np.all(np.abs(idx * h - mu) <= 2.2 * sd + h), (p, small, backend)
+                # The midpoint rule's first-moment error, of order skew * sd.
+                assert abs(meta.secondary_mean_error) <= 2e-2 * skew * sd + 1e-9 * mu, (p, small, backend)
+                grids.append(sec)
+            # Above the threshold the backends share the formula; below it
+            # the walk and SciPy's inverse differ by their 1e-9 sigma errors,
+            # which the linear rule turns into weight of order sd / h.
+            tol = 1e-12 if small >= LARGE_PARAMETER_FROM else 1e-8 * sd / h
+            assert np.max(np.abs(grids[0] - grids[1])) <= tol, (p, small)
+    # The report's row: exposed value 1e6, mean 250,000, sd 1e-6 (alpha =
+    # 4.7e22), bucket size 1000; the whole rate on node 250.
+    cols = tuple(np.array([v]) for v in (1.0, 1e6, 250_000.0, 1e-6, 0.0))
+    for backend in backends:
+        _, sec, _ = backend(*cols, bucket_size=1000.0, method="quantiles")
+        assert sec[250] >= 1.0 - 1e-8
+    # The portfolio: the base recipe of test 22 plus 300 rows with
+    # min(alpha, beta) from 1e5 to 1e24, on a windowed grid.
+    rng = np.random.default_rng(24)
+    n_base, n_large = 2_000, 300
+    rate = 10.0 ** rng.uniform(-5, -2, n_base)
+    max_loss = 10.0 ** rng.uniform(5, 7, n_base)
+    mean = 10.0 ** rng.uniform(-4, -1, n_base) * max_loss
+    sd = np.minimum(10.0 ** rng.uniform(0, 1, n_base) * mean,
+                    0.95 * np.sqrt(mean * (max_loss - mean)))
+    small = 10.0 ** rng.uniform(5, 24, n_large)
+    p = 10.0 ** rng.uniform(-3, np.log10(0.5), n_large)
+    s = small / p
+    mean_large = 10.0 ** rng.uniform(3, 5, n_large)
+    m_large = mean_large / p
+    sd_large = m_large * np.sqrt(p * (1.0 - p) / (s + 1.0))
+    cols = (np.concatenate([rate, 10.0 ** rng.uniform(-5, -3, n_large)]),
+            np.concatenate([max_loss, m_large]),
+            np.concatenate([mean, mean_large]),
+            np.concatenate([sd, sd_large]),
+            np.zeros(n_base + n_large))
+    h, n = 100.0, 2 ** 18
+    results = [backend(*cols, bucket_size=h, grid_length=n, method="quantiles") for backend in backends]
+    total = results[0][2].total_rate
+    for raw, sec, meta in results:
+        assert math.isclose(meta.total_rate, total, rel_tol=0.0)
+        assert math.isclose(sec.sum(), total, rel_tol=1e-14)
+    assert np.array_equal(results[0][0], results[1][0])
+    # 1e-11 of the total: the base rows and the large rows below the
+    # threshold set the walk against SciPy's inverse (4e-12 measured).
+    assert np.max(np.abs(results[0][1] - results[1][1])) <= 1e-11 * total
 
 
 def test_curve_matches_quantize_and_exact(impl):

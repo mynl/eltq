@@ -30,6 +30,13 @@ NARROW_STEPS = 40
 #: mean (spec section 5A). Shared by both backends.
 NARROW_STEP_PARAMETER_SUM = 1e15
 
+#: Quantiles method (and the multi-unit beta units): from this smaller
+#: parameter a beta quantile comes from the Cornish-Fisher expansion in the
+#: beta's cumulants, not from inverting the incomplete beta, whose continued
+#: fraction no longer converges there (spec section 5). Shared by both
+#: backends; mirrors ``LARGE_PARAMETER_FROM`` in ``crates/eltq-core/src/batched.rs``.
+LARGE_PARAMETER_FROM = 2e5
+
 
 def _zero_per_output() -> dict:
     return {"raw": 0.0, "secondary": 0.0}
