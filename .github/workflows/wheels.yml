@@ -14,14 +14,12 @@ on:
     paths-ignore:
       - "**.md"
       - "dev/**"
-      - "reproductions/**"
       - "notebooks/**"
       - "benchmarks/**"
   pull_request:
     paths-ignore:
       - "**.md"
       - "dev/**"
-      - "reproductions/**"
       - "notebooks/**"
       - "benchmarks/**"
   workflow_dispatch:
