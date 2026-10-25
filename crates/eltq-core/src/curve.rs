@@ -951,6 +951,36 @@ impl Curve {
         hermite((x - loss[k]) / dx, self.curve[k], self.curve[k + 1], dx, self.m0[k], self.m1[k]).max(0.0)
     }
 
+    /// `int_e^{x_m} Lambda~(x) dx`, the integral of the interpolated curve
+    /// above `e`: the cubic's antiderivative on the partial interval holding
+    /// `e`, then the closed form `dx (y0 + y1) / 2 + dx^2 (m0 - m1) / 12` on
+    /// each whole interval above it. Zero at and beyond the last node.
+    pub fn integral_above(&self, e: f64) -> f64 {
+        let loss = &self.loss;
+        let m1 = loss.len();
+        if m1 < 2 || e >= loss[m1 - 1] {
+            return 0.0;
+        }
+        let e = e.max(loss[0]);
+        let k = interval_of(loss, e);
+        let mut total = Neumaier::default();
+        // The partial interval from t0 to 1, by the antiderivatives of the
+        // four Hermite basis functions.
+        let dx = loss[k + 1] - loss[k];
+        let t0 = (e - loss[k]) / dx;
+        let (t2, t3, t4) = (t0 * t0, t0 * t0 * t0, t0 * t0 * t0 * t0);
+        let h00 = 0.5 - (0.5 * t4 - t3 + t0);
+        let h10 = 1.0 / 12.0 - (0.25 * t4 - 2.0 * t3 / 3.0 + 0.5 * t2);
+        let h01 = 0.5 - (-0.5 * t4 + t3);
+        let h11 = -1.0 / 12.0 - (0.25 * t4 - t3 / 3.0);
+        total.add(dx * (h00 * self.curve[k] + h01 * self.curve[k + 1] + dx * (h10 * self.m0[k] + h11 * self.m1[k])));
+        for i in k + 1..m1 - 1 {
+            let dx = loss[i + 1] - loss[i];
+            total.add(dx * (0.5 * (self.curve[i] + self.curve[i + 1]) + dx * (self.m0[i] - self.m1[i]) / 12.0));
+        }
+        total.value().max(0.0)
+    }
+
     /// `Lambda(x)` of the beta events: the interpolated curve, the tails of
     /// the events truncated above `x`, the exact survival of the events
     /// whose tail interval contains `x`, and the narrow events (in full
@@ -1048,18 +1078,15 @@ impl Curve {
                 if policy == Overflow::TopBucket {
                     secondary[n - 1] += rest;
                 }
-                // Its moment: the events truncated above the top edge.
-                for t in &self.tails {
-                    let xk = self.loss[t.node];
-                    if xk <= top_edge {
-                        continue;
-                    }
-                    let bf = BetaFn::new(t.alpha, t.beta);
-                    let mass = t.rate * (bf.sf(top_edge / t.max_loss) - t.survival);
-                    let moment = tail_moment(t.rate, t.max_loss, t.alpha, t.beta, top_edge)
-                        - tail_moment(t.rate, t.max_loss, t.alpha, t.beta, xk);
-                    over.moment.add(moment - top_node * mass);
-                }
+                // Its moment about the top node: integrating each event's
+                // partial expectation by parts and summing gives
+                // (e - c) Lambda~(e) + int_e^{x_m} Lambda~(x) dx, the
+                // integral of the interpolant itself, closed-form per
+                // interval. This covers the events whose endpoint survival
+                // underflowed, which leave no tail record (the per-event
+                // loop over the tails they were missing from lost their
+                // moment: peer review, finding I1).
+                over.moment.add((top_edge - top_node) * rest + self.integral_above(top_edge));
             }
         } else {
             secondary[0] += self.beta_rate - self.tail_above[0] - self.narrow_mass;
@@ -1338,6 +1365,46 @@ mod tests {
             let half = event.survival_at(&kernel, mu);
             assert!((half - 0.5).abs() < 2e-3 * (1.0 + cv * 100.0), "cv={cv}: {half}");
         }
+    }
+
+    // [overflow] The curve's overflow moment on a windowed grid comes from
+    // the integral of the interpolant, so an event whose endpoint survival
+    // underflows (no tail record) keeps its moment: Beta(2, 1000) on [0, 1]
+    // windowed at 0.00195 has the exact excess moment 5.796480662291e-4
+    // about the top node (SciPy); the tails loop it replaced reported 0
+    // (peer review, finding I1). The integral itself is checked against a
+    // fine Riemann sum of the interpolant.
+    #[test]
+    fn windowed_overflow_moment_survives_tail_underflow() {
+        use crate::quantize::classify_rows;
+        let (a, b) = (2.0_f64, 1000.0_f64);
+        let p = a / (a + b);
+        let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
+        let rate = [1.0];
+        let max_loss = [1.0];
+        let mean = [p];
+        let sd_i = [sd];
+        let sd_c = [0.0];
+        let input = EltInput { rate: &rate, max_loss: &max_loss, mean_loss: &mean, sd_indep: &sd_i, sd_corr: &sd_c };
+        let (h, n) = (1e-4, 20);
+        let config = Config::new(h);
+        let classified = classify_rows(&input, &config).unwrap();
+        let curve = build_curve(&input, &config, &classified, 0.5 * h).unwrap();
+        assert!(curve.tails.is_empty(), "the endpoint survival underflows: no tail record");
+        let out = curve.grid(h, Some(n), Overflow::TopBucket, &config).unwrap();
+        let exact_rate = 0.41891026155683486;
+        let exact_moment = 5.796480662291177e-4;
+        let (over_rate, over_moment) = (out.overflow.rate.value(), out.overflow.moment.value());
+        assert!((over_rate - exact_rate).abs() <= 1e-7 * exact_rate, "rate {over_rate}");
+        assert!((over_moment - exact_moment).abs() <= 1e-4 * exact_moment, "moment {over_moment}");
+        // The integral against a Riemann sum of the interpolant.
+        let e = (n as f64 - 0.5) * h;
+        let top = *curve.loss.last().unwrap();
+        let steps = 200_000;
+        let dx = (top - e) / steps as f64;
+        let riemann: f64 = (0..steps).map(|i| curve.interpolate(e + (i as f64 + 0.5) * dx)).sum::<f64>() * dx;
+        let integral = curve.integral_above(e);
+        assert!((integral - riemann).abs() <= 1e-6 * riemann, "{integral} vs {riemann}");
     }
 
     // [atoms] At the handover to the normal law the two kernels agree on

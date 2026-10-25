@@ -467,3 +467,9 @@ Landed as planned, with these divergences:
 - `Diagnostics` holds a fixed array per category; it grew to ten with the new category, and `NARROW_STEP_PARAMETER_SUM` left the crate's re-exports.
 
 Gates: `cargo test -p eltq-core --release` (84 lib tests, the other targets as before); `uv run pytest` after the rebuild (182 passed, 1 skipped). Grids unchanged at default settings on every fixture (no fixture row has a coefficient of variation below $2.3\%$ at $\min(\alpha,\beta)\ge10^{16}$ or below $2^{-48}$); the goldens stand.
+
+### [overflow] 2.3.5 (2026-10-25)
+
+Landed as planned. `Curve::integral_above(e)` integrates the cubic Hermite in closed form, the partial interval by the antiderivatives of the four basis functions and each whole interval by $\Delta x\,(y_0+y_1)/2+\Delta x^2(m_0-m_1)/12$, with a compensated sum; the per-event loop over `self.tails` is gone from `Curve::grid`, and `tail_moment` stays for the tails' own overflow. Measured: on the review's $\operatorname{Beta}(2,1000)$ case the moment is within $10^{-4}$ relative of the exact $5.796480662\times10^{-4}$ (it was 0) and the integral within $10^{-6}$ of a 200,000-step Riemann sum of the interpolant; on the medium fixture windowed at a third of its largest exposure the engine and the reference agree within $10^{-4}$ relative. No divergence from the plan. The reference keeps its exact per-event sum as the oracle.
+
+Gates: `cargo test -p eltq-core --release` (85 lib tests); `uv run pytest` after the rebuild (183 passed, 1 skipped). Grids unchanged everywhere; the goldens stand.

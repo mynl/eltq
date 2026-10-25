@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.5] - 2026-10-25
+
+### Fixed
+
+- [overflow] The survival grid's reported excess moment above a windowed grid (`mean_above_grid["secondary"]`) is now the integral of the interpolated curve above the top edge plus the tails' partial expectations, instead of a sum over the per-event tail records. An event whose endpoint survival underflows in double precision has no tail record, so its share of the moment was lost; on a real ELT, where most events have a small mean against a large exposed value, that was most of them (peer review, finding I1: Beta(2, 1000) windowed at 0.00195 reported 0 against an exact 5.80e-4, which at an exposed value of 1e6 is 580 per unit rate). The reference backend already summed every event exactly and is unchanged.
+- Grids are unchanged; only the reported moment moves, and only when the grid is a window. The engine's figure is now within the interpolation tolerance of the reference's (1e-4 relative on the medium fixture windowed at a third of its largest exposure; test 18).
+
 ## [2.3.4] - 2026-10-25
 
 ### Fixed

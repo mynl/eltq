@@ -160,6 +160,40 @@ def test_18_overflow_policies(impl, method):
     assert meta_auto.rate_above_grid == {"raw": 0.0, "secondary": 0.0}
 
 
+# [18, continued] The curve's overflow moment on a windowed grid: an event
+# whose endpoint survival underflows leaves no tail record, and the per-event
+# sum over the tails lost its moment (the review's I1: 0 against an exact
+# 5.7965e-4 on Beta(2, 1000) windowed at 0.00195; the reference, which sums
+# every event exactly, had it). The engine now integrates the interpolant.
+def test_18_overflow_moment_with_underflowing_tails():
+    from scipy import special
+    import eltq
+
+    a, b, h, n = 2.0, 1000.0, 1e-4, 20
+    p = a / (a + b)
+    sd = math.sqrt(p * (1.0 - p) / (a + b + 1.0))
+    cols = tuple(np.array([v]) for v in (1.0, 1.0, p, sd, 0.0))
+    edge, top = (n - 0.5) * h, (n - 1) * h
+    over_rate = special.betaincc(a, b, edge)
+    over_mean = p * special.betaincc(a + 1.0, b, edge) - top * over_rate
+    for backend in (eltq.quantize_arrays, reference.quantize_reference):
+        _, _, meta = backend(*cols, bucket_size=h, grid_length=n)
+        assert math.isclose(meta.rate_above_grid["secondary"], over_rate, rel_tol=1e-7), backend
+        assert math.isclose(meta.mean_above_grid["secondary"], over_mean, rel_tol=1e-4), (backend, meta.mean_above_grid)
+    # The medium fixture windowed at a third of its largest exposure: the
+    # two backends agree on the secondary excess moment to the
+    # interpolation tolerance (the reference sums every event exactly).
+    df = load_fixture("medium")
+    cols = columns(df)
+    n = int(cols[1].max() / 3.0 / FIXTURE_H)
+    metas = [backend(*cols, bucket_size=FIXTURE_H, grid_length=n)[2]
+             for backend in (eltq.quantize_arrays, reference.quantize_reference)]
+    assert metas[0].rate_above_grid["secondary"] > 0.0
+    assert math.isclose(metas[0].rate_above_grid["secondary"], metas[1].rate_above_grid["secondary"], rel_tol=1e-6)
+    assert math.isclose(metas[0].mean_above_grid["secondary"], metas[1].mean_above_grid["secondary"], rel_tol=1e-4), (
+        metas[0].mean_above_grid, metas[1].mean_above_grid)
+
+
 # [19] The K-point cut: at K = 32 the quantiles method has no mass above each
 # event's 1 - 1/64 quantile (plus one bucket of linear spread) and loses
 # more than 5% of the expected annual loss on the fixture; survival does not.
