@@ -34,13 +34,13 @@ beta quantiles at large parameters. The multi-unit route has not changed since 1
 
 Two documents written on 2026-10-25 state what this plan implements. Section 4A of the
 specification is the contract. The article *Secondary Uncertainty in Catastrophe Model Event
-Loss Tables for Multi-Unit Portfolios* (`D:\Projects\aggregate\secondary-uncertainty\
-secondary-uncertainty-multiunit.qmd`, "the multi-unit article") derives the model, collects the
-published rules, proves which routes to the portfolio total agree and which do not, and computes
-the joint, the annual bivariate and the conditional means on the two-line example of Homer and
-Li 2017, Table 11. Its setup chunk is a 60-line SciPy construction of the joint of two units,
-including two-point rows, that agrees with `joint_two_units` to $2 \times 10^{-16}$ per cell; it
-is the independent check for several steps below.
+Loss Tables for Multi-Unit Portfolios* (`D:\Projects\aggregate\secondary-uncertainty\MVMELT.qmd`,
+"the multi-unit article") derives the model, collects the published rules, proves which routes to
+the portfolio total agree and which do not, and computes the joint, the annual bivariate and the
+conditional means on the two-line example of Homer and Li 2017, Table 11. Its setup chunk is a
+60-line SciPy construction of the joint of two units, including two-point rows, that agrees with
+`joint_two_units` to $2 \times 10^{-16}$ per cell; it is the independent check for several steps
+below.
 
 ### What the one-row work did and did not reach
 
@@ -267,7 +267,7 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
   5A window and overflow policies have no multi-unit counterpart yet); `GridOverflowError` stays.
 - A survival-style, node-based formulation of the multi-unit total: the convolution is the
   honest route and nothing suggests a closed form for the total's survival function.
-- The reserving application of `secondary-uncertainty-mv-cat-reserves.qmd` (open claims as
+- The reserving application of `MV-cat-reserves.qmd` (open claims as
   certain events, direct input of the total sd and a correlated share): a transformation of the
   inputs, to be specified when that article is written.
 - `dev/plan-chebyshev-z.md` [hybrid-rule] and [chebyshev]: re-evaluated after [z-rule].
