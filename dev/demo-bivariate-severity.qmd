@@ -1,7 +1,7 @@
 ---
 title: Bivariate severity across two units
-subtitle: eltq 1.11.0 — `joint_two_units`, with and without secondary uncertainty
-date: '2026-08-26'
+subtitle: eltq 2.3.2 — `joint_two_units`, with and without secondary uncertainty
+date: '2026-10-25'
 format:
   html:
     toc: true
@@ -93,8 +93,13 @@ uv run --with jupyter --with jupytext --with matplotlib jupyter lab dev/demo-biv
 
 then right-click the file in the JupyterLab browser and choose
 **Open With → Notebook** (jupytext reads `.qmd` directly). To render it to HTML
-instead: `uv run quarto render dev/demo-bivariate-severity.qmd`, or
-`quarto preview` if Quarto is on the PATH.
+instead (Quarto on the PATH; the same `--with` additions supply the kernel):
+
+```powershell
+uv run --with jupyter --with matplotlib quarto render dev/demo-bivariate-severity.qmd
+```
+
+The rendered `dev/demo-bivariate-severity.html` is gitignored.
 
 ```{python}
 import time
@@ -488,10 +493,13 @@ print(f"analytic AAL             {meta_1d.analytic_aal:.6f}")
 
 The raw marginal agrees to the last bit: same linear deposit rule, applied once
 per axis. The secondary marginals agree only to discretization error, because
-they are *different* approximations of the same beta — `quantize_arrays` uses
-`quadrature_points` equally weighted midpoint beta quantiles, while the joint
-buckets the conditional beta by exact CDF differences and integrates the shared
-factor over `z_nodes`. Both bracket the analytic AAL.
+they are *different* discretizations of the same beta: `quantize_arrays` buckets
+the exact exceedance curve by the nearest rule (the survival method, the default
+since 2.0.0; `quadrature_points` only applies to `method="quantiles"`), while
+the joint buckets the conditional beta by exact CDF differences and integrates
+the shared factor over `z_nodes`. Both sit a few hundredths of a percent below
+the analytic AAL, the first-moment error of nearest-rule bucketing on a grid of
+spacing 20.
 
 ```{python}
 fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.6))
@@ -667,8 +675,10 @@ pd.DataFrame(rows).set_index("z_nodes").round(
 ```
 
 `z_rule="gauss_hermite"` converges faster for smooth integrands; `"midpoint"`
-(the default) is the more robust choice and is what the one-unit specification
-uses. `benchmarks/z_convergence.py` studies this properly.
+(the default) has positive equal weights but cuts the tails of the shared factor
+at small `z_nodes`, which moves means and the tail of the total.
+`benchmarks/z_convergence.py` studies this, and `dev/plan-multiunit-coupling.md`
+[z-rule] chooses the default rule on tail metrics (spec section 4A).
 
 **`bucket_size`** — the loss grid. It sets resolution on both axes and the
 memory of the joint, which is $n_1 n_2$ per event; halving $h$ quadruples it.
