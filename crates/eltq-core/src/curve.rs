@@ -221,11 +221,10 @@ impl TailInterpolant {
         self.u.len().saturating_sub(2)
     }
 
-    /// `S` at distance `d = M - x > 0` on interval `k`; below the first
-    /// node by the power law where it holds, else exactly.
-    fn eval(&self, d: f64, k: usize) -> f64 {
+    /// `S` at distance `d = M - x > 0`, `uq = ln d`, on interval `k`; below
+    /// the first node by the power law where it holds, else exactly.
+    fn eval(&self, d: f64, uq: f64, k: usize) -> f64 {
         let (u, g) = (&self.u, &self.g);
-        let uq = d.ln();
         if uq < u[0] || u.len() == 1 {
             if !self.asymptotic {
                 return self.bf.sf(1.0 - d / self.max_loss).min(self.survival_at_node);
@@ -243,8 +242,9 @@ impl TailInterpolant {
         if d <= 0.0 || self.u.is_empty() {
             return 0.0;
         }
-        let k = self.u.partition_point(|&v| v <= d.ln()).saturating_sub(1).min(self.start());
-        self.eval(d, k)
+        let uq = d.ln();
+        let k = self.u.partition_point(|&v| v <= uq).saturating_sub(1).min(self.start());
+        self.eval(d, uq, k)
     }
 
     /// `S(x)` for queries ascending in `x`: the interval cursor moves down
@@ -259,7 +259,7 @@ impl TailInterpolant {
         while *cursor > 0 && uq < self.u[*cursor] {
             *cursor -= 1;
         }
-        self.eval(d, *cursor)
+        self.eval(d, uq, *cursor)
     }
 }
 
@@ -579,6 +579,35 @@ fn cubic_at(loss: &[f64], curve: &[f64], m0: &[f64], m1: &[f64], x: f64) -> f64 
     }
     let dx = loss[k + 1] - loss[k];
     hermite((x - loss[k]) / dx, curve[k], curve[k + 1], dx, m0[k], m1[k]).max(0.0)
+}
+
+/// The interval cursor of a cubic mesh for queries ascending in `x`: it
+/// moves up through the intervals instead of searching for each query, and
+/// returns exactly what `cubic_at` returns.
+#[derive(Default)]
+struct CubicCursor {
+    k: usize,
+}
+
+impl CubicCursor {
+    fn at_ascending(&mut self, loss: &[f64], curve: &[f64], m0: &[f64], m1: &[f64], x: f64) -> f64 {
+        let n = loss.len();
+        if x < loss[0] {
+            return f64::NAN;
+        }
+        if x >= loss[n - 1] {
+            return 0.0;
+        }
+        while loss[self.k + 1] <= x {
+            self.k += 1;
+        }
+        let k = self.k;
+        if loss[k] == x {
+            return curve[k];
+        }
+        let dx = loss[k + 1] - loss[k];
+        hermite((x - loss[k]) / dx, curve[k], curve[k + 1], dx, m0[k], m1[k]).max(0.0)
+    }
 }
 
 /// `int_e^{x_m}` of that cubic: the partial interval holding `e` by the
@@ -1414,20 +1443,28 @@ impl Curve {
         if self.loss.len() > 1 {
             // The curve's value at its lowest node, base and fine together
             // (clipping from the base alone dropped a requesting event's
-            // plateau into bucket 0).
+            // plateau into bucket 0); then the edges in order, each mesh's
+            // interval found by a cursor that only moves up, the differences
+            // written as they come (a binary search per edge and a stored
+            // value vector before: peer review, finding P2).
             let mut prev = self.interpolate(self.loss[0]);
-            let mut values = Vec::with_capacity(n);
+            let mut base = CubicCursor::default();
+            let mut fine = CubicCursor::default();
             for i in 0..n {
                 let e = (i as f64 + 0.5) * h;
-                let v = self.interpolate(e).min(prev);
-                values.push(v);
+                let mut v = base.at_ascending(&self.loss, &self.curve, &self.m0, &self.m1, e);
+                if !self.fine_loss.is_empty() {
+                    v += fine.at_ascending(&self.fine_loss, &self.fine_curve, &self.fine_m0, &self.fine_m1, e);
+                }
+                let v = v.min(prev);
+                if i == 0 {
+                    secondary[0] += self.beta_rate - v - self.tail_above[0] - self.narrow_mass;
+                } else {
+                    secondary[i] += prev - v;
+                }
                 prev = v;
             }
-            secondary[0] += self.beta_rate - values[0] - self.tail_above[0] - self.narrow_mass;
-            for i in 1..n {
-                secondary[i] += values[i - 1] - values[i];
-            }
-            let rest = values[n - 1];
+            let rest = prev;
             if rest > 0.0 {
                 over.rate.add(rest);
                 if policy == Overflow::TopBucket {
@@ -2022,5 +2059,25 @@ mod tests {
         assert_eq!(wave_size(1, gib, 16 * (1 << 24)), 2);
         assert_eq!(wave_size(32, gib, 16 * (1 << 28)), 1);
         assert_eq!(wave_size(0, 0, 0), 1);
+    }
+
+    // [tidy] The ascending cursor returns exactly what the searched
+    // evaluation returns, at nodes, between them and beyond the mesh.
+    #[test]
+    fn cubic_cursor_matches_the_search() {
+        let loss: Vec<f64> = (0..50).map(|i| 1.0 * 1.1_f64.powi(i)).collect();
+        let curve: Vec<f64> = loss.iter().map(|x| 1.0 / (1.0 + x)).collect();
+        let slope_both: Vec<f64> = loss.iter().map(|x| x / (1.0 + x).powi(2)).collect();
+        let slope_end = vec![0.0; loss.len()];
+        let (m0, m1) = limited_slopes(&loss, &curve, &slope_both, &slope_end);
+        let mut cursor = CubicCursor::default();
+        let mut queries: Vec<f64> = (0..600).map(|i| loss[0] * 1.0137_f64.powi(i)).collect();
+        queries.extend(loss.iter().copied());
+        queries.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for &x in &queries {
+            let walked = cursor.at_ascending(&loss, &curve, &m0, &m1, x);
+            let searched = cubic_at(&loss, &curve, &m0, &m1, x);
+            assert!(walked.to_bits() == searched.to_bits(), "{x}: {walked} vs {searched}");
+        }
     }
 }

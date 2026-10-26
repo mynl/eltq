@@ -90,6 +90,7 @@ identical.
 | [mesh] bell-shaped events on a fine curve of `nodes_per_sigma` nodes per standard deviation; the accuracy contract of spec test 33 | 2.4.0 | done |
 | [ratios] the admissibility test, the shape parameters and the cumulants' sd formed in ratios, so a row classifies the same at every monetary scale; the top half-bucket and the tiny-alpha complement documented | 2.4.1 | done |
 | [schedule] the quantiles default chunk a rule of the row count, waves bounded by a 1 GiB memory budget, one thread pool per call | 2.4.2 | done |
+| [tidy] the survival grid walked with an interval cursor, the normal scores shared on the Cornish-Fisher route, the output scans combined; bitwise neutral | 2.4.3 | done |
 
 ## Layout
 

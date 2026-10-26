@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.4.3] - 2026-10-26
+
+### Changed
+
+- [tidy] Four pieces of redundant work removed, each bitwise neutral on the outputs and measured on the benchmark portfolios (`benchmarks/report-2.4.2.md`): the survival grid walks the curve's intervals with a cursor and writes the bucket differences as it goes, instead of a binary search per edge and a stored value vector (the large-exposure portfolio at 2^22 buckets, 1.20 s to 1.15 s); the tail interpolant takes the logarithm of the distance from its caller once, not twice; the midpoint rule's normal scores are computed once per quantization and shared by every event on the Cornish-Fisher route (a million large-parameter events single-threaded, 0.43 s to 0.11 s); the mass and first moment of each output grid are taken in one pass, and the secondary moment is not taken twice. Mixture and small-alpha portfolios 2% to 3% faster.
+- `beta_midpoint_quantiles_scored` and `MidpointScores` on the Rust kernel; `beta_midpoint_quantiles` is unchanged and still computes the scores itself.
+
 ## [2.4.2] - 2026-10-26
 
 ### Changed

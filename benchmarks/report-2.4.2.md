@@ -1,4 +1,4 @@
-# Scheduling of the chunked passes, 2.4.2
+# Scheduling of the chunked passes, 2.4.2, and the tidying of 2.4.3
 
 Date: 2026-10-26. Machine: the DOOB workstation (AMD Ryzen 9 9950X3D, 16 cores, 32 threads, Windows 11), the same as `benchmarks/report-2.4.0.md`; `uv run python benchmarks/run_schedule.py --markdown` on the mixture portfolio of `benchmarks/run_end_to_end.py` (its fixed seed), $K=32$, bucket size $5\times10^6/(n-1.5)$ for $n$ buckets, each configuration in its own process so that the peak working set is its own. Times are medians of three after a warm-up, one run where a run exceeds 15 s; memory is the process's peak working set in MiB, which includes the input columns (about 40 MiB at a million rows) and the two output grids.
 
@@ -68,3 +68,17 @@ The survival method's chunk is 256 rows and unchanged; its partials are node-len
 | 1,000,000 | $2^{24}$ | not run | not run | 469 | 350 |
 
 These are not comparable with the review's 4.2 s single-threaded on 262,144 rows, which was at a bucket size of 5,000, about a thousand buckets: the survival method's cost grows with the bucket count, because every event's tail is walked across its bucket edges until the rate floor (`dev/done/plan-survival-tail-cost.md`), and at $2^{16}$ buckets of this portfolio the tails reach most of the grid. Of the 12.5 s at $2^{16}$, 8.6 s remain with the fine mesh off (`nodes_per_sigma=1`). The peak working set is 73 to 435 MiB across the table: the survival partials are small.
+
+## Tidying, 2.4.3
+
+Four pieces of redundant work removed (peer review, finding P2), each bitwise neutral on the outputs: the survival grid's edges walked with an interval cursor and differenced as they come, the tail interpolant's logarithm taken once, the midpoint rule's normal scores shared across the events on the Cornish-Fisher route, and the mass and moment of each output grid in one pass. Medians of five at 32 threads unless stated, 2.4.2 against 2.4.3, the secondary grid's checksum, mass and mean identical in every row:
+
+| portfolio | 2.4.2 | 2.4.3 |
+|:---|---:|---:|
+| mixture, $10^6$ rows, survival, $h=5{,}000$ | 1.797 s | 1.763 s |
+| mixture, $10^6$ rows, quantiles $K=32$, $h=5{,}000$ | 0.486 s | 0.469 s |
+| small-alpha, $10^6$ rows, survival, $h=100$ | 2.529 s | 2.495 s |
+| large exposure, $10^5$ rows, survival, $h=25$, $2^{22}$ buckets | 1.200 s | 1.153 s |
+| large parameters, $10^6$ rows, quantiles $K=32$, one thread | 0.434 s | 0.110 s |
+
+The large-parameter portfolio has every event on the Cornish-Fisher route (exposed value $10^6$, mean about $2.5\times10^5$, coefficient of variation $10^{-3.5}$ to $10^{-3}$), where the normal quantile was most of the per-event work; on 32 threads it runs in milliseconds either way.

@@ -537,3 +537,19 @@ Other notes:
 - The two measured constants behind the grid term, for the record: about 3.4 ns per grid element per chunk for the partial's allocation, zeroing and fold against about 9.7 microseconds per row for the kernel at $K=32$, single-threaded on this machine.
 
 Gates: `cargo test -p eltq-core --release` (94 lib tests); `uv run pytest` after the rebuild (187 passed, 1 skipped).
+
+### [tidy] 2.4.3 (2026-10-26)
+
+All four items kept: each measures faster or equal on the benchmark portfolios at 32 threads (medians of five, same machine, 2.4.2 against 2.4.3), and every output is bitwise identical (the secondary grid's checksum, mass and mean compared on each portfolio; unit tests assert the bits for the cursor against the search, the shared scores against the per-event path, and the combined scan against the two separate ones).
+
+| portfolio | 2.4.2 | 2.4.3 |
+|:---|---:|---:|
+| mixture, $10^6$ rows, survival, $h=5{,}000$ | 1.797 s | 1.763 s |
+| mixture, $10^6$ rows, quantiles $K=32$, $h=5{,}000$ | 0.486 s | 0.469 s |
+| small-alpha, $10^6$ rows, survival, $h=100$ | 2.529 s | 2.495 s |
+| large exposure, $10^5$ rows, survival, $h=25$, $2^{22}$ buckets | 1.200 s | 1.153 s |
+| large parameters, $10^6$ rows, quantiles $K=32$, one thread | 0.434 s | 0.110 s |
+
+The grid walk is the large-exposure figure (4%; the review measured the grid API at 95 ms at $2^{22}$ buckets on a one-event curve, most of it the per-edge search and the value vector). The shared scores are the last row: on the Cornish-Fisher route the normal quantile was most of the per-event work, and at 32 threads the same portfolio runs in milliseconds either way. The log of the distance and the combined scans are within noise, kept because they are strictly less work with no added code path. Not taken, as the plan said: `front / (1 - y)` for the density, tail-query caching, direct output filling.
+
+Gates: `cargo test -p eltq-core --release` (97 lib tests); `uv run pytest` after the rebuild (187 passed, 1 skipped).

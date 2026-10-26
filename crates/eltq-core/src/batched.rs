@@ -85,7 +85,11 @@ impl Cumulants {
         if u >= 1.0 {
             return 1.0;
         }
-        let z = normal::quantile(u);
+        self.quantile_at_score(normal::quantile(u))
+    }
+
+    /// `Q` at the normal score `z` of an interior target.
+    fn quantile_at_score(&self, z: f64) -> f64 {
         let z2 = z * z;
         let w = z + self.skew * (z2 - 1.0) / 6.0 + self.kurt * z * (z2 - 3.0) / 24.0
             - self.skew * self.skew * z * (2.0 * z2 - 5.0) / 36.0;
@@ -93,8 +97,38 @@ impl Cumulants {
     }
 }
 
+/// The normal scores `Phi^{-1}((k + 1/2) / K)` of the midpoint rule,
+/// computed once per quantization and shared by every event on the
+/// Cornish-Fisher route, which otherwise recomputed them per event (peer
+/// review, finding P2). Results are bitwise those of the per-event path.
+pub struct MidpointScores {
+    z: Vec<f64>,
+}
+
+impl MidpointScores {
+    pub fn new(k: usize) -> Self {
+        let k_f = k as f64;
+        MidpointScores {
+            z: (0..k).map(|i| normal::quantile((i as f64 + 0.5) / k_f)).collect(),
+        }
+    }
+}
+
 /// Fill `out[k] = Q(alpha, beta; (k + 1/2) / K)` with `K = out.len()`.
 pub fn beta_midpoint_quantiles(alpha: f64, beta: f64, out: &mut [f64]) -> Result<(), KernelError> {
+    beta_midpoint_quantiles_scored(alpha, beta, None, out)
+}
+
+/// `beta_midpoint_quantiles` with the midpoint rule's normal scores
+/// supplied (`MidpointScores::new(out.len())`), so the Cornish-Fisher
+/// route does not recompute them per event; `None`, or scores of another
+/// length, computes them here.
+pub fn beta_midpoint_quantiles_scored(
+    alpha: f64,
+    beta: f64,
+    scores: Option<&MidpointScores>,
+    out: &mut [f64],
+) -> Result<(), KernelError> {
     let k = out.len();
     if k == 0 {
         return Ok(());
@@ -105,8 +139,17 @@ pub fn beta_midpoint_quantiles(alpha: f64, beta: f64, out: &mut [f64]) -> Result
     let k_f = k as f64;
     if uses_expansion(alpha, beta) {
         let cumulants = Cumulants::of(alpha, beta);
-        for (i, slot) in out.iter_mut().enumerate() {
-            *slot = cumulants.quantile((i as f64 + 0.5) / k_f);
+        match scores {
+            Some(scores) if scores.z.len() == k => {
+                for (slot, &z) in out.iter_mut().zip(&scores.z) {
+                    *slot = cumulants.quantile_at_score(z);
+                }
+            }
+            _ => {
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = cumulants.quantile((i as f64 + 0.5) / k_f);
+                }
+            }
         }
         return Ok(());
     }
@@ -539,6 +582,26 @@ mod tests {
         let c = Cumulants::of(1e150, 1e150);
         assert!((c.sd / (0.5 / 2e150_f64.sqrt()) - 1.0).abs() <= 1e-12, "{}", c.sd);
         assert!(c.skew == 0.0 && c.kurt.is_finite());
+    }
+
+    // [tidy] The shared normal scores give the per-event path's values
+    // to the bit.
+    #[test]
+    fn shared_scores_match_the_per_event_path() {
+        let scores = MidpointScores::new(32);
+        for (a, b) in [(2e5, 2e5), (3e5, 9e6), (1e9, 1e9), (1e10, 2e11)] {
+            let mut per_event = [0.0; 32];
+            let mut shared = [0.0; 32];
+            beta_midpoint_quantiles(a, b, &mut per_event).unwrap();
+            beta_midpoint_quantiles_scored(a, b, Some(&scores), &mut shared).unwrap();
+            assert_eq!(per_event, shared, "{a} {b}");
+        }
+        // Scores of the wrong length fall back to the per-event path.
+        let mut out = [0.0; 8];
+        beta_midpoint_quantiles_scored(2e5, 2e5, Some(&scores), &mut out).unwrap();
+        let mut want = [0.0; 8];
+        beta_midpoint_quantiles(2e5, 2e5, &mut want).unwrap();
+        assert_eq!(out, want);
     }
 
     #[test]

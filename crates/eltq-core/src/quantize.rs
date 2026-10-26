@@ -17,14 +17,14 @@
 
 use rayon::prelude::*;
 
-use crate::batched::beta_midpoint_quantiles;
+use crate::batched::{MidpointScores, beta_midpoint_quantiles_scored};
 use crate::beta::beta_params;
 use crate::config::{Config, Method, Overflow};
 use crate::curve::{Workers, build_curve_with, run_waves};
 use crate::deposit::{OverflowAccumulator, place};
 use crate::diagnostics::{Diagnostics, Meta, QuantizeResult};
 use crate::error::Error;
-use crate::sum::{Neumaier, grid_moment, sum};
+use crate::sum::{Neumaier, grid_moment, mass_and_moment, sum};
 use crate::validate::{RowKind, classify_row};
 
 /// Structure-of-arrays ELT input. Event ids stay outside the computational
@@ -246,6 +246,15 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
         }
     }
 
+    // The mass and moment of each output in one pass each; without
+    // normalization the secondary moment is the one already taken (both
+    // bitwise what the separate scans gave: peer review, finding P2).
+    let (raw_mass, raw_mean) = mass_and_moment(&raw, h);
+    let (secondary_mass, secondary_mean) = if config.normalize {
+        mass_and_moment(&secondary, h)
+    } else {
+        (sum(&secondary), secondary_moment)
+    };
     let meta = Meta {
         bucket_size: h,
         grid_length: n,
@@ -263,10 +272,10 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
         normalized: config.normalize,
         total_rate,
         analytic_aal,
-        raw_mass: sum(&raw),
-        raw_mean: grid_moment(&raw, h),
-        secondary_mass: sum(&secondary),
-        secondary_mean: grid_moment(&secondary, h),
+        raw_mass,
+        raw_mean,
+        secondary_mass,
+        secondary_mean,
         quadrature_secondary_mean,
         secondary_mean_error: secondary_moment - analytic_aal,
         input_rows: n_rows,
@@ -301,6 +310,9 @@ fn quantiles_pass(
     let top_node = (n - 1) as f64 * h;
     let top_edge = (n as f64 - 0.5) * h;
     let policy = config.overflow;
+    // The midpoint rule's normal scores, once for every event on the
+    // Cornish-Fisher route.
+    let scores = MidpointScores::new(k);
     let process_chunk = |chunk_index: usize| -> Result<ChunkPartial, Error> {
         let start = chunk_index * chunk_rows;
         let end = (start + chunk_rows).min(n_rows);
@@ -341,7 +353,7 @@ fn quantiles_pass(
                 quad_acc.add(lam * mu);
             } else {
                 let (alpha, beta) = beta_params(m, mu, sd_eff[row]);
-                beta_midpoint_quantiles(alpha, beta, &mut quantiles)
+                beta_midpoint_quantiles_scored(alpha, beta, Some(&scores), &mut quantiles)
                     .map_err(|_| Error::KernelFailure { row, alpha, beta })?;
                 let w = lam / k as f64;
                 let mut row_sum = Neumaier::default();

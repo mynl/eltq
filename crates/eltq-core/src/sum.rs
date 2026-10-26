@@ -46,9 +46,30 @@ pub fn grid_moment(weights: &[f64], bucket_size: f64) -> f64 {
     acc.value()
 }
 
+/// `(sum, grid_moment)` in one pass over the weights, each accumulator in
+/// its own order, so both agree with the separate functions to the bit.
+pub fn mass_and_moment(weights: &[f64], bucket_size: f64) -> (f64, f64) {
+    let mut mass = Neumaier::default();
+    let mut moment = Neumaier::default();
+    for (i, &w) in weights.iter().enumerate() {
+        mass.add(w);
+        moment.add(w * (i as f64 * bucket_size));
+    }
+    (mass.value(), moment.value())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // [tidy] The combined pass is the two separate ones to the bit.
+    #[test]
+    fn combined_pass_matches_the_separate_ones() {
+        let weights: Vec<f64> = (0..10_000).map(|i| ((i * 7919) % 1000) as f64 * 1e-7 + 1e-16).collect();
+        let (mass, moment) = mass_and_moment(&weights, 2.5);
+        assert_eq!(mass, sum(&weights));
+        assert_eq!(moment, grid_moment(&weights, 2.5));
+    }
 
     #[test]
     fn compensated_sum_beats_naive() {
