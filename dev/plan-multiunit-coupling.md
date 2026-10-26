@@ -1,50 +1,90 @@
-# Plan: multiunit-coupling — coupling rules, Bernoulli rows, the factor rule and bivariate outputs for the multi-unit route
+# Plan: multi-unit coupling rules, Bernoulli rows, the stratified factor rule and occurrence outputs
 
-Date: 2026-10-25
-Status: draft for review; not started. The specification amendment it rests on (section 4A) was
-written the same day and is committed with this plan.
+Date: 2026-10-25, revised 2026-10-26 after the multi-unit article's analysis of the routes
+Status: draft for review; not started. Section 4A of the specification, the contract this plan
+implements, was written with the first draft and committed with it; its routes paragraph was
+revised on 2026-10-26 (commit e749f1a). The further amendments this revision needs are listed in
+the steps that make them.
 
 ## Goal
 
-Bring the multi-unit route (`multiunit_views`, `joint_two_units`, 1.6.0 to 1.11.4) up to the
-one-row route's standard and to the specification's new section 4A: the published coupling rules
-as a named option, the Bernoulli treatment of inadmissible rows, a quadrature rule over the
-common factor chosen on tail metrics with one-unit events kept out of the mixture, and the
-bivariate occurrence severities (two units; each unit against the event total) as arrays for the
-aggregate package to compound. Six steps, each a minor version, in the order below; the last is
-optional.
+Bring the multi-unit route (`multiunit_views`, `joint_two_units`) up to the one-row route's
+standard and to section 4A of the specification:
+
+- the Bernoulli treatment of inadmissible rows;
+- a factor rule chosen on tail metrics, with exact marginals for every unit, including units with
+  loading one and two-point units;
+- one-unit events kept out of the mixture;
+- the published coupling rules as a named option, with the comonotone and Homer couplings exact
+  on the grid;
+- the occurrence outputs that the joint aggregate route and the conditional means need, as arrays.
+
+Six steps, each a minor version, in the order below; the sixth is optional. A seventh, [parity],
+covers documentation and benchmarks.
 
 ## Background for a reader with no context
 
 `eltq` is a Rust engine (`crates/eltq-core`) with PyO3 bindings and a SciPy reference in
 `python/eltq/` that serves as the oracle; every acceptance test runs against both. The
 mathematical contract is `secondary-uncertainty-mathematical-specification.md`. The one-row route
-(`quantize_*`, `exceedance_curve`) was rebuilt between 1.13.0 and 2.3.2: Bernoulli rows, the
-survival method, overflow policies, the tail cut, narrow events, and the incomplete beta and
-beta quantiles at large parameters. The multi-unit route has not changed since 1.11.4
-(2026-10-21) and is still the architecture of `dev/done/plan-multiunit.md`:
+(`quantize_*`, `exceedance_curve`) was rebuilt between 1.13.0 and 2.4.3: Bernoulli rows, the
+survival method, overflow policies, the tail cut, narrow events, the incomplete beta and beta
+quantiles at large parameters, and the survival method's fine mesh. The multi-unit route keeps the
+architecture of `dev/done/plan-multiunit.md` (1.6.0 to 1.11.4); since then only 2.4.1 has touched
+it (the admissibility test in ratios of the row's fields), and 2.3.6 moved its golden by rounding:
 
 - per event, each unit's conditional bucket probabilities given the common factor $Z_c$ at $Q$
   quadrature nodes, by differences of the conditional distribution function at the half-bucket
   edges (beta units), or a deposited point (atoms, and comonotone units with $\sigma_I = 0$);
-- per unit, the DecL-style terms applied as compiled view maps, giving ground_up, gross, ceded
-  and net rows;
+- per unit, the DecL-style terms applied as compiled view maps (`terms.rs::ViewMap`: each node's
+  mass moves to the node's image and splits linearly between the two nodes around it), giving
+  ground_up, gross, ceded and net rows;
 - per view, the convolution across units (direct or FFT), the mixture over the $Q$ nodes with the
   rule's weights, and the rate-weighted deposit into the global grid.
 
-Two documents written on 2026-10-25 state what this plan implements. Section 4A of the
-specification is the contract. The article *Secondary Uncertainty in Catastrophe Model Event
-Loss Tables for Multi-Unit Portfolios* (`D:\Projects\aggregate\secondary-uncertainty\MVMELT.qmd`,
-"the multi-unit article") derives the model, collects the published rules, proves which routes to
-the portfolio total agree and which do not, and computes the joint, the annual bivariate and the
-conditional means on the two-line example of Homer and Li 2017, Table 11. Its setup chunk is a
-60-line SciPy construction of the joint of two units, including two-point rows, that agrees with
-`joint_two_units` to $2 \times 10^{-16}$ per cell; it is the independent check for several steps
-below.
+Two documents define what this plan implements. Section 4A of the specification is the contract.
+The article *Secondary Uncertainty in Catastrophe Model Event Loss Tables for Multi-Unit
+Portfolios* (`D:\Projects\aggregate\secondary-uncertainty\MVMELT.qmd`, "the multi-unit article")
+derives the model, collects the published rules (`tbl-rules`), compares the routes to the
+portfolio total (`sec-routes`), and computes the joint, the annual bivariate and the conditional
+means on the two-line example of Homer and Li 2017, Table 11 (`tbl-homer`, `sec-joint`,
+`sec-allocation`). Its setup chunk is a 60-line SciPy construction of the joint of two units,
+including two-point rows, that agrees with `joint_two_units` to $2 \times 10^{-16}$ per cell
+(chunk `check-eltq`); it is the independent check for several steps below. The article is cited
+here by its chunk and section labels, which survive its revisions; its table numbers do not.
+
+### What the analysis of the routes changes
+
+Three results of the multi-unit article, revised on 2026-10-26, shape the steps below.
+
+- **The joint aggregate route and the conditional route are one random variable.** Compounding the
+  joint occurrence law of the units with one Poisson count and adding the units' annual losses
+  computes $\sum_i \sum_j \sum_{n \le N_j} X_{ij}^{(n)}$; forming the total at each occurrence and
+  compounding computes $\sum_j \sum_{n \le N_j} \sum_i X_{ij}^{(n)}$, the same finite sum in the
+  other order (the article checks it to $10^{-10}$, chunk `routes-compare`). The joint aggregate
+  route is therefore needed only for what the conditional route cannot do: terms on a unit's
+  annual loss, and allocation. Both act on a unit's loss after its occurrence terms, so the pair
+  joint is needed by view, not only ground-up (step [joint]).
+- **The roll-up differs for four reasons**: the marginal convention ($\sigma_I + \sigma_C$ against
+  $t$), copula attenuation (the map from score to loss is not linear), the beta family's failure
+  to close under addition, and the variance bound, which caps a unit row under the copula and
+  only the total under the roll-up. The `homer` coupling is the roll-up and keeps all four; it is
+  offered because it is published, not as a model.
+- **The annual conditional mean of a unit given the total needs no two-dimensional grid.**
+  Occurrences form a Poisson process, so by the Mecke identity
+  $\mathsf P(A_u; A = s) = \sum_y m_u(y) f_A(s - y)$, with
+  $m_u(y) = \sum_j \lambda_j \mathsf P(X_{uj}; X_j = y)$ the rate-weighted first moment of unit
+  $u$ at each occurrence total and $f_A$ the annual density of the total. Then
+  $\kappa_u(s) = (m_u * f_A)(s) / f_A(s)$, a one-dimensional convolution, for any number of
+  units. Checked on 2026-10-26 (scratch probe, not committed) on the article's Homer example
+  against `exeqa_df` of the article's two-dimensional bivariate aggregate: within
+  $4 \times 10^{-10}$ for totals up to 4,000 and $10^{-7}$ up to 8,000, then diverging near 10,240,
+  where the two-dimensional grid's axis for the unit ends and wraps; the one-dimensional result is
+  the accurate one there.
 
 ### What the one-row work did and did not reach
 
-Measured on 2026-10-25 (scratch probes, not committed) before writing this plan:
+Measured on 2026-10-25 at 2.3.2 (scratch probes, not committed):
 
 | item | multi-unit route today |
 |---|---|
@@ -53,11 +93,13 @@ Measured on 2026-10-25 (scratch probes, not committed) before writing this plan:
 | narrow units (sd below $h$) | exact: cdf differences at the edges put the mass in one bucket |
 | variance policy | default `clamp` at 0.999; `bernoulli` raises `BernoulliPolicyUnavailable` |
 | $Z_c$ rule | 32-node midpoint by default; a lone beta unit (300,000, 50,000, 50,000, 2,000,000) at $h = 1000$ returns mean 299,827 (midpoint 32), 299,957 (midpoint 128), 300,000.00 (Gauss-Hermite 32 or 64) |
+| units with loading one | one atom per node, so the marginal is a $Q$-point quantile approximation, which spec test 25 codifies ("the bucketing of $\sum_kM_kF_k^{-1}(u)$ at the nodes"); a two-point unit at loading one is a step in $z$, whose mass $p$ a node rule resolves only to the nearest cumulative node weight |
 | one-unit events | go through the mixture, inheriting the rule's error |
 | specification | had no multi-unit section until 4A |
 
-So the retrofit is not about the special functions, which are sound on this route, but about
-the variance policy, the factor rule, one-unit events, and the outputs.
+So the retrofit is not about the special functions, which are sound on this route, but about the
+variance policy, the factor rule (units with loading one included), one-unit events, and the
+outputs.
 
 ## The model, in brief
 
@@ -69,12 +111,17 @@ $\mathsf P(X_i \le x \mid z) = \Phi((y_i(x) - w_i z)/\sqrt{1 - w_i^2})$,
 $y_i(x) = \Phi^{-1}(F_i(x/M_i))$; a two-point row fits with its step $F_i$. Everything is a
 conditional calculation at fixed $z$ followed by a quadrature over $z$. The published rules are
 Burke's loading $\sigma_C/\sqrt{\sigma_I^2 + \sigma_C^2}$, the comonotone loading 1, the
-independent loading 0, and Homer and Li's roll-up with pro rata allocation, which is not a
-copula at all. The variance-matched loading, Burke's scaled by a common factor per event so that
-the event total's variance equals the roll-up convention's $(\sigma_{I,R} + \sigma_{C,R})^2$, is
-the one alternative with a rationale and has no source.
+independent loading 0, and Homer and Li's roll-up with pro rata allocation, whose allocated losses
+are comonotone but whose marginals are scaled copies of the rolled row's beta rather than the
+rows' own, so that it lies outside the family. The variance-matched loading, Burke's scaled by a
+common factor per event so that the event total's variance equals the roll-up convention's
+$(\sigma_{I,R} + \sigma_{C,R})^2$, is the one alternative with a rationale and has no source. The
+article also notes the loading $\sigma_C/(\sigma_I + \sigma_C)$, Burke's step iii weight before
+standardization, and sets it aside as less conservative than Burke's; it is not offered.
 
-## Decisions taken (Steve, 2026-10-25)
+## Decisions taken
+
+Steve, 2026-10-25:
 
 1. Burke's coupling is the default; comonotone, independent and Homer are supported; the
    variance-matched loading is optional and last.
@@ -85,143 +132,251 @@ the one alternative with a rationale and has no source.
    exposure, the allocations no longer sum to the rolled loss, and the mean falls by the
    expected excess. Nothing is reallocated and no offset restores the mean. The expected excess
    over the exposures is reported either way: lost when capped, carried when not. The default is
-   open question 4.
-3. Bivariate outputs are arrays only. The annual bivariate aggregate, its marginals and the
-   conditional means are the aggregate package's (`BivariateAggregate(mode="discrete")`,
-   `exeqa_df`), fed from eltq's occurrence matrix; eltq writes no DecL.
+   decision 8.
+3. Outputs are arrays only. The annual bivariate aggregate, its marginals and its conditional
+   distributions are the aggregate package's (`BivariateAggregate(mode="discrete")`, `exeqa_df`),
+   fed from eltq's occurrence arrays; eltq writes no DecL.
 4. The multi-unit material has its own article; the method article is unchanged apart from a
    possible tweak to its last section.
 
+Steve, 2026-10-26, on review of the first draft (its open questions 1 to 4 are decisions 5 to 8):
+
+5. `clamp` on the multi-unit route is deprecated and stays selectable, with a deprecation warning,
+   until 3.0.0; removing it at a minor version would break the interface.
+6. The occurrence outputs are `occurrence_pair_joint` (two named units, by view) and
+   `occurrence_unit_first_moment` (every unit by default, by view), in place of the provisional
+   `pair_severity` and `unit_total_severity`. The first draft's unit-against-total matrices
+   $S_{u\Sigma}$ are dropped: the conditional means need only the vectors $m_u$ (step [joint]).
+7. The default $Q$ may differ by rule.
+8. `homer_cap` defaults to `False`, the published rule, so that `coupling="homer"` reproduces the
+   paper.
+9. Every one-dimensional bucketing on this route is by cdf differences at the half-bucket edges of
+   the fixed grid: one-unit events and the rolled row of the `homer` coupling alike. Section 4A
+   and tests 25 and 27 require the one-row survival grid instead and are amended; the survival
+   grid stays a comparison at a measured tolerance.
+10. A unit with loading one has an exact marginal: under the stratified rule through its closed
+    form (step [z-rule]), and under `coupling="comonotone"` through an exact path with no factor
+    rule at all (step [coupling]). One atom per node remains only under the node rules.
+
 ## Steps
 
-Versions continue from 2.3.2. Each step is one minor bump and one commit (plus a commit for any
-golden regeneration it forces), staged by path; Claude commits, Steve pushes.
+Each step is one minor bump from the version current when it executes, and one commit (plus a
+commit for any golden regeneration it forces), staged by path. Versions are assigned at execution
+and recorded in the execution log and the CHANGELOG. Claude commits, Steve pushes.
 
 ### [spec] no bump: section 4A of the specification
 
-Done with this plan: section 4A (the multi-unit table, the model, the coupling rules, the three
-routes, terms and views, the integral over the factor, bivariate outputs, metadata), section 7's
-multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section 11. Section 4's
-`clamp` bullet now points here.
+Done with the first draft (2026-10-25): section 4A (the multi-unit table, the model, the coupling
+rules, the three routes, terms and views, the integral over the factor, bivariate outputs,
+metadata), section 7's multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of
+section 11; section 4's `clamp` bullet points to 4A. The routes paragraph was revised on
+2026-10-26 for the joint aggregate route (e749f1a). The steps below amend 4A's integral, homer,
+bivariate outputs and metadata paragraphs, tests 25 to 29 and item 9 of section 11, each in the
+step that changes the behavior.
 
-### [bernoulli] 2.4.0: Bernoulli rows on the multi-unit route
+### [bernoulli]: Bernoulli rows on the multi-unit route
 
 - `multiunit.rs::prepare_unit` and `reference_multiunit.prepare_unit`: `VariancePolicy::Bernoulli`
   becomes a `UnitKind::TwoPoint` plan (the conditional law of section 4A), the default for
-  `multiunit_views` and `joint_two_units`; `clamp` stays selectable with a deprecation note and
-  is removed at the next major, as the one-row route did between 1.13.0 and 2.0.0 (raise if
-  Steve prefers outright removal now).
+  `multiunit_views` and `joint_two_units`; `clamp` stays selectable with a deprecation warning
+  and is removed at 3.0.0 (decision 5).
 - Conditional matrix for a two-point unit: row $q$ has mass $1 - \Phi((\Phi^{-1}(1 - p) - w z_q)/
-  \sqrt{1 - w^2})$ deposited at $M$ and the rest at 0; for $w = 1$ a step at $z = \Phi^{-1}(1-p)$.
-  Atoms unchanged. The marginal and layer-mean helpers (`analytic_view_mean`, the roll-up
-  diagnostic) gain the two-point case.
+  \sqrt{1 - w^2})$ deposited at $M$ and the rest at 0; for $w = 1$ a step at $z = \Phi^{-1}(1-p)$,
+  which the node rules resolve only to the nearest cumulative node weight until [z-rule]. Atoms
+  unchanged. The marginal and layer-mean helpers (`analytic_view_mean`, the roll-up diagnostic)
+  gain the two-point case.
 - Diagnostics: `variance_bernoulli` replaces `sigma_clamped` as the reported category under the
   default.
 - Goldens: `fixtures/golden/multiunit_small.*` and `joint_small.*` regenerate if they contain
-  inadmissible rows (check first; the fixture generator says). CHANGELOG records the change in
-  numbers.
-- Tests: spec test 26, both backends; the multi-unit article's event 2 of Homer's Table 11
-  (personal two-point, commercial beta) against the article's construction within $10^{-12}$.
+  inadmissible rows (check first; the fixture generator lists them). CHANGELOG records the change
+  in numbers.
+- Specification: test 26's last clause ("`clamp` is rejected with the typed error of the one-row
+  route") becomes the deprecation of decision 5.
+- Tests: spec test 26, both backends; the multi-unit article's event 2 (`tbl-homer`: personal
+  two-point, commercial beta) against the article's construction within $10^{-12}$, at the
+  article's 64 Gauss-Hermite nodes.
 
-### [one-unit] 2.5.0: one-unit events leave the mixture
+### [z-rule]: the stratified factor rule, chosen on tail metrics
 
-- `views.rs` pass 1 marks events with one contributing unit. Such an event's ground-up row is
-  the unit's marginal bucketed by cdf differences at the edges (`marginal_pmf`, exact in
-  probability), its views the compiled maps of that row, no $z$ loop; the engine reports the
-  count (`one_unit_events`).
-- Reference: the same branch in `multiunit_views_reference`.
-- Tests: spec test 27 on both backends: a one-unit event under every coupling and both rules
-  equals the direct bucketing exactly, and agrees with `quantize_arrays(method="survival")` on
-  the same row within the survival method's bucketing tolerance (the two discretizations differ
-  by the survival method's interpolation, so state the tolerance measured); a mixed portfolio's
-  total is the sum of its parts.
-
-### [z-rule] 2.6.0: the factor rule chosen on tail metrics
-
-- Extend `benchmarks/z_convergence.py`: rules midpoint, Gauss-Hermite and stratified; $Q$ in
-  8, 16, 32, 64, 128; metrics the exceedance of the event total at $10^{-2}$, $10^{-3}$,
-  $10^{-4}$, $10^{-5}$ against the midpoint rule at $Q = 4001$, plus the existing mean, sd,
-  q99 and marginal errors; cases A to D of the multi-unit article, the fixture, and a lone beta
-  unit with $w$ from 0.5 to 0.99. Record as `benchmarks/z-convergence-2.6.0.md`.
-- Implement the stratified rule: $Q$ equal-probability strata of $Z_c$, the conditional
-  distribution averaged over each stratum (Gauss-Legendre within the stratum, 8 points, with the
-  bivariate-normal closed form as the reference check), units independent given the stratum.
-  Exact marginals and means by construction; its dependence error is what the study measures.
-- Set the default rule and $Q$ from the data, as the node density was set at 1.16.0; write the
-  figures into section 4A's paragraph on the integral and into test 28's tolerance.
-- Goldens regenerate if the default changes; CHANGELOG says so. `dev/plan-chebyshev-z.md` stays
+- Exact references, in place of the midpoint rule at $Q = 4001$, which cuts the tails of $Z_c$
+  itself. One unit: the direct bucketing of its marginal by cdf differences. Two units: the
+  bivariate normal rectangle probabilities, $\Phi_2(y_u, y_w; w_u w_w)$ at the bucket edges
+  differenced over the cells, which is the joint exactly, for beta and two-point units, with no
+  quadrature over $z$; the reference backend computes $\Phi_2$ from Owen's $T$
+  (`scipy.special.owens_t`), accurate to rounding. More than two units: the stratified rule at
+  $Q = 4096$, with its two-unit error against the exact reference recorded beside it.
+- Extend `benchmarks/z_convergence.py`: rules midpoint, Gauss-Hermite and stratified; $Q$ in 8, 16,
+  32, 64, 128; metrics the exceedance of the event total at $10^{-2}$, $10^{-3}$, $10^{-4}$,
+  $10^{-5}$ against the exact references, plus the existing mean, sd, q99 and marginal errors;
+  cases A to D of the multi-unit article (`tbl-cases`), the three events of `tbl-homer` with their
+  two-point rows, the fixture, a lone beta unit with $w$ from 0.5 to 0.99, and units at loading
+  one (a beta and a two-point row, each beside a partner with $w < 1$). Record as
+  `benchmarks/z-convergence-<version>.md`.
+- Implement the stratified rule: $Q$ equal-probability strata of $Z_c$; within each stratum each
+  unit's conditional cdf at the edges averaged over the stratum by 8-point Gauss-Legendre in the
+  probability scale $u = \Phi(z)$, so that the two end strata are finite intervals; units
+  independent given the stratum.
+  - A unit at loading one needs no quadrature: given $U = \Phi(Z_c) \in [a, b]$ its distribution
+    function is $(\min(\max(F(x), a), b) - a)/(b - a)$, its marginal restricted to the stratum.
+    Its marginal is therefore exact, two-point units included, and `UnitKind::Comonotone` takes
+    this closed form under the stratified rule; under the node rules it stays one atom per node.
+  - A unit at loading zero has its marginal in every stratum.
+  - For $0 < w < 1$ the marginal is exact to the within-stratum quadrature. The study measures it
+    against the closed form: the stratum average of $\Phi((y - wz)/\sqrt{1 - w^2})$ over
+    $(z_a, z_b]$ is $Q\,(\Phi_2(y, z_b; w) - \Phi_2(y, z_a; w))$. If Gauss-Legendre falls short at
+    $w$ near 1, the closed form moves into the engine (an Owen's $T$ kernel in Rust), and the step
+    records the decision.
+  - The rule's dependence error comes from treating the units as independent within a stratum;
+    it is what the study measures, and it shrinks with $Q$.
+- Set the default rule, and $Q$ for each rule, from the data (decision 7), as the node density was
+  set at 1.16.0; write the figures into section 4A's integral paragraph and test 28's tolerance.
+- Specification: in 4A's integral paragraph, requirement (ii)'s $Q = 4001$ reference becomes the
+  exact references, and the stratified rule's "exact marginals and means by construction" becomes
+  exact at loadings zero and one and to the within-stratum quadrature otherwise; test 28's
+  reference likewise.
+- Goldens regenerate if the default changes, and the CHANGELOG records it. `dev/plan-chebyshev-z.md` stays
   parked behind this step and is re-evaluated against its result.
 
-### [coupling] 2.7.0: the coupling option
+### [one-unit]: one-unit events leave the mixture
 
-- `coupling=` on `multiunit_views` and `joint_two_units`, values `burke` (default), `comonotone`,
-  `independent`, `homer`; echoed in `MultiMeta`/`JointMeta`.
-- `burke`, `comonotone`, `independent`: a loading override in `prepare_unit` ($w$ forced to 1 or
-  0). A forced comonotone unit takes the existing `Comonotone` kind (an atom per node via
-  `beta_quantiles`); a forced independent unit joins the independent block, which the engine
-  already convolves once per event outside the $z$ loop.
+- `views.rs` pass 1 marks events with one contributing unit. Such an event's ground-up row is
+  the unit's marginal bucketed by cdf differences at the half-bucket edges (`marginal_pmf`, exact
+  in probability; decision 9), its views the compiled maps of that row, no $z$ loop; the engine
+  reports the count (`one_unit_events`).
+- Under the stratified rule the mixture already gives a one-unit event's marginal to the
+  within-stratum quadrature, so the branch is mainly a saving of $Q$ passes per such event; under
+  the node rules it also removes the rule's marginal error.
+- Reference: the same branch in `multiunit_views_reference`.
+- Specification: 4A's integral requirement (i), "bucketed as section 5A buckets it", becomes
+  bucketed by cdf differences at the half-bucket edges; test 27 becomes agreement with the direct
+  bucketing within $10^{-12}$ of the rate, and with the one-row survival grid of section 5A at the
+  tolerance this step measures.
+- Tests: spec test 27 on both backends: a one-unit event under every coupling and rule equals the
+  direct bucketing within $10^{-12}$ of the rate, and agrees with
+  `quantize_arrays(method="survival")` on the same row within the measured tolerance, recorded in
+  the specification; a mixed portfolio's total is the sum of its parts.
+
+### [coupling]: the coupling option
+
+- `coupling=` on `multiunit_views`, `joint_two_units` and the functions of [joint], values `burke`
+  (default), `comonotone`, `independent`, `homer`; echoed in `MultiMeta`/`JointMeta`.
+- `burke` and `independent`: a loading override in `prepare_unit` ($w$ forced to 0 under
+  `independent`); an independent unit joins the independent block, which the engine already
+  convolves once per event outside the $z$ loop. Under `burke`, a unit with $\sigma_I = 0$ beside
+  units with $w < 1$ stays on the factor rule, with the exact marginal of [z-rule].
+- `comonotone`: a path with no $z$ loop. Every unit of the event, and every view of it, is a
+  nondecreasing function of one uniform $U$, so the event total of a view is the comonotone sum
+  of the units' bucketed view marginals. Merge the units' cumulative probabilities at their bucket
+  edges into one sorted list of breakpoints in $u$; on each interval between breakpoints every
+  unit sits at one node, and the interval's length is deposited at the sum of those nodes. The
+  result is exact for the bucketed marginals, at a cost linear in the number of buckets per
+  event. The stratified rule alone would give exact marginals but a dependence error, since it
+  treats the units as independent within a stratum while comonotone units share $U$ exactly.
 - `homer`: a separate path with no $z$ loop. Per event: roll the rows up by the moment rule,
-  classify the rolled row by the one-row rules (beta, two-point, atom), bucket its marginal on
-  the grid by cdf differences, and push it through the composed map per view, compiled like a
-  view map: $x \mapsto \sum_k \mathrm{term}_k(x \mu_k/\mu_R)$ uncapped, or
-  $x \mapsto \sum_k \mathrm{term}_k(\min(x \mu_k/\mu_R, M_k))$ with `homer_cap=True` (the
-  breakpoints are the units' breakpoints scaled by $\mu_R/\mu_k$, and the caps when capped). The
-  expected excess over the exposures,
-  $\sum_j \lambda_j \mathsf P(\sum_k (X_{R,j}\mu_k/\mu_R - M_k)^+)$, is computed analytically
-  from the rolled beta's limited expected values and reported in both modes, with the mode
-  (provisional name `homer_excess_mean`, replacing `homer_cap_mean_loss`).
-- `homer_cap` on `multiunit_views` (and wherever `coupling` is accepted), ignored with a warning
-  under the other couplings; echoed in `MultiMeta`.
-- Specification: section 4A's `homer` paragraph, its metadata paragraph, test 25's `homer` clause
-  and item 9 of section 11 state the cap as fixed; amend them to the option of decision 2.
+  classify the rolled row by the one-row rules (beta, two-point, atom), bucket its marginal on the
+  grid by cdf differences at the half-bucket edges (decision 9), and push it through the composed
+  map per view, compiled as a `ViewMap` is: $x \mapsto \sum_k \mathrm{term}_k(x \mu_k/\mu_R)$
+  uncapped, or $x \mapsto \sum_k \mathrm{term}_k(\min(x \mu_k/\mu_R, M_k))$ with
+  `homer_cap=True` (the breakpoints are the units' breakpoints scaled by $\mu_R/\mu_k$, and the
+  caps when capped). The expected excess over the exposures,
+  $\sum_j \lambda_j \mathsf P(\sum_k (X_{R,j}\mu_k/\mu_R - M_k)^+)$, is computed analytically from
+  the rolled row's limited expected values and reported in both modes, with the mode
+  (`homer_excess_mean`, replacing `homer_cap_mean_loss`).
+- `homer_cap` on `multiunit_views` and wherever `coupling` is accepted, default `False`
+  (decision 8), ignored with a warning under the other couplings; echoed in `MultiMeta`.
+- Specification: section 4A's `homer` paragraph makes the cap an option (decision 2, default
+  `False`) and buckets the rolled row by cdf differences in place of "the one-row survival method
+  of section 5A on the rolled table" (decision 9); the metadata paragraph renames
+  `homer_cap_mean_loss` to `homer_excess_mean`; item 9 of section 11 records the cap as an
+  option. Test 25 becomes:
+  - `homer`: the ground-up total equals the direct bucketing of the rolled table composed with the
+    allocation map within $10^{-12}$ of the rate, in both modes, and the one-row survival grid at
+    a measured tolerance;
+  - `comonotone`: the total equals the comonotone sum of the bucketed marginals within $10^{-12}$
+    of the rate, each unit's marginal from the joint equals its direct bucketing within
+    $10^{-12}$, and with shared $(\alpha, \beta)$ the total equals the rolled row's beta to
+    bucketing tolerance (Proposition 6), in place of "the bucketing of $\sum_kM_kF_k^{-1}(u)$ at
+    the nodes".
 - Tests: spec test 25 for the four couplings, both backends, with `homer` in both modes: uncapped,
   the allocations sum to the rolled loss and the mean is exact; capped, each allocation is at
-  most $M_k$ and the mean falls by the reported excess. The multi-unit article's Table 5
-  (case A under the three loadings) reproduced within the rule's error.
+  most $M_k$ and the mean falls by the reported excess. The multi-unit article's `tbl-couplings`
+  (case A under the three loadings) reproduced within the rule's error; the article's comonotone
+  joint is built on 4,096 midpoint nodes, so the exact path agrees with it to that rule's error,
+  recorded.
 
-### [joint] 2.8.0: bivariate occurrence severities
+### [joint]: occurrence outputs for the joint aggregate route and the conditional means
 
-- `pair_severity(event_id, unit_id, ..., units=(u, w), bucket_size, ...)` returns the
-  rate-weighted joint occurrence severity $S_{uw} = \sum_j \lambda_j J_{j,uw}$ on the common grid
-  (shape $n_u \times n_w$), its two grids and metadata (mass, marginal means, the correlation at
-  an occurrence). Per event with both units present, the joint is the engine's existing
-  two-unit GEMM; with one present, an outer product with the atom at zero; with neither,
-  nothing. Chunked and deterministic as `multiunit_views`.
-- `unit_total_severity(...)` returns, for each unit $u$, $S_{u\Sigma}$: per event and node, the
-  unit's conditional row against the convolution of the other units (prefix and suffix products
-  of the unit spectra; the shear applied at deposit), accumulated rate-weighted. Memory is
-  $n_u \times n_\Sigma$ per unit; the caller names the units it wants, all by default.
-- Reference implementations of both; names are provisional (raise at review).
-- Tests: spec test 29 on both backends, including $\sum_u \kappa_u(x) = x$ from the
-  $S_{u\Sigma}$ at occurrence level, and the handoff: build the annual bivariate with the
-  aggregate package from $S_{u\Sigma}/\Lambda$ under Poisson($\Lambda$) and check its second
-  marginal against the one-dimensional compound of the ground-up total (skipped when `aggregate`
-  is not installed; it is a test-only dependency).
-- Notebook: the Homer Table 11 example end to end, as in the article's section 7.
+- `occurrence_pair_joint(event_id, unit_id, ..., units=(u, w), view="ground_up", bucket_size,
+  ...)` returns the rate-weighted joint occurrence severity of the view,
+  $S_{uw} = \sum_j \lambda_j J_{j,uw}$, on the common grid (shape $n_u \times n_w$), its two grids
+  and metadata (mass, marginal means, the correlation at an occurrence). Each unit's compiled
+  `ViewMap` is applied to its conditional row before the outer product, because the joint
+  aggregate route exists for terms on a unit's annual loss and for allocation, and both act on
+  the unit's loss after its occurrence terms. Per event with both units present, the joint is the
+  engine's two-unit GEMM over the rule's nodes or strata; with one present, an outer product with
+  the atom at zero; with neither, nothing. Under `comonotone` the merged breakpoints of [coupling]
+  deposit each interval at the pair of nodes; under `homer` each rolled bucket's mass goes to the
+  pair of its allocations' view images. Chunked and deterministic as `multiunit_views`.
+- `occurrence_unit_first_moment(..., units=None, view="ground_up", ...)` returns, for each unit $u$
+  (all by default), the vector $m_u(y) = \sum_j \lambda_j \mathsf P(X_{uj}; X_j = y)$ on the grid
+  of the view's total: per event and node or stratum, the convolution of $x\,f_u(x \mid z)$ with
+  the convolution of the other units, formed for all the units of an event in linear time by
+  prefix and suffix products of the unit spectra, accumulated rate-weighted. Memory is $n_\Sigma$
+  per unit. $\sum_u m_u(y) = y\,s(y)$, with $s$ the run's rate-weighted total severity, holds
+  exactly on the grid and is the run's check.
+- The annual conditional mean is $\kappa_u(s) = (m_u * f_A)(s) / f_A(s)$ by the Mecke identity
+  (Background), a one-dimensional convolution with the annual density of the total, which the
+  caller takes from the aggregate package or from any compound Poisson calculation on $s$; see
+  open question 1. The two-dimensional route through `BivariateAggregate` remains available from
+  `occurrence_pair_joint` and its shear, and is the test of the identity.
+- Reference implementations of both functions.
+- Specification: 4A's bivariate outputs paragraph replaces $S_{u\Sigma}$ and its shear with $m_u$
+  and the identity, with the unit's joint with the total, for two units, the shear of
+  $S_{uw}$; section 7's multi-unit outputs paragraph likewise; test 29 restated as below.
+- Tests: spec test 29 on both backends:
+  - the marginals of $S_{uw}$ equal the two units' occurrence severities of the view within the
+    rule's error, and the mixture over events of the per-event joints equals the returned array
+    within $10^{-12}$ of the rate;
+  - $\sum_u m_u(y) = y\,s(y)$ within $10^{-12}$ relative at every total with mass;
+  - for a two-unit portfolio, $S_{uw}$ summed along its antidiagonals equals the `multiunit_views`
+    total of the same view within $10^{-12}$ of the rate;
+  - the handoff, route 2 against route 3: the two-dimensional compound of $S_{uw}/\Lambda$ under a
+    Poisson($\Lambda$) count by the aggregate package, summed along its antidiagonals, equals the
+    one-dimensional compound of the total within the aggregate package's grid tolerance (the
+    article reaches $10^{-10}$);
+  - $\kappa_u$ from the Mecke convolution equals `exeqa_df` of the two-dimensional compound of the
+    sheared $S_{uw}$ at every total where the two-dimensional grid does not wrap.
+  The aggregate package is a test-only dependency; the last two tests are skipped without it.
+- Notebook: the Homer Table 11 example end to end, as in the article's `sec-allocation`, with
+  $\kappa_u$ by both methods.
 
-### [matched] 2.9.0, optional: the variance-matched loading
+### [matched], optional: the variance-matched loading
 
 - `coupling="matched"`: per event, bracket $c$ on $[0, 1/\max_i w_i]$ for the root of
   $\operatorname{Var}(\sum_i X_i) = (\sigma_{I,R} + \sigma_{C,R})^2$, the variance computed from
-  the conditional means and variances per unit at the rule's nodes (no convolution needed: the
-  conditional variance of a sum of conditionally independent units is the sum, and the variance
-  of the conditional mean is a quadrature); about twenty evaluations per event. Saturation reported
-  per event (`matched_shortfall`).
-- Tests: spec test 25's `matched` clause; the multi-unit article's Table 6 (case A and Homer's
-  events 1 to 3, including event 2's saturation) reproduced within the rule's error.
+  the conditional means and variances per unit at the rule's nodes or strata (no convolution
+  needed: the conditional variance of a sum of conditionally independent units is the sum, and the
+  variance of the conditional mean is a quadrature); about twenty evaluations per event.
+  Saturation reported per event (`matched_shortfall`).
+- Tests: spec test 25's `matched` clause; the multi-unit article's `tbl-matched` (case A and
+  Homer's events 1 to 3, including event 2's saturation) reproduced within the rule's error.
+- The first step to drop if time is short: the loading has no source, and the article only
+  presents it.
 
-### [parity] with 2.9.0 or as 2.9.x: documentation and benchmarks
+### [parity] with [matched] or as a patch after [joint]: documentation and benchmarks
 
 - README milestone rows, the Python API block, `MultiMeta` fields; CHANGELOG per version.
-- `benchmarks/run_multiunit.py` rerun under the new default rule and policy; report
-  `benchmarks/report-2.9.0.md`; the all-four-views delta and the `homer` path's speed recorded.
+- `benchmarks/run_multiunit.py` rerun under the new default rule and policy, with the report
+  `benchmarks/report-<version>.md`; the all-four-views delta and the speed of the `comonotone` and
+  `homer` paths recorded.
 
 ## Files
 
-- `secondary-uncertainty-mathematical-specification.md` (done with this plan).
-- `crates/eltq-core/src/multiunit.rs` (kinds, two-point plan, loadings), `views.rs` (one-unit
-  branch, `homer` path, pair and unit-total accumulators), `quadrature.rs` (stratified rule),
-  `config.rs` (coupling, policy default), `terms.rs` (composed Homer map), `diagnostics.rs`.
+- `secondary-uncertainty-mathematical-specification.md` (4A done; amended by the steps).
+- `crates/eltq-core/src/multiunit.rs` (kinds, two-point plan, loadings, the closed form at loading
+  one), `views.rs` (one-unit branch, `comonotone` and `homer` paths, pair and first-moment
+  accumulators), `quadrature.rs` (stratified rule), `config.rs` (coupling, policy default),
+  `terms.rs` (composed Homer map), `diagnostics.rs`.
 - `crates/eltq-python/` bindings for the new keywords and functions.
 - `python/eltq/__init__.py`, `_meta.py`, `reference_multiunit.py`.
 - `tests/test_multiunit.py` (tests 25 to 29), `fixtures/generate_fixtures.py` and goldens as
@@ -233,18 +388,29 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
 
 - `cargo test -p eltq-core --release` and `uv run pytest` green at every step, both backends.
 - Spec tests 25 to 29 implemented and passing; the figures they quote recorded in the
-  specification where the plan leaves them open (the default rule and $Q$, the one-unit
-  tolerance against the survival grid).
-- The multi-unit article's Tables 4 to 6 and its agreement figure reproduced from the package
-  (a test or a notebook cell per table).
+  specification where the plan leaves them open (the default rule and $Q$ for each rule, the
+  one-unit and `homer` tolerances against the survival grid).
+- Exact marginals for units at loading one: under `coupling="comonotone"` every unit's marginal
+  from the joint equals its direct bucketing within $10^{-12}$; beside units with $w < 1$ under
+  the stratified rule, within the rule's measured tolerance.
+- The multi-unit article's `tbl-cases`, `tbl-couplings`, `tbl-matched` and `fig-route-compare`
+  reproduced from the package (a test or a notebook cell each).
 - Determinism across thread counts bitwise, as today; no negative weight on any path.
 - Speed: the default rule's multi-unit benchmark within the 1.11.0 figures scaled by its $Q$;
-  the `homer` path at one-row speed; no regression on the one-row route (unchanged code).
+  the `homer` and `comonotone` paths at one-row speed; no regression on the one-row route
+  (unchanged code).
 
 ## Alternatives considered
 
 - *Raise $Q$ under the midpoint rule.* The tail cut shrinks only as $1/Q$ and the cost is linear in
   $Q$; the study decides, but the stratified rule's exact marginals are the better bet.
+- *The midpoint rule at $Q = 4001$ as the study's reference.* Replaced: it cuts the tails of $Z_c$
+  itself, while the bivariate normal rectangles are exact for two units.
+- *Bivariate normal rectangles as the production rule for two units.* Exact, but $n_u n_w$
+  evaluations of $\Phi_2$ per event against the GEMM's $Q(n_u + n_w)$ special-function evaluations
+  and $Q n_u n_w$ multiply-adds; kept as the reference.
+- *Comonotone through the stratified rule alone.* Exact marginals but a dependence error; the
+  merged breakpoints are exact at lower cost.
 - *Homer capped only.* The first version of decision 2, revised: the published rule allocates
   more than a unit's exposure in the paper's own example, but it is the published rule, so it
   stays available and the cap is an explicit choice.
@@ -256,10 +422,14 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
 - *Bivariate compounding inside eltq.* Rejected (decision 3): the aggregate package has the 2-D
   FFT, the marginal checks and `exeqa_df`; duplicating them adds code and a second place for the
   grid conventions to drift.
-- *The one-row survival route for one-unit events inside the multi-unit engine.* The engine
-  buckets on the fixed global grid and already evaluates the cdf at every edge, so cdf
-  differences are exact there at the same cost; the survival curve's node machinery brings
-  nothing on a fixed grid. The one-row route stays the comparison in test 27.
+- *The unit-against-total matrices $S_{u\Sigma}$ of the first draft.* Dropped (decision 6): for the
+  conditional mean the Mecke identity needs only $m_u$, of memory $n_\Sigma$ against
+  $n_u n_\Sigma$ per unit, for any number of units; for two units the joint of a unit with the
+  total is the shear of $S_{uw}$.
+- *The one-row survival method for one-unit events and for the rolled `homer` row.* Rejected
+  (decision 9): the engine buckets on the fixed global grid and already evaluates the cdf at every
+  edge, so cdf differences are exact there at the same cost; the survival curve's node machinery
+  brings nothing on a fixed grid. The survival grid stays the comparison in tests 25 and 27.
 
 ## Not in this plan
 
@@ -267,23 +437,24 @@ multi-unit outputs paragraph, tests 25 to 29 in section 9, and item 9 of section
   5A window and overflow policies have no multi-unit counterpart yet); `GridOverflowError` stays.
 - A survival-style, node-based formulation of the multi-unit total: the convolution is the
   honest route and nothing suggests a closed form for the total's survival function.
-- The reserving application of `MV-cat-reserves.qmd` (open claims as
-  certain events, direct input of the total sd and a correlated share): a transformation of the
-  inputs, to be specified when that article is written.
+- The annual joint distribution of more than two units, and a unit's distribution given the total
+  beyond its mean for more than two units: `BivariateAggregate` is two-dimensional, and the
+  conditional means of any number of units are covered by $m_u$.
+- The loading $\sigma_C/(\sigma_I + \sigma_C)$, which the multi-unit article sets aside.
+- The reserving application of `MV-cat-reserves.qmd` (open claims as certain events, direct input
+  of the total sd and a correlated share): a transformation of the inputs, to be specified when
+  that article is written.
 - `dev/plan-chebyshev-z.md` [hybrid-rule] and [chebyshev]: re-evaluated after [z-rule].
 - The deferred review items of `dev/done/plan-multiunit-fixes.md` (grid length bound, the NaN
   rate category mismatch, `1_000` in the Rust terms parser).
 
 ## Open questions for review
 
-1. `clamp` on the multi-unit route: deprecated and selectable until 3.0.0 (proposed), or removed
-   at 2.4.0 as the one-row route removed it at 2.0.0.
-2. Names of the new functions (`pair_severity`, `unit_total_severity` are placeholders) and
-   whether `unit_total_severity` defaults to all units.
-3. Whether the convergence study's default $Q$ may differ by rule (the stratified rule at 16
-   may beat Gauss-Hermite at 32 on cost), or one $Q$ is set for all rules.
-4. The default of `homer_cap`: `False`, the published rule (proposed, so that `coupling="homer"`
-   reproduces the paper), or `True`, the physically bounded allocation.
+1. A helper for the annual conditional mean in eltq's Python layer: about ten lines of numpy, the
+   convolution of each $m_u$ with an annual density the caller supplies, so that eltq still
+   computes no aggregate. Decision 3 allows it, since the result is an array. Proposed: the
+   helper, `annual_conditional_mean(first_moment, annual_density)`; the alternative leaves the
+   convolution to the caller, with the notebook showing it.
 
 ## Execution log
 
