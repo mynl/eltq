@@ -85,6 +85,7 @@ identical.
 | [kernel] the incomplete beta reports failure instead of a value; events beyond the fraction's regime routed around it whatever the density | 2.3.3 | done |
 | [atoms] the normal law for narrow events from min(alpha, beta) = 1e16 replaces the step at the mean; rows too narrow to resolve are atoms under `atom_by_resolution` | 2.3.4 | done |
 | [overflow] the windowed grid's excess moment from the integral of the curve, so events whose endpoint survival underflows keep theirs | 2.3.5 | done |
+| [tails] the endpoint ladder's power law gated on its asymptotic criterion, the one edge below it evaluated exactly, quarter-octave steps across the transition | 2.3.6 | done |
 
 ## Layout
 

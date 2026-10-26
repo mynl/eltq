@@ -587,6 +587,67 @@ def test_31_atoms_by_resolution_and_normal_kernel():
                 assert np.max(np.abs(grids[0] - grids[1])) <= 1e-8, (small, ratio, offset)
 
 
+# [32] Endpoint tails: the ladder's power law below its last node applies
+# only where the endpoint expansion's first correction is below 1e-6 there
+# (the review's A2: Beta(1e6, 1/2) at an edge 5e-7 below M, grid tail 0.054
+# for an exact 0.6827), the ladder refines across the transition zone, and
+# the tail sums match the exact incomplete beta at every edge of the tail
+# interval for large alpha and small beta on both backends.
+def test_32_endpoint_tails():
+    from scipy import special
+    import eltq
+
+    def beta_row(a, b, maximum=1.0):
+        p = a / (a + b)
+        sd = maximum * math.sqrt(p * (1.0 - p) / (a + b + 1.0))
+        return tuple(np.array([v]) for v in (1.0, maximum, maximum * p, sd, 0.0))
+
+    backends = (eltq.quantize_arrays, reference.quantize_reference)
+    # The review's reproduction.
+    a, b = 1e6, 0.5
+    h = (1.0 - b / a) / 999.5
+    edge = 999.5 * h
+    want = special.betaincc(a, b, edge)
+    assert abs(want - 0.6826894921171948) < 1e-9
+    for backend in backends:
+        _, sec, _ = backend(*beta_row(a, b), bucket_size=h, grid_length=1001)
+        assert abs(sec[1000] - want) <= 1e-6, (backend, sec[1000], want)
+    # Beta(1e6, 1): the elementary oracle S(x) = -expm1(1e6 log x).
+    a, b = 1e6, 1.0
+    h = 2e-7
+    n = int(math.ceil(1.0 / h)) + 1
+    for backend in backends:
+        _, sec, _ = backend(*beta_row(a, b), bucket_size=h, grid_length=n)
+        sums = tail_sums(sec)
+        edges = (np.arange(sums.size) + 0.5) * h
+        exact = -np.expm1(a * np.log(edges))
+        keep = exact >= 1e-12
+        # 1.5e-6 measured: the refined ladder's own residual near M.
+        assert np.max(np.abs(sums[keep] / exact[keep] - 1.0)) <= 1e-5, backend
+    # The sweep: every edge of the tail interval where S >= 1e-12.
+    for a in (1e2, 1e4, 1e6):
+        for b in (0.3, 0.5, 1.0, 2.0, 5.0):
+            cols = beta_row(a, b)
+            mu = a / (a + b)
+            h = (1.0 - mu) / 7.0            # several edges per mean distance below M
+            n = int(math.ceil(1.0 / h)) + 1
+            grids = []
+            for backend in backends:
+                _, sec, meta = backend(*cols, bucket_size=h, grid_length=n)
+                assert math.isclose(sec.sum(), 1.0, rel_tol=1e-14)
+                grids.append(sec)
+            sums = tail_sums(grids[0])
+            edges = (np.arange(sums.size) + 0.5) * h
+            tail = edges >= 1.0 - 12.0 * (1.0 - mu)
+            exact = special.betaincc(a, b, edges[tail])
+            keep = exact >= 1e-12
+            err = np.max(np.abs(sums[tail][keep] / exact[keep] - 1.0))
+            assert err <= 1e-4, (a, b, err)
+            # The edge below the ladder's last node is evaluated exactly on
+            # each side, the engine's fraction against SciPy: 2.6e-12 apart.
+            assert np.max(np.abs(grids[0] - grids[1])) <= 1e-11, (a, b)
+
+
 def test_curve_matches_quantize_and_exact(impl):
     import eltq
 

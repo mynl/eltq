@@ -20,6 +20,19 @@ TAIL_INTERVALS = 4
 #: both backends.
 TAIL_RATE_FLOOR = 1e-20
 
+#: Survival method: where the endpoint expansion's first correction ``c t``,
+#: ``c = (alpha - 1) beta / (beta + 1)``, lies in this band and ``c > 1``,
+#: the tail ladder steps by ``2**(1/4)`` instead of ``sqrt(2)`` (spec
+#: section 5A). Shared by both backends; mirrors ``TAIL_FINE_ZONE`` in
+#: ``crates/eltq-core/src/curve.rs``.
+TAIL_FINE_ZONE = (1e-2, 1e2)
+
+#: Survival method: the power law below the tail ladder's last node applies
+#: only where ``c t`` at that node is at most this; otherwise the queried
+#: point is evaluated exactly (spec section 5A). Shared by both backends;
+#: mirrors ``TAIL_POWER_LAW_LIMIT`` in ``crates/eltq-core/src/curve.rs``.
+TAIL_POWER_LAW_LIMIT = 1e-6
+
 #: Survival method: steps of one standard deviation each side of the mean
 #: within which a narrow event's bulk must reach the rate floor; wider
 #: events take the regular route (spec section 5A). Shared by both backends.

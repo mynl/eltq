@@ -8,9 +8,9 @@
   "raw_mass": 0.15699999999999997,
   "raw_mean": 4.2451,
   "secondary_mass": 0.157,
-  "secondary_mean": 4.245011304074607,
+  "secondary_mean": 4.245011296332869,
   "quadrature_secondary_mean": null,
-  "secondary_mean_error": -8.869592539273441e-05,
+  "secondary_mean_error": -8.870366713065181e-05,
   "input_rows": 17,
   "valid_rows": 16,
   "diagnostics": {

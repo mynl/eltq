@@ -119,18 +119,37 @@ fn tail_moment(lam: f64, m: f64, a: f64, b: f64, e: f64) -> f64 {
     lam * m * (a / (a + b)) * BetaFn::new(a + 1.0, b).sf(e / m)
 }
 
+/// Where the endpoint expansion's first correction `c t`, with
+/// `c = (alpha - 1) beta / (beta + 1)` and `t = (M - x) / M`, lies in this
+/// band and `c > 1`, the tail ladder steps by 2^(1/4) instead of sqrt(2):
+/// the cubic in `u` of `log(1 - c t)` was off by 3e-4 at beta = 5 with
+/// sqrt(2) steps (6e-6 at beta = 0.3), 16 times less with the finer step.
+pub const TAIL_FINE_ZONE: (f64, f64) = (1e-2, 1e2);
+/// The power law below the ladder's last node applies only where `c t` at
+/// that node is at most this: the relative error of extrapolating by the
+/// pure power law is `c t_L` (0.17 on Beta(1e6, 1/2) at t_L = 5e-7, which
+/// moved 0.63 of the event's rate across the wrong edge; peer review,
+/// finding A2). Otherwise the queried point is evaluated exactly.
+pub const TAIL_POWER_LAW_LIMIT: f64 = 1e-6;
+
 /// One beta event's survival on its tail interval `(x_k, M]`, the
 /// endpoint interpolant: `log S` against `u = log(M - x)`, a monotone
 /// cubic Hermite with the exact slopes `(1 - y) f(y) / S(y)` on nodes
 /// shrinking the distance to the endpoint by sqrt(2) per step from
-/// `M - x_k` down to `min_distance`, the limited end slopes fixed per
-/// interval at construction, and the exact power law `S ~ d^beta` below
-/// the last node. The first node's value is the exact `S(x_k)`, so the
-/// tail joins the curve bitwise.
+/// `M - x_k` down to `min_distance` (by 2^(1/4) across `TAIL_FINE_ZONE`
+/// when `c > 1`), the limited end slopes fixed per interval at
+/// construction, and below the last node the exact power law `S ~ d^beta`
+/// where `c t_L <= TAIL_POWER_LAW_LIMIT`, else the exact survival. The
+/// first node's value is the exact `S(x_k)`, so the tail joins the curve
+/// bitwise. The nodes are `d_0 2^(-k / 4)` for a shared integer sequence
+/// `k`, so both backends place them bitwise alike.
 pub struct TailInterpolant {
+    bf: BetaFn,
     max_loss: f64,
     beta: f64,
     survival_at_node: f64,
+    /// Whether the power law holds below the last node.
+    asymptotic: bool,
     /// Nodes ascending in `u`, their `log S`, and the limited end slopes
     /// of each interval `[u[k], u[k + 1]]`.
     u: Vec<f64>,
@@ -143,15 +162,19 @@ impl TailInterpolant {
     pub fn new(bf: &BetaFn, m: f64, xk: f64, s: f64, min_distance: f64) -> Self {
         let (a, b) = (bf.alpha, bf.beta);
         let d0 = m - xk;
-        let count = 2 * ((d0 / min_distance).log2().ceil().max(1.0) as usize) + 1;
-        // Nodes with a positive survival, descending in distance.
-        let mut dist = Vec::with_capacity(count);
-        let mut log_surv = Vec::with_capacity(count);
-        let mut slope = Vec::with_capacity(count);
-        for i in 0..count {
-            let d = d0 * 0.5_f64.powf(i as f64 / 2.0);
+        let c = (a - 1.0) * b / (b + 1.0);
+        // Nodes with a positive survival, descending in distance: the k-th
+        // at d0 2^(-k / 4), k advancing by 2 (sqrt(2)) or by 1 across the
+        // fine zone, down to min_distance and at least three nodes.
+        let mut dist = Vec::new();
+        let mut log_surv = Vec::new();
+        let mut slope = Vec::new();
+        let mut k = 0_u32;
+        let mut d_last = d0;
+        loop {
+            let d = d0 * 0.5_f64.powf(k as f64 / 4.0);
             let y = 1.0 - d / m;
-            let surv = if i == 0 { s } else { bf.sf(y) };
+            let surv = if k == 0 { s } else { bf.sf(y) };
             if !(surv > 0.0) {
                 break;
             }
@@ -159,7 +182,14 @@ impl TailInterpolant {
             dist.push(d);
             log_surv.push(ls);
             slope.push(((a - 1.0) * y.ln() + b * (d / m).ln() - bf.ln_beta() - ls).exp());
+            d_last = d;
+            if d <= min_distance && dist.len() >= 3 {
+                break;
+            }
+            let ct = c * d / m;
+            k += if c > 1.0 && ct >= TAIL_FINE_ZONE.0 && ct <= TAIL_FINE_ZONE.1 { 1 } else { 2 };
         }
+        let asymptotic = c * d_last / m <= TAIL_POWER_LAW_LIMIT;
         // Ascending in u = log d.
         let u: Vec<f64> = dist.iter().rev().map(|d| d.ln()).collect();
         let g: Vec<f64> = log_surv.iter().rev().copied().collect();
@@ -173,7 +203,12 @@ impl TailInterpolant {
             m0.push(lo);
             m1.push(hi);
         }
-        TailInterpolant { max_loss: m, beta: b, survival_at_node: s, u, g, m0, m1 }
+        TailInterpolant { bf: *bf, max_loss: m, beta: b, survival_at_node: s, asymptotic, u, g, m0, m1 }
+    }
+
+    /// The ladder's node count (for the tests).
+    pub fn nodes(&self) -> usize {
+        self.u.len()
     }
 
     /// The cursor `at_ascending` starts from: the topmost interval.
@@ -181,18 +216,19 @@ impl TailInterpolant {
         self.u.len().saturating_sub(2)
     }
 
-    /// `S` at distance `d = M - x > 0` on interval `k`, or by the power
-    /// law below the first node.
+    /// `S` at distance `d = M - x > 0` on interval `k`; below the first
+    /// node by the power law where it holds, else exactly.
     fn eval(&self, d: f64, k: usize) -> f64 {
         let (u, g) = (&self.u, &self.g);
         let uq = d.ln();
-        let value = if uq < u[0] || u.len() == 1 {
-            g[0] + self.beta * (uq - u[0])
-        } else {
-            let du = u[k + 1] - u[k];
-            hermite((uq - u[k]) / du, g[k], g[k + 1], du, self.m0[k], self.m1[k])
-        };
-        value.exp().min(self.survival_at_node)
+        if uq < u[0] || u.len() == 1 {
+            if !self.asymptotic {
+                return self.bf.sf(1.0 - d / self.max_loss).min(self.survival_at_node);
+            }
+            return (g[0] + self.beta * (uq - u[0])).exp().min(self.survival_at_node);
+        }
+        let du = u[k + 1] - u[k];
+        hermite((uq - u[k]) / du, g[k], g[k + 1], du, self.m0[k], self.m1[k]).exp().min(self.survival_at_node)
     }
 
     /// `S(x)` with the interval found by search; 0 at and beyond `M`, and
@@ -1468,6 +1504,60 @@ mod tests {
             prev = walked;
         }
         assert_eq!(interp.at(m), 0.0);
+    }
+
+    // [tails] The ladder refines across the fine zone when c > 1 and the
+    // power law gives way to the exact survival below the last node when
+    // c t_L is large: the review's A2 case, Beta(1e6, 1/2), at an edge
+    // 5e-7 below M where the pure power law gave 0.054 for 0.6827.
+    #[test]
+    fn tail_ladder_refines_and_evaluates_below_the_last_node() {
+        let m = 1.0;
+        let (a, b) = (1e6, 0.5);
+        let bf = BetaFn::new(a, b);
+        let h = (1.0 - b / a) / 999.5;
+        let xk = 1.0 - 10.0 * b / a; // ten mean distances below M
+        let s = bf.sf(xk / m);
+        let interp = TailInterpolant::new(&bf, m, xk, s, 0.25 * h);
+        assert!(!interp.asymptotic);
+        let edge = 999.5 * h;
+        let got = interp.at(edge);
+        let want = bf.sf(edge / m);
+        assert!((got - want).abs() <= 1e-9 * want, "{got} vs {want}");
+        assert!((want - 0.6826894921171948).abs() < 1e-9);
+        // Small alpha: no refinement, the power law holds, the node count is
+        // the old 2 ceil(log2(d0 / min)) + 1.
+        let small = BetaFn::new(0.7, 40.0);
+        let (xk, min_distance) = (0.92e5, 0.5);
+        let interp = TailInterpolant::new(&small, 1e5, xk, small.sf(xk / 1e5), min_distance);
+        assert!(interp.asymptotic);
+        let expected = 2 * (((1e5 - xk) / min_distance).log2().ceil() as usize) + 1;
+        assert!(interp.nodes() <= expected && interp.nodes() >= expected - 2, "{} vs {expected}", interp.nodes());
+        // Large alpha, moderate beta: the ladder across the fine zone is
+        // within 5e-5 of the exact survival at every quarter-octave
+        // midpoint (3e-4 before the refinement at beta = 5).
+        for (a, b) in [(1e2, 5.0), (1e4, 2.0), (1e6, 5.0)] {
+            let bf = BetaFn::new(a, b);
+            let mu = a / (a + b);
+            let xk = (1.0 - 10.0 * (1.0 - mu)).max(0.5);
+            let s = bf.sf(xk);
+            let interp = TailInterpolant::new(&bf, 1.0, xk, s, 1e-8);
+            let d0 = 1.0 - xk;
+            let mut k = 1;
+            loop {
+                let d = d0 * 0.5_f64.powf(k as f64 / 8.0);
+                if d < 1e-8 {
+                    break;
+                }
+                let want = bf.sf(1.0 - d);
+                if want < 1e-280 {
+                    break;
+                }
+                let got = interp.at(1.0 - d);
+                assert!((got - want).abs() <= 5e-5 * want, "a={a} b={b} d={d}: {got} vs {want}");
+                k += 2;
+            }
+        }
     }
 
     #[test]

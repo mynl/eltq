@@ -30,8 +30,8 @@ from scipy.special import betainc, betaincc, betaln, ndtri, erfc
 from scipy.stats import beta as beta_dist
 
 from eltq._meta import (ATOM_RESOLUTION, DEFAULT_NODES_PER_DECADE, LARGE_PARAMETER_FROM,
-                        NARROW_NORMAL_FROM, NARROW_STEPS, TAIL_INTERVALS, TAIL_RATE_FLOOR, CurveMeta,
-                        GridMeta, Meta, RowIssues)
+                        NARROW_NORMAL_FROM, NARROW_STEPS, TAIL_FINE_ZONE, TAIL_INTERVALS,
+                        TAIL_POWER_LAW_LIMIT, TAIL_RATE_FLOOR, CurveMeta, GridMeta, Meta, RowIssues)
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -306,8 +306,11 @@ def _tail_survival(m: float, a: float, b: float, xk: float, s: float,
     endpoint interpolant: the log survival against the log distance to the
     endpoint, ``u = log(M - x)``, a monotone cubic Hermite with the exact
     slopes ``(1 - y) f(y) / S(y)`` on nodes shrinking the distance by
-    ``sqrt(2)`` per step from ``M - x_k`` down to ``min_distance``, and the
-    power law ``S ~ d^beta`` (the exact asymptote) below the last node.
+    ``sqrt(2)`` per step from ``M - x_k`` down to ``min_distance`` (by
+    ``2**(1/4)`` across ``TAIL_FINE_ZONE`` when ``c > 1``), and below the
+    last node the power law ``S ~ d^beta`` where ``c t_L`` is at most
+    ``TAIL_POWER_LAW_LIMIT``, else the exact survival (spec section 5A;
+    the same node sequence as the Rust engine, bitwise).
 
     Notes
     -----
@@ -320,11 +323,22 @@ def _tail_survival(m: float, a: float, b: float, xk: float, s: float,
     the tail joins the curve bitwise.
     """
     d0 = m - xk
-    count = 2 * max(1, int(math.ceil(math.log2(d0 / min_distance)))) + 1
-    d = d0 * np.power(0.5, np.arange(count, dtype=np.float64) / 2.0)
+    c = (a - 1.0) * b / (b + 1.0)
+    ks = [0]
+    while True:
+        d_k = d0 * 0.5 ** (ks[-1] / 4.0)
+        if d_k <= min_distance and len(ks) >= 3:
+            break
+        if not (betaincc(a, b, 1.0 - d_k / m) > 0.0) and ks[-1] > 0:
+            break   # the survival underflowed: the ladder ends here
+        ct = c * d_k / m
+        ks.append(ks[-1] + (1 if c > 1.0 and TAIL_FINE_ZONE[0] <= ct <= TAIL_FINE_ZONE[1] else 2))
+    d = d0 * np.power(0.5, np.array(ks, dtype=np.float64) / 4.0)
     y = 1.0 - d / m
     surv = betaincc(a, b, y)
     surv[0] = s
+    positive = surv > 0.0
+    asymptotic = (c * d[positive][-1] / m <= TAIL_POWER_LAW_LIMIT) if positive.any() else True
     ln_b = betaln(a, b)
     with np.errstate(divide="ignore", invalid="ignore"):
         log_surv = np.log(surv)
@@ -342,12 +356,14 @@ def _tail_survival(m: float, a: float, b: float, xk: float, s: float,
     inside = dist > 0.0
     uq = np.log(dist[inside])
     res = np.empty(uq.shape)
-    if u.size == 1:
-        # One node: the power law alone.
-        res[:] = g[0] + b * (uq - u[0])
-    else:
-        below = uq < u[0]
+    below = (uq < u[0]) if u.size > 1 else np.ones(uq.shape, dtype=bool)
+    if asymptotic:
         res[below] = g[0] + b * (uq[below] - u[0])
+    else:
+        # The power law does not hold yet: the exact survival instead.
+        with np.errstate(divide="ignore"):
+            res[below] = np.log(betaincc(a, b, 1.0 - dist[inside][below] / m))
+    if u.size > 1:
         q = ~below
         k = np.clip(np.searchsorted(u, uq[q], side="right") - 1, 0, u.size - 2)
         du = u[k + 1] - u[k]

@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.3.6] - 2026-10-26
+
+### Fixed
+
+- [tails] The endpoint tail's power law below its last ladder node is used only where the endpoint expansion's first correction `c t`, with `c = (alpha - 1) beta / (beta + 1)`, is at most 1e-6 there; otherwise the one bucket edge that can lie below the node is evaluated exactly. The pure power law's relative error is `c t`, 0.17 on Beta(1e6, 1/2) at an edge 5e-7 below the exposed value, where the grid put 0.054 of the event's rate above the edge against an exact 0.683 (peer review, finding A2). Both backends.
+- Where `c > 1` and `c t` lies between 1e-2 and 1e2 the ladder steps by 2^(1/4) instead of sqrt(2): the cubic in log distance was off by 3e-4 at beta = 5 there, 2e-5 now. Small-alpha events (`c < 1`) are untouched.
+- The survival goldens are regenerated: the fix moves the medium golden by up to 3e-6 of the total rate (the top bucket below the exposed value of its bell-shaped events, where the power law was extrapolated from a quarter bucket away) and the small golden by 4e-8; on the medium fixture's beta rows the tail sums are now within 4.9e-5 of the exact exceedance at every bucket edge. The quantiles goldens' metadata gain the `narrow_events` key they lacked, and the multi-unit golden moves by 4e-16 relative (rounding of the regeneration).
+
 ## [2.3.5] - 2026-10-25
 
 ### Fixed
