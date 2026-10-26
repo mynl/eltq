@@ -922,6 +922,8 @@ def multiunit_views_reference(
     clamp_factor=DEFAULT_CLAMP_FACTOR,
     roll_up_diagnostic=False,
     coupling="burke",
+    pair=None,
+    first_moments=False,
 ):
     """Total event severity by view for a multi-unit ELT; return ``(views, meta)``.
 
@@ -967,12 +969,25 @@ def multiunit_views_reference(
         marginals, exact, and ``homer`` the rolled row bucketed directly and
         pushed through the composed allocation map per view (uncapped, as
         published), both with no factor rule.
+    pair : tuple of two unit ids, optional
+        Also return the rate-weighted joint occurrence severity of the two
+        units for the first view in ``views`` (spec section 4A): an event
+        exposing one of them puts the other at zero, one exposing neither
+        contributes nothing.
+    first_moments : bool
+        Also return, for every unit, the rate-weighted first-moment vector
+        ``m_u(y) = sum_j lambda_j P(X_uj; X_j = y)`` on the grid of the first
+        view's total.
 
     Returns
     -------
     views : dict[str, numpy.ndarray]
         View name -> length-n float64 rate-weight array on the grid i * h.
     meta : MultiMeta
+    extras : dict
+        Only when ``pair`` or ``first_moments`` is requested: ``"pair"`` is
+        ``(pmf, x_u, x_w, rate, events)`` and ``"first_moments"`` is ``(dict
+        unit id -> array, identity_error)``.
     """
     event_id = np.asarray(event_id, dtype=object)
     unit_id = np.asarray(unit_id, dtype=object)
@@ -1024,6 +1039,7 @@ def multiunit_views_reference(
     # Summing supports in money first undercounts off-grid supports.
     ranges = _events(event_id)
     preps: list[_Prepped | None] = [None] * n_rows
+    reach: dict[str, float] = {}
     event_span = np.zeros(len(ranges), dtype=np.int64)
     event_live = np.zeros(len(ranges), dtype=bool)
     rates = columns["rate"]
@@ -1052,6 +1068,7 @@ def multiunit_views_reference(
         span = 0
         live_rows = 0
         exposure = 0.0
+        mean_sum = 0.0
         for j in range(start, end):
             unit = Unit(columns["mean_loss"][j], columns["sd_indep"][j],
                         columns["sd_corr"][j], columns["max_loss"][j])
@@ -1063,11 +1080,20 @@ def multiunit_views_reference(
             valid_rows += 1
             live_rows += 1
             exposure += unit.max_loss
+            mean_sum += prep.mean_loss
             span += grid_length_for(prep.support, h) - 1
+            uid = str(unit_id[j])
+            reach[uid] = max(reach.get(uid, 0.0), prep.support)
         # Under homer the rolled row's beta reaches the summed exposures,
-        # beyond the supports of any atoms among the units.
+        # beyond the supports of any atoms among the units, and each unit's
+        # allocation its share of them.
         if coupling == "homer" and live_rows >= 2:
             span = max(span, grid_length_for(exposure, h) - 1)
+            if mean_sum > 0.0:
+                for j in range(start, end):
+                    if preps[j] is not None:
+                        uid = str(unit_id[j])
+                        reach[uid] = max(reach[uid], preps[j].mean_loss / mean_sum * exposure)
         if any(preps[j] is not None for j in range(start, end)):
             event_live[e] = True
             event_span[e] = span
@@ -1092,6 +1118,16 @@ def multiunit_views_reference(
 
     # Pass 2: per-event pipeline, rate-weighted accumulation.
     out = {view: np.zeros(n) for view in views}
+    if pair is not None:
+        pair = tuple(str(u) for u in pair)
+        if len(pair) != 2:
+            raise EltqError(f"pair must name two units, got {pair}")
+        pair_n = tuple(grid_length_for(reach.get(u, 0.0), h) for u in pair)
+        pair_pmf = np.zeros(pair_n)
+        pair_rate_terms: list[float] = []
+        pair_events = 0
+    moments = {uid: np.zeros(n) for uid in unit_order} if first_moments else None
+    identity_error = 0.0
     rate_terms: list[float] = []
     aal_terms: list[float] = []
     analytic_terms = {view: [] for view in views}
@@ -1163,6 +1199,21 @@ def multiunit_views_reference(
                                     for (_, p), t in zip(live, unit_terms_list)))
         if roll_up is not None and len(live) >= 2:
             roll_up.append(_roll_up_entry(eid, live, columns, conds, weights, h))
+        if pair is not None or moments is not None:
+            _occurrence_outputs(
+                views[0], live, unit_id, unit_terms_list, conds, weights, h, lam,
+                exact_path and coupling == "homer", exact_path,
+                (rolled_prep, shares) if exact_path and coupling == "homer" else None,
+                pair, pair_pmf if pair is not None else None, moments,
+            )
+            if pair is not None and any(str(unit_id[j]) in pair for j, _ in live):
+                pair_rate_terms.append(lam)
+                pair_events += 1
+            if moments is not None:
+                identity_error = max(identity_error, lam * _moment_identity_error(
+                    views[0], live, unit_id, unit_terms_list, conds, weights, h,
+                    exact_path and coupling == "homer", exact_path,
+                    (rolled_prep, shares) if exact_path and coupling == "homer" else None))
 
     total_rate = math.fsum(rate_terms)
     if normalize:
@@ -1170,6 +1221,11 @@ def multiunit_views_reference(
             raise EltqError("cannot normalize: total contributing rate is zero")
         for view in views:
             out[view] /= total_rate
+        if pair is not None:
+            pair_pmf /= total_rate
+        if moments is not None:
+            for m in moments.values():
+                m /= total_rate
     grid = h * np.arange(n)
     scale = total_rate if normalize else 1.0
     view_mass = {view: float(out[view].sum()) for view in views}
@@ -1202,7 +1258,153 @@ def multiunit_views_reference(
         diagnostics=diagnostics,
         roll_up=roll_up,
     )
-    return out, meta
+    if pair is None and moments is None:
+        return out, meta
+    extras = {}
+    if pair is not None:
+        extras["pair"] = (pair_pmf, h * np.arange(pair_n[0]), h * np.arange(pair_n[1]),
+                          math.fsum(pair_rate_terms), pair_events)
+    if moments is not None:
+        extras["first_moments"] = (moments, identity_error)
+    return out, meta, extras
+
+
+def _first_view_rows(view, live, unit_terms_list, conds, h, homer):
+    """Per unit of the event, its rows for the view: the view maps of its
+    conditional rows, or under homer its allocation values at the rolled
+    nodes (``None`` for the rows, the values returned second)."""
+    if homer is not None:
+        rolled_prep, shares = homer
+        n_r = grid_length_for(rolled_prep.support, h)
+        base = marginal_pmf(rolled_prep, h, n_r)
+        x = h * np.arange(n_r)
+        values = [t.view(view, s * x) if s > 0.0 else np.zeros(n_r) for t, s in zip(unit_terms_list, shares)]
+        return None, (base, values)
+    return [_view_transform(c, h, t, view) for c, t in zip(conds, unit_terms_list)], None
+
+
+def _occurrence_outputs(view, live, unit_id, unit_terms_list, conds, weights, h, lam, homer_path,
+                        exact_path, homer, pair, pair_pmf, moments):
+    """Add one event's rate-weighted contribution to the pair joint and to
+    the first-moment vectors of the first view (spec section 4A)."""
+    uids = [str(unit_id[j]) for j, _ in live]
+    rows, homer_values = _first_view_rows(view, live, unit_terms_list, conds, h, homer)
+    inv_h = 1.0 / h
+    if homer_path:
+        base, values = homer_values
+        if pair is not None:
+            iu = uids.index(pair[0]) if pair[0] in uids else None
+            iw = uids.index(pair[1]) if pair[1] in uids else None
+            if iu is not None or iw is not None:
+                for i, p in enumerate(base):
+                    if p == 0.0:
+                        continue
+                    row_u, row_w = np.zeros(pair_pmf.shape[0]), np.zeros(pair_pmf.shape[1])
+                    _deposit(row_u, values[iu][i] if iu is not None else 0.0, 1.0, inv_h)
+                    _deposit(row_w, values[iw][i] if iw is not None else 0.0, 1.0, inv_h)
+                    pair_pmf += lam * p * np.outer(row_u, row_w)
+        if moments is not None:
+            # Each rolled bucket's mass at the two deposit nodes of the view
+            # total, split among the units by their allocation values' shares
+            # of it, so that the moments at a node sum to the node's loss
+            # times its mass as the total's own deposit has it.
+            total = sum(values)
+            grid = h * np.arange(moments[uids[0]].size)
+            for i, p in enumerate(base):
+                if p == 0.0 or total[i] <= 0.0:
+                    continue
+                split = np.zeros(grid.size)
+                _deposit(split, float(total[i]), 1.0, inv_h)
+                for uid, v in zip(uids, values):
+                    moments[uid] += lam * p * (v[i] / total[i]) * split * grid
+        return
+    if exact_path:
+        marginals = [r[0] for r in rows]
+        if pair is not None:
+            iu = uids.index(pair[0]) if pair[0] in uids else None
+            iw = uids.index(pair[1]) if pair[1] in uids else None
+            if iu is not None or iw is not None:
+                def deposit_pair(indices, mass):
+                    a = indices[iu] if iu is not None else 0
+                    b = indices[iw] if iw is not None else 0
+                    pair_pmf[a, b] += lam * mass
+
+                comonotone_merge(marginals, deposit_pair)
+        if moments is not None:
+            def deposit_moments(indices, mass):
+                y = sum(indices)
+                for uid, k in zip(uids, indices):
+                    moments[uid][y] += lam * mass * k * h
+
+            comonotone_merge(marginals, deposit_moments)
+        return
+    # The factor path (one-unit events included, with their single row).
+    if pair is not None:
+        iu = uids.index(pair[0]) if pair[0] in uids else None
+        iw = uids.index(pair[1]) if pair[1] in uids else None
+        if iu is not None or iw is not None:
+            def rows_of(i, q):
+                if i is None:
+                    return np.ones(1)
+                r = rows[i]
+                return r[0] if r.shape[0] == 1 else r[q]
+
+            for q, w in enumerate(weights):
+                ru, rw = rows_of(iu, q), rows_of(iw, q)
+                pair_pmf[:ru.size, :rw.size] += lam * w * np.outer(ru, rw)
+    if moments is not None:
+        for q, w in enumerate(weights):
+            per_unit = [r[0] if r.shape[0] == 1 else r[q] for r in rows]
+            for i, uid in enumerate(uids):
+                others = np.ones(1)
+                for k, r in enumerate(per_unit):
+                    if k != i:
+                        others = np.convolve(others, r)
+                x_row = h * np.arange(per_unit[i].size) * per_unit[i]
+                m = np.convolve(x_row, others)
+                moments[uid][:m.size] += lam * w * m
+
+
+def _moment_identity_error(view, live, unit_id, unit_terms_list, conds, weights, h, homer_path,
+                           exact_path, homer):
+    """``max_y |sum_u m_u(y) - y p(y)|`` for one event (unit rate), with
+    ``p`` the event's own pmf of the view."""
+    rows, homer_values = _first_view_rows(view, live, unit_terms_list, conds, h, homer)
+    if homer_path:
+        base, values = homer_values
+        total = sum(values)
+        n = int(math.ceil(float(total.max()) / h)) + 2
+        pmf = np.zeros(n)
+        inv_h = 1.0 / h
+        for i, p in enumerate(base):
+            if p == 0.0:
+                continue
+            _deposit(pmf, float(total[i]), p, inv_h)
+        # The moments are split at the deposit nodes by the allocations'
+        # shares of the node's loss, so the identity holds by construction.
+        weighted = h * np.arange(n) * pmf
+    elif exact_path:
+        marginals = [r[0] for r in rows]
+        pmf = comonotone_sum(marginals)
+        weighted = np.zeros(pmf.size)
+
+        def deposit(indices, mass):
+            weighted[sum(indices)] += mass * sum(indices) * h
+
+        comonotone_merge(marginals, deposit)
+    else:
+        pmf = _event_pmf(rows, weights)
+        weighted = np.zeros(pmf.size)
+        for q, w in enumerate(weights):
+            per_unit = [r[0] if r.shape[0] == 1 else r[q] for r in rows]
+            for i in range(len(per_unit)):
+                others = np.ones(1)
+                for k, r in enumerate(per_unit):
+                    if k != i:
+                        others = np.convolve(others, r)
+                m = np.convolve(h * np.arange(per_unit[i].size) * per_unit[i], others)
+                weighted[:m.size] += w * m
+    return float(np.abs(weighted - h * np.arange(pmf.size) * pmf).max())
 
 
 def _roll_up_entry(eid, live, columns, conds, z_weights, h):

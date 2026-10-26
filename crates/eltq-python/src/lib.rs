@@ -593,7 +593,8 @@ type TermsSpec = Vec<(String, f64, f64, Vec<(f64, f64, f64)>)>;
     max_loss, *, terms, bucket_size, grid_length=None, z_nodes=32,
     z_rule="stratified", views=None, normalize=false, variance_policy="bernoulli",
     clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
-    chunk_rows=None, roll_up_diagnostic=false, convolution="auto", coupling="burke"))]
+    chunk_rows=None, roll_up_diagnostic=false, convolution="auto", coupling="burke",
+    pair=None, first_moments=false))]
 #[allow(clippy::too_many_arguments)]
 fn multiunit_views<'py>(
     py: Python<'py>,
@@ -618,7 +619,9 @@ fn multiunit_views<'py>(
     roll_up_diagnostic: bool,
     convolution: &str,
     coupling: &str,
-) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+    pair: Option<(usize, usize)>,
+    first_moments: bool,
+) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>, Bound<'py, PyDict>)> {
     let err = |e: CoreError| to_py_err(py, e);
     let mut config = MultiConfig::new(bucket_size);
     config.grid_length = grid_length;
@@ -639,6 +642,8 @@ fn multiunit_views<'py>(
     config.roll_up_diagnostic = roll_up_diagnostic;
     config.convolution = Convolution::parse(convolution).map_err(err)?;
     config.coupling = Coupling::parse(coupling).map_err(err)?;
+    config.pair = pair.map(|(u, w)| [u, w]);
+    config.first_moments = first_moments;
     let terms: Vec<UnitTerms> = terms
         .into_iter()
         .map(|(unit_id, limit, ded, clauses)| {
@@ -673,6 +678,16 @@ fn multiunit_views<'py>(
     let views_dict = PyDict::new(py);
     for (name, array) in names.iter().zip(result.views) {
         views_dict.set_item(name, array.into_pyarray(py))?;
+    }
+    // Occurrence outputs (2.9.0), when requested.
+    let extras = PyDict::new(py);
+    if let Some(p) = result.pair {
+        let pmf = p.pmf.into_pyarray(py).reshape([p.n_u, p.n_w])?;
+        extras.set_item("pair", (pmf, p.n_u, p.n_w, p.rate, p.events))?;
+    }
+    if let Some(m) = result.first_moments {
+        let arrays: Vec<Bound<'py, PyArray1<f64>>> = m.moments.into_iter().map(|v| v.into_pyarray(py)).collect();
+        extras.set_item("first_moments", (arrays, m.identity_error))?;
     }
     let per_view = |values: &[f64]| -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -737,7 +752,7 @@ fn multiunit_views<'py>(
     engine.set_item("fft_paths", meta.fft_paths)?;
     engine.set_item("convolution", config.convolution.as_str())?;
     dict.set_item("engine", engine)?;
-    Ok((views_dict, dict))
+    Ok((views_dict, dict, extras))
 }
 
 #[pymodule]

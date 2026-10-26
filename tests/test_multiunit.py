@@ -17,11 +17,13 @@ from eltq import reference_multiunit as rm
 from eltq.terms import parse_terms_line
 
 from conftest import (
+    MULTI_COLUMNS,
     MULTI_IMPLS,
     diag_count,
     load_joint_golden,
     load_multi_fixture,
     load_multi_golden,
+    multi_rows,
     run_multi,
 )
 
@@ -808,6 +810,236 @@ def test_coupling_errors_and_echo(multi):
         multi.joint(U1, U2, bucket_size=H, n1=N1, n2=N2, coupling="gumbel")
     _, meta = run_multi(multi, rows, bucket_size=H)
     assert meta.coupling == "burke" and meta.homer_excess_mean is None
+
+
+# ---------------------------------------------------------------------------
+# [joint] spec test 29: the occurrence outputs (2.9.0).
+
+def run_pair(impl, elt, units, **params):
+    """The pair joint on either backend: ``(pmf, x_u, x_w, mass, events)``."""
+    cols = multi_rows(elt) if isinstance(elt, list) else {
+        c: (elt[c].to_numpy(dtype=np.float64) if c not in ("event_id", "unit_id")
+            else list(elt[c].astype(str))) for c in MULTI_COLUMNS}
+    if impl.name == "reference":
+        view = params.pop("view", "ground_up")
+        _, _, extras = rm.multiunit_views_reference(*(cols[c] for c in MULTI_COLUMNS), views=(view,),
+                                                     pair=units, **params)
+        return extras["pair"]
+    import eltq
+
+    pmf, x_u, x_w, meta = eltq.occurrence_pair_joint(*(cols[c] for c in MULTI_COLUMNS), units=units,
+                                                     **params)
+    return pmf, x_u, x_w, meta.mass, meta.events
+
+
+def run_moments(impl, elt, **params):
+    """The first-moment vectors on either backend: ``(dict, x, identity_error)``."""
+    cols = multi_rows(elt) if isinstance(elt, list) else {
+        c: (elt[c].to_numpy(dtype=np.float64) if c not in ("event_id", "unit_id")
+            else list(elt[c].astype(str))) for c in MULTI_COLUMNS}
+    if impl.name == "reference":
+        view = params.pop("view", "ground_up")
+        _, meta, extras = rm.multiunit_views_reference(*(cols[c] for c in MULTI_COLUMNS), views=(view,),
+                                                        first_moments=True, **params)
+        moments, identity = extras["first_moments"]
+        return moments, params.get("bucket_size") * np.arange(meta.grid_length), identity
+    import eltq
+
+    moments, x, meta = eltq.occurrence_unit_first_moment(*(cols[c] for c in MULTI_COLUMNS), **params)
+    return moments, x, meta.identity_error
+
+
+def antidiagonal_sums(pmf):
+    n1, n2 = pmf.shape
+    idx = np.add.outer(np.arange(n1), np.arange(n2)).ravel()
+    return np.bincount(idx, weights=pmf.ravel(), minlength=n1 + n2 - 1)
+
+
+@pytest.mark.parametrize("coupling", ["burke", "comonotone", "independent", "homer"])
+def test_pair_joint_marginals_and_antidiagonals(multi, coupling):
+    # A two-unit portfolio (Homer's table): the marginals of S_uw are each
+    # unit's own occurrence severity and the antidiagonal sums the total of
+    # the same run; under homer the units are the rolled row's allocations,
+    # so the first identity is checked against the pair's own marginals.
+    rows = homer_rows()
+    pmf, x_u, x_w, mass, events = run_pair(multi, rows, ("P", "C"), bucket_size=H, coupling=coupling)
+    assert events == 3 and math.isclose(mass, 0.7, rel_tol=1e-12)
+    total, meta = run_multi(multi, rows, bucket_size=H, views=("ground_up",), coupling=coupling)
+    anti = antidiagonal_sums(pmf)
+    n = min(anti.size, meta.grid_length)
+    x_t = H * np.arange(anti.size)
+    if coupling == "homer":
+        # The two allocations of a rolled bucket are deposited on their own
+        # axes, so their index sum spreads the total by up to a bucket; the
+        # mass and the mean agree.
+        assert math.isclose(anti.sum(), total["ground_up"].sum(), rel_tol=1e-12)
+        assert math.isclose(anti @ x_t, meta.view_mean["ground_up"], rel_tol=1e-10)
+        assert np.abs(np.cumsum(anti[:n]) - np.cumsum(total["ground_up"][:n])).max() < 2e-2 * mass
+    else:
+        assert np.abs(anti[:n] - total["ground_up"][:n]).max() < 1e-12 * mass
+        assert abs(anti[n:].sum()) + abs(total["ground_up"][n:].sum()) < 1e-12 * mass
+    if coupling != "homer":
+        for unit, axis, x in (("P", 1, x_u), ("C", 0, x_w)):
+            alone, m_alone = run_multi(multi, [r for r in rows if r[1] == unit], bucket_size=H,
+                                       views=("ground_up",), coupling=coupling)
+            marginal = pmf.sum(axis=axis)
+            k = min(marginal.size, m_alone.grid_length)
+            assert np.abs(marginal[:k] - alone["ground_up"][:k]).max() < 1e-12 * mass, unit
+
+
+def test_pair_joint_with_terms_and_absent_units(multi):
+    # Three units, the pair's view after terms; e2 exposes a but not b (b at
+    # zero), e3 exposes neither (nothing), so the mass is the rate of e1
+    # and e2.
+    rows = [("e1", "a", 0.01, *U1), ("e1", "b", 0.01, *U2), ("e1", "c", 0.01, 300.0, 50.0, 100.0, 800.0),
+            ("e2", "a", 0.02, 250.0, 0.0, 200.0, 1000.0), ("e2", "c", 0.02, 100.0, 120.0, 0.0, 500.0),
+            ("e3", "c", 0.005, 400.0, 80.0, 60.0, 1200.0)]
+    terms = [TOWER, "unit b 1000 xs 0 occurrence net of 100 po 400 xs 100"]
+    pmf, x_u, x_w, mass, events = run_pair(multi, rows, ("a", "b"), view="gross", terms=terms,
+                                           bucket_size=H)
+    assert events == 2 and math.isclose(mass, 0.03, rel_tol=1e-12)
+    assert math.isclose(pmf.sum(), mass, rel_tol=1e-12)
+    # e2's contribution sits in column 0 (b absent) and is a's gross view,
+    # the marginal of a's conditional rows (unit c marginalizes out), which
+    # a alone in e2 gives directly.
+    only_a, m_a = run_multi(multi, rows[3:4], terms=terms, bucket_size=H, views=("gross",))
+    pmf_e1, _, _, _, _ = run_pair(multi, rows[:3], ("a", "b"), view="gross", terms=terms, bucket_size=H)
+    assert pmf_e1.shape == pmf.shape
+    column0 = pmf[:, 0] - pmf_e1[:, 0]
+    k = min(column0.size, m_a.grid_length)
+    assert np.abs(column0[:k] - only_a["gross"][:k]).max() < 1e-12 * mass
+    # The gross view of a never exceeds its limit of 750 and b's its 1000.
+    assert x_u[np.nonzero(pmf.sum(axis=1))[0][-1]] <= 750.0
+    assert x_w[np.nonzero(pmf.sum(axis=0))[0][-1]] <= 1000.0
+
+
+@pytest.mark.parametrize("coupling", ["burke", "comonotone", "homer"])
+def test_first_moments_identity_and_backends(multi, coupling):
+    df, terms = load_multi_fixture()
+    for view in ("ground_up", "net"):
+        moments, x, identity = run_moments(multi, df, view=view, terms=terms, bucket_size=H,
+                                           coupling=coupling)
+        total, meta = run_multi(multi, df, terms=terms, bucket_size=H, views=(view,), coupling=coupling)
+        s = total[view]
+        summed = sum(moments.values())
+        assert set(moments) == set(meta.unit_ids)
+        assert np.abs(summed - x * s).max() < 1e-10 * meta.analytic_view_mean[view], (view, coupling)
+        assert identity < 1e-10 * meta.analytic_view_mean[view]
+        assert math.isclose(summed.sum(), meta.view_mean[view], rel_tol=1e-10)
+        assert all(m.min() >= -1e-15 * meta.analytic_view_mean[view] for m in moments.values())
+
+
+def test_occurrence_outputs_agree_across_backends():
+    reference, package = MULTI_IMPLS
+    df, terms = load_multi_fixture()
+    for coupling in ("burke", "comonotone", "homer"):
+        want = run_pair(reference, df, ("a", "b"), view="gross", terms=terms, bucket_size=H, coupling=coupling)
+        got = run_pair(package, df, ("a", "b"), view="gross", terms=terms, bucket_size=H, coupling=coupling)
+        assert got[0].shape == want[0].shape
+        assert np.abs(got[0] - want[0]).max() < 1e-12 * want[3], coupling
+        assert math.isclose(got[3], want[3], rel_tol=1e-12) and got[4] == want[4]
+        m_want, _, _ = run_moments(reference, df, terms=terms, bucket_size=H, coupling=coupling)
+        m_got, _, _ = run_moments(package, df, terms=terms, bucket_size=H, coupling=coupling)
+        for unit in m_want:
+            assert np.abs(m_got[unit] - m_want[unit]).max() < 1e-12 * sum(m.sum() for m in m_want.values()), (unit, coupling)
+
+
+def poisson_compound(severity, h, size):
+    """The annual density of a compound Poisson with rate-weighted severity
+    ``severity`` on the grid, by FFT with zero padding to ``size``."""
+    rate = severity.sum()
+    spectrum = np.fft.rfft(severity, size)
+    return np.fft.irfft(np.exp(spectrum - rate), size)
+
+
+def test_annual_conditional_mean_sums_to_the_total(multi):
+    # The Mecke identity: kappa_u from the first-moment vectors and a numpy
+    # compound Poisson of the view's severity; the kappa sum to the total
+    # wherever the annual density is at least 1e-12.
+    rows = homer_rows()
+    import eltq
+
+    moments, x, identity = run_moments(multi, rows, bucket_size=H)
+    total, meta = run_multi(multi, rows, bucket_size=H, views=("ground_up",))
+    # A 2^16 grid: the compound of a severity reaching 17,000 wraps on a
+    # smaller one, and the identity cannot hold against a wrapped density.
+    f_a = poisson_compound(total["ground_up"], H, 1 << 16)
+    kappa = eltq.annual_conditional_mean(moments, f_a)
+    s = H * np.arange(f_a.size)
+    # Dividing by f_A amplifies the convolution's absolute rounding (about
+    # 1e-16 of the total mean), so the identity is read where f_A >= 1e-7.
+    live = f_a >= 1e-7
+    assert np.abs(sum(kappa.values())[live] - s[live]).max() < 1e-8 * s[live].max()
+    assert np.all(np.isnan(kappa["P"][~(f_a > 0.0)])) if (~(f_a > 0.0)).any() else True
+    # The personal line's share of a small total: event 1's commercial line
+    # at its two-point atom of 1,000 means the personal share near 1,000 is
+    # well below one half (the article's reading of its figure).
+    near = int(1000 / H)
+    assert kappa["P"][near] < 0.5 * s[near]
+    # One unit returns one array.
+    one = eltq.annual_conditional_mean(moments["P"], f_a)
+    assert np.array_equal(np.nan_to_num(one), np.nan_to_num(kappa["P"]))
+
+
+def _aggregate():
+    try:
+        import aggregate  # noqa: F401
+        from aggregate.bivariate import BivariateAggregate
+    except ImportError:
+        pytest.skip("the handoff tests need the aggregate package")
+    return BivariateAggregate
+
+
+def test_handoff_route_two_against_route_three():
+    # Route 2 (the two-dimensional compound of S_uw under the pair's own
+    # Poisson count) summed along its antidiagonals equals route 3 (the
+    # one-dimensional compound of the total), within the aggregate package's
+    # grid tolerance (the article reaches 1e-10).
+    BivariateAggregate = _aggregate()
+    import eltq
+
+    rows = homer_rows()
+    cols = multi_rows(rows)
+    pmf, x_u, x_w, meta = eltq.occurrence_pair_joint(*(cols[c] for c in MULTI_COLUMNS), units=("P", "C"),
+                                                     bucket_size=H)
+    total, _ = eltq.multiunit_views(*(cols[c] for c in MULTI_COLUMNS), bucket_size=H, views=("ground_up",))
+    bv = BivariateAggregate("route 2", mode="discrete", dbv_xs=x_u, dbv_ys=x_w, dbv_S=pmf / meta.mass,
+                            freq_name="poisson", exp_en=meta.mass)
+    bv.update(log2=(11, 11), bs=(H, H))
+    annual_joint = np.asarray(bv.density)
+    route2 = antidiagonal_sums(annual_joint)
+    route3 = poisson_compound(total["ground_up"], H, 4096)
+    n = min(route2.size, route3.size, 2048)
+    assert np.abs(np.cumsum(route2[:n]) - np.cumsum(route3[:n])).max() < 1e-9
+
+
+def test_annual_conditional_mean_against_exeqa():
+    # kappa_u by the Mecke identity against exeqa_df of the two-dimensional
+    # compound of the sheared S_uw, where the two-dimensional grid does not
+    # wrap.
+    BivariateAggregate = _aggregate()
+    import eltq
+
+    rows = homer_rows()
+    cols = multi_rows(rows)
+    pmf, x_u, x_w, meta = eltq.occurrence_pair_joint(*(cols[c] for c in MULTI_COLUMNS), units=("P", "C"),
+                                                     bucket_size=H)
+    n_u, n_w = pmf.shape
+    sheared = np.zeros((n_u, n_u + n_w - 1))
+    for a in range(n_u):
+        sheared[a, a:a + n_w] = pmf[a]
+    x_t = H * np.arange(n_u + n_w - 1)
+    bv = BivariateAggregate("sheared", mode="discrete", dbv_xs=x_u, dbv_ys=x_t, dbv_S=sheared / meta.mass,
+                            freq_name="poisson", exp_en=meta.mass)
+    bv.update(log2=(10, 11), bs=(H, H))
+    kappa_df = bv.exeqa_df(axis=1)
+    moments, x, _ = run_moments(MULTI_IMPLS[1], rows, bucket_size=H)
+    total, _ = eltq.multiunit_views(*(cols[c] for c in MULTI_COLUMNS), bucket_size=H, views=("ground_up",))
+    f_a = poisson_compound(total["ground_up"], H, 2048)
+    kappa = eltq.annual_conditional_mean(moments["P"], f_a)
+    kd = kappa_df[(kappa_df.p > 1e-9) & (kappa_df.index < 4000)]
+    index = (kd.index.to_numpy() / H).round().astype(int)
+    assert np.abs(kappa[index] - kd.exeqa_X.to_numpy()).max() < 1e-6 * 4000
 
 
 # ---------------------------------------------------------------------------

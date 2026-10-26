@@ -50,4 +50,4 @@ pub use multiunit::{Coupling, JointConfig, JointMeta, JointResult, UnitKind, Uni
 pub use quadrature::{FactorRule, ZRule, z_quadrature};
 pub use quantize::{Classified, EltInput, classify_rows, quantize};
 pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};
-pub use views::{Convolution, MultiConfig, MultiInput, MultiMeta, MultiResult, RollUpEntry, multiunit_views};
+pub use views::{Convolution, FirstMoments, MultiConfig, MultiInput, MultiMeta, MultiResult, PairResult, RollUpEntry, multiunit_views};

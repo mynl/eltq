@@ -96,6 +96,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [z-rule] the stratified factor rule with a tail ladder is the default: exact marginals, the event total's tail within 7e-3; the bivariate normal in the engine; the convergence study with tail metrics | 2.6.0 | done |
 | [one-unit] events with one contributing unit bucketed directly, outside the mixture; `one_unit_events` | 2.7.0 | done |
 | [coupling] `coupling=` burke, comonotone, independent, homer; the comonotone and Homer paths exact with no factor rule; the Homer allocation uncapped with `homer_excess_mean` | 2.8.0 | done |
+| [joint] `occurrence_pair_joint`, `occurrence_unit_first_moment` and `annual_conditional_mean`: the joint aggregate route's inputs and the conditional means by the Mecke identity | 2.9.0 | done |
 
 ## Layout
 
@@ -283,6 +284,18 @@ views, meta = eltq.multiunit_views(
 pmf, x1, x2, meta = eltq.joint_two_units(
     (mu1, sd_i1, sd_c1, M1), (mu2, sd_i2, sd_c2, M2),
     *, bucket_size, n1, n2, z_nodes=32, z_rule="stratified", coupling="burke")
+
+# The joint aggregate route's inputs (2.9.0): the rate-weighted joint
+# occurrence severity of two units for a view, and every unit's first-moment
+# vector at each total, from which the annual conditional mean of a unit given
+# the portfolio total is a one-dimensional convolution (Mecke identity).
+pmf, x_u, x_w, meta = eltq.occurrence_pair_joint(
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+    *, units=("u", "w"), view="ground_up", terms, bucket_size)
+moments, x, meta = eltq.occurrence_unit_first_moment(
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+    *, view="ground_up", terms, bucket_size)      # dict unit -> m_u(y)
+kappa = eltq.annual_conditional_mean(moments, annual_density)   # f_A from the caller
 ```
 
 Rows of one event must be contiguous with one row per unit and a constant

@@ -223,6 +223,53 @@ class JointMeta:
 
 
 @dataclass
+class PairMeta:
+    """Metadata of the rate-weighted joint occurrence severity of two units
+    (spec section 4A, bivariate outputs): ``pmf[j, k]`` is the rate at which
+    an occurrence loses ``x_u[j]`` on the first unit and ``x_w[k]`` on the
+    second, for the view. ``mass`` is the rate of the events exposing either
+    unit, the Poisson rate of the pair's own occurrences (an event exposing
+    neither contributes nothing); the grid moments are those of ``pmf /
+    mass``."""
+
+    bucket_size: float
+    units: tuple
+    view: str
+    coupling: str
+    z_nodes: int
+    z_rule: str
+    z_strata: int
+    grid_lengths: tuple
+    mass: float
+    events: int
+    grid_mean: tuple
+    grid_sd: tuple
+    grid_correlation: float
+
+
+@dataclass
+class FirstMomentMeta:
+    """Metadata of the rate-weighted first-moment vectors ``m_u(y) = sum_j
+    lambda_j P(X_uj; X_j = y)`` on the grid of the view's total (spec
+    section 4A): ``sum_u m_u(y) = y s(y)`` with ``s`` the view's severity,
+    whose largest violation over the grid, rate-weighted and in loss units,
+    is ``identity_error``."""
+
+    bucket_size: float
+    grid_length: int
+    units: tuple
+    view: str
+    coupling: str
+    z_nodes: int
+    z_rule: str
+    z_strata: int
+    total_rate: float
+    identity_error: float
+    #: ``sum_u sum_y m_u(y)``, the rate-weighted mean of the view's total.
+    total_mean: float
+
+
+@dataclass
 class MultiMeta:
     """Metadata and diagnostics accompanying the per-view grid distributions.
 

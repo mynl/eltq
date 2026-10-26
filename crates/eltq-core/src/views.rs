@@ -41,9 +41,9 @@ use crate::convolve::{FftCache, convolve_direct, fft_cost, fft_size};
 use crate::diagnostics::{Category, Diagnostics, MAX_EXAMPLES};
 use crate::error::Error;
 use crate::multiunit::{
-    Coupling, LayerMeans, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, comonotone_sum,
-    conditional_matrix, grid_length_for, homer_excess, homer_view_values, marginal_pmf, prepare_unit, rolled_spec,
-    terms_on_rolled,
+    Coupling, LayerMeans, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, comonotone_merge,
+    comonotone_sum, conditional_matrix, grid_length_for, homer_excess, homer_view_values, marginal_pmf, prepare_unit,
+    rolled_spec, terms_on_rolled,
 };
 use crate::quadrature::{FactorRule, ZRule};
 use crate::sum::{Neumaier, grid_moment, sum};
@@ -152,6 +152,12 @@ pub struct MultiConfig {
     pub convolution: Convolution,
     /// The coupling rule of spec section 4A.
     pub coupling: Coupling,
+    /// Occurrence outputs (2.9.0, spec section 4A): the rate-weighted joint
+    /// occurrence severity of two units (by code) and the rate-weighted
+    /// first-moment vectors of every unit, both for the first view in
+    /// `views`.
+    pub pair: Option<[usize; 2]>,
+    pub first_moments: bool,
 }
 
 impl MultiConfig {
@@ -169,6 +175,8 @@ impl MultiConfig {
             roll_up_diagnostic: false,
             convolution: Convolution::Auto,
             coupling: Coupling::Burke,
+            pair: None,
+            first_moments: false,
         }
     }
 
@@ -255,11 +263,41 @@ pub struct MultiMeta {
     pub fft_paths: usize,
 }
 
+/// The rate-weighted joint occurrence severity `S_uw = sum_j lambda_j
+/// J_{j,uw}` of two units for the first view, on the common grid (spec
+/// section 4A, bivariate outputs): row-major `n_u x n_w`. An event in which
+/// one of the units is not exposed puts it at zero; an event exposing
+/// neither contributes nothing, so `rate` is the Poisson rate of the pair's
+/// own occurrences.
+#[derive(Debug, Clone)]
+pub struct PairResult {
+    pub pmf: Vec<f64>,
+    pub n_u: usize,
+    pub n_w: usize,
+    /// Rate of the events exposing either unit.
+    pub rate: f64,
+    pub events: usize,
+}
+
+/// The rate-weighted first-moment vectors `m_u(y) = sum_j lambda_j P(X_uj;
+/// X_j = y)` of every unit code on the grid of the first view's total:
+/// `sum_u m_u(y) = y s(y)` with `s` the view's rate-weighted severity.
+#[derive(Debug, Clone)]
+pub struct FirstMoments {
+    /// One grid-length vector per unit code.
+    pub moments: Vec<Vec<f64>>,
+    /// Largest `|sum_u m_u(y) - y s(y)|` over the grid, rate-weighted, in
+    /// loss units.
+    pub identity_error: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct MultiResult {
     /// One rate-weight array per view, in `meta.views` order.
     pub views: Vec<Vec<f64>>,
     pub meta: MultiMeta,
+    pub pair: Option<PairResult>,
+    pub first_moments: Option<FirstMoments>,
 }
 
 /// Private per-chunk partial result.
@@ -276,6 +314,11 @@ struct ChunkPartial {
     fft_paths: usize,
     one_unit_events: usize,
     homer_excess: f64,
+    pair: Vec<f64>,
+    pair_rate: f64,
+    pair_events: usize,
+    moments: Vec<Vec<f64>>,
+    moment_identity: f64,
 }
 
 /// Row-set ids: the distinct transformed rows a unit can need.
@@ -380,6 +423,44 @@ struct Worker<'a> {
     spec_acc: Vec<Complex<f64>>,
     spec_prod: Vec<Complex<f64>>,
     spec_tmp: Vec<Complex<f64>>,
+    // First-moment scratch: prefix and suffix products of the unit spectra,
+    // the moment spectra and their accumulators.
+    prefix: Vec<Vec<Complex<f64>>>,
+    suffix: Vec<Vec<Complex<f64>>>,
+    moment_acc: Vec<Vec<Complex<f64>>>,
+    weighted: Vec<f64>,
+}
+
+/// The view row of a unit: its row set for the view, or the atom at zero
+/// (a unit without reinsurance has no ceded loss).
+fn view_rows<'a>(unit: &'a LiveUnit, terms: &UnitTerms, view: View) -> (&'a [f64], usize) {
+    match rowset_for(view, terms) {
+        Some(id) => (unit.set(id), unit.lens[id]),
+        None => (&ATOM_AT_ZERO, 1),
+    }
+}
+
+const ATOM_AT_ZERO: [f64; 1] = [1.0];
+
+/// Deposit `mass` at `(x_u, x_w)` of a row-major `n_u x n_w` grid by the
+/// linear rule on each axis.
+fn deposit_pair(pmf: &mut [f64], n_u: usize, n_w: usize, x_u: f64, x_w: f64, mass: f64, inv_h: f64) {
+    let split = |x: f64, n: usize| -> [(usize, f64); 2] {
+        let r = x * inv_h;
+        let i = (r as usize).min(n - 1);
+        let f = r - i as f64;
+        if i + 1 >= n || f <= 0.0 { [(i, 1.0), (i, 0.0)] } else { [(i, 1.0 - f), (i + 1, f)] }
+    };
+    for (a, pa) in split(x_u, n_u) {
+        if pa == 0.0 {
+            continue;
+        }
+        for (b, pb) in split(x_w, n_w) {
+            if pb != 0.0 {
+                pmf[a * n_w + b] += mass * pa * pb;
+            }
+        }
+    }
 }
 
 /// Cost of chaining direct convolutions over rows of the given lengths,
@@ -706,6 +787,125 @@ impl Worker<'_> {
     }
 }
 
+impl Worker<'_> {
+    /// The pair joint of one event over the factor rule, `sum_s w_s row_u^s
+    /// (x) row_w^s`, added rate-weighted into `pair` (row-major `n_u x
+    /// n_w`); a unit the event does not expose sits at zero.
+    #[allow(clippy::too_many_arguments)]
+    fn pair_joint(
+        &self,
+        units: &[LiveUnit],
+        unit_terms: &[&UnitTerms],
+        view: View,
+        iu: Option<usize>,
+        iw: Option<usize>,
+        lam: f64,
+        pair_n: [usize; 2],
+        pair: &mut [f64],
+    ) {
+        let [_, n_w] = pair_n;
+        let q = self.rule.len();
+        let row_of = |i: Option<usize>, s: usize| -> &[f64] {
+            match i {
+                Some(k) => {
+                    let (set, len) = view_rows(&units[k], unit_terms[k], view);
+                    let r = if units[k].rows == 1 || set.len() == len { 0 } else { s };
+                    &set[r * len..(r + 1) * len]
+                }
+                None => &ATOM_AT_ZERO,
+            }
+        };
+        let strata = if units.iter().any(|u| u.rows > 1) { q } else { 1 };
+        for s in 0..strata {
+            let w = if strata == 1 { 1.0 } else { self.rule.weights[s] };
+            let ru = row_of(iu, s);
+            let rw = row_of(iw, s);
+            for (a, &pa) in ru.iter().enumerate() {
+                if pa == 0.0 {
+                    continue;
+                }
+                let scale = lam * w * pa;
+                let dst = &mut pair[a * n_w..a * n_w + rw.len()];
+                for (d, &pb) in dst.iter_mut().zip(rw) {
+                    *d += scale * pb;
+                }
+            }
+        }
+    }
+
+    /// The first-moment vectors of one event's units for a view, added
+    /// rate-weighted into `moments[code]`: per stratum, the convolution of
+    /// `x f_u(x | s)` with the convolution of the other units, the latter
+    /// from prefix and suffix products of the unit spectra; the strata are
+    /// accumulated in the spectral domain and one inverse serves each unit.
+    /// The weighted total `sum_u` is left in `self.weighted` for the
+    /// identity check.
+    fn first_moments(&mut self, units: &[LiveUnit], unit_terms: &[&UnitTerms], view: View, lam: f64, moments: &mut [Vec<f64>]) {
+        let k = units.len();
+        let lens: Vec<usize> = units.iter().zip(unit_terms).map(|(u, t)| view_rows(u, t, view).1).collect();
+        let total: usize = lens.iter().map(|l| l - 1).sum::<usize>() + 1;
+        let n = fft_size(total);
+        let half = FftCache::spectrum_len(n);
+        let strata = if units.iter().any(|u| u.rows > 1) { self.rule.len() } else { 1 };
+        self.moment_acc.resize_with(k, Vec::new);
+        for acc in self.moment_acc.iter_mut() {
+            acc.clear();
+            acc.resize(half, Complex::new(0.0, 0.0));
+        }
+        self.prefix.resize_with(k + 1, Vec::new);
+        self.suffix.resize_with(k + 1, Vec::new);
+        let mut spectra: Vec<Vec<Complex<f64>>> = vec![Vec::new(); k];
+        let mut moment_spectra: Vec<Vec<Complex<f64>>> = vec![Vec::new(); k];
+        let mut x_row: Vec<f64> = Vec::new();
+        for s in 0..strata {
+            let w = if strata == 1 { 1.0 } else { self.rule.weights[s] };
+            for (i, u) in units.iter().enumerate() {
+                let (set, len) = view_rows(u, unit_terms[i], view);
+                let r = if u.rows == 1 || set.len() == len { 0 } else { s };
+                let row = &set[r * len..(r + 1) * len];
+                if s == 0 || (u.rows > 1 && set.len() != len) {
+                    self.fft.spectrum(row, n, &mut spectra[i]);
+                    x_row.clear();
+                    x_row.extend(row.iter().enumerate().map(|(j, &p)| j as f64 * self.h * p));
+                    self.fft.spectrum(&x_row, n, &mut moment_spectra[i]);
+                }
+            }
+            // prefix[i] = product of spectra 0..i, suffix[i] = product of i..k.
+            self.prefix[0].clear();
+            self.prefix[0].resize(half, Complex::new(1.0, 0.0));
+            for i in 0..k {
+                let (done, rest) = self.prefix.split_at_mut(i + 1);
+                rest[0].clear();
+                rest[0].extend(done[i].iter().zip(&spectra[i]).map(|(a, b)| a * b));
+            }
+            self.suffix[k].clear();
+            self.suffix[k].resize(half, Complex::new(1.0, 0.0));
+            for i in (0..k).rev() {
+                let (head, tail) = self.suffix.split_at_mut(i + 1);
+                head[i].clear();
+                head[i].extend(tail[0].iter().zip(&spectra[i]).map(|(a, b)| a * b));
+            }
+            for i in 0..k {
+                let acc = &mut self.moment_acc[i];
+                for (((a, g), p), sfx) in acc.iter_mut().zip(&moment_spectra[i]).zip(&self.prefix[i]).zip(&self.suffix[i + 1]) {
+                    *a += w * g * p * sfx;
+                }
+            }
+        }
+        self.weighted.clear();
+        self.weighted.resize(total, 0.0);
+        for (i, u) in units.iter().enumerate() {
+            let mut spec = std::mem::take(&mut self.moment_acc[i]);
+            self.fft.inverse_into(&mut spec, n, total, &mut self.tmp);
+            self.moment_acc[i] = spec;
+            for ((m, wsum), &v) in moments[u.code].iter_mut().zip(self.weighted.iter_mut()).zip(&self.tmp) {
+                *m += lam * v;
+                *wsum += v;
+            }
+        }
+    }
+}
+
 /// Chunk boundaries as event index ranges, each holding whole events and at
 /// least `chunk_rows` rows (except the last).
 fn event_chunks(events: &[(usize, usize)], chunk_rows: usize) -> Vec<(usize, usize)> {
@@ -798,6 +998,10 @@ pub fn multiunit_views(
     let mut event_span = vec![0usize; events.len()];
     let mut event_live = vec![false; events.len()];
     let mut units_here: Vec<i64> = Vec::new();
+    // Largest loss each unit code can show in the output view's ground-up
+    // row, for the pair grid: its support, or under homer its share of the
+    // rolled exposure.
+    let mut reach = vec![0.0_f64; terms.len()];
     for (e, &(start, end)) in events.iter().enumerate() {
         let rate = input.rate[start];
         units_here.clear();
@@ -838,6 +1042,7 @@ pub fn multiunit_views(
         let mut span = 0;
         let mut live_rows = 0;
         let mut exposure = 0.0;
+        let mut mean = 0.0;
         for row in start..end {
             let class = classify_unit_row(row, &input.spec(row), config.variance_policy, &mut diagnostics)?;
             classes[row] = class;
@@ -845,15 +1050,27 @@ pub fn multiunit_views(
                 event_live[e] = true;
                 live_rows += 1;
                 exposure += input.max_loss[row];
+                mean += class.mu;
                 // Same support as `UnitPlan::support`, which sizes the unit's rows in pass 2.
                 let support = if class.kind == UnitKind::Atom { class.mu } else { input.max_loss[row] };
                 span += grid_length_for(support, h) - 1;
+                let code = input.unit_code[row] as usize;
+                reach[code] = reach[code].max(support);
             }
         }
         // Under the homer coupling the rolled row's beta reaches the summed
-        // exposures, beyond the supports of any atoms among the units.
+        // exposures, beyond the supports of any atoms among the units, and
+        // each unit's allocation reaches its share of them.
         if config.coupling == Coupling::Homer && live_rows >= 2 {
             span = span.max(grid_length_for(exposure, h) - 1);
+            if mean > 0.0 {
+                for row in start..end {
+                    if classes[row].kind != UnitKind::Drop {
+                        let code = input.unit_code[row] as usize;
+                        reach[code] = reach[code].max(classes[row].mu / mean * exposure);
+                    }
+                }
+            }
         }
         event_span[e] = span;
     }
@@ -883,6 +1100,19 @@ pub fn multiunit_views(
         }
     };
 
+    let pair_n: [usize; 2] = match config.pair {
+        Some([u, w]) => {
+            if u >= terms.len() || w >= terms.len() {
+                return Err(Error::UnitCodeOutOfRange {
+                    row: 0,
+                    code: u.max(w) as i64,
+                    available: terms.len(),
+                });
+            }
+            [grid_length_for(reach[u], h), grid_length_for(reach[w], h)]
+        }
+        None => [1, 1],
+    };
     // Views computed per event: the requested ones plus ground_up for the
     // roll-up diagnostic when not requested itself.
     let mut computed: Vec<View> = config.views.clone();
@@ -915,8 +1145,14 @@ pub fn multiunit_views(
             fft_paths: 0,
             one_unit_events: 0,
             homer_excess: 0.0,
+            pair: if config.pair.is_some() { vec![0.0; pair_n[0] * pair_n[1]] } else { Vec::new() },
+            pair_rate: 0.0,
+            pair_events: 0,
+            moments: if config.first_moments { (0..terms.len()).map(|_| vec![0.0; n]).collect() } else { Vec::new() },
+            moment_identity: 0.0,
         };
         let mut rate_acc = Neumaier::default();
+        let mut pair_rate_acc = Neumaier::default();
         let mut excess_acc = Neumaier::default();
         let mut aal_acc = Neumaier::default();
         let mut analytic_acc: Vec<Neumaier> = vec![Neumaier::default(); n_views];
@@ -935,6 +1171,10 @@ pub fn multiunit_views(
             spec_acc: Vec::new(),
             spec_prod: Vec::new(),
             spec_tmp: Vec::new(),
+            prefix: Vec::new(),
+            suffix: Vec::new(),
+            moment_acc: Vec::new(),
+            weighted: Vec::new(),
         };
         let mut pmfs: Vec<Vec<f64>> = (0..computed.len()).map(|_| Vec::new()).collect();
         let mut units: Vec<LiveUnit> = Vec::new();
@@ -1051,6 +1291,113 @@ pub fn multiunit_views(
                 }
                 None
             };
+            // Occurrence outputs for the first view (spec section 4A).
+            if config.pair.is_some() || config.first_moments {
+                let view = computed[0];
+                let unit_terms: Vec<&UnitTerms> = units.iter().map(|u| &terms[u.code]).collect();
+                let homer_values: Option<(Vec<f64>, Vec<Vec<f64>>)> = homer.as_ref().map(|(plan, shares)| {
+                    let n_r = grid_length_for(plan.support(), h);
+                    let base = marginal_pmf(plan, h, n_r);
+                    let values: Vec<Vec<f64>> = unit_terms
+                        .iter()
+                        .zip(shares)
+                        .map(|(t, &s)| (0..n_r).map(|i| if s > 0.0 { t.view(view, s * i as f64 * h) } else { 0.0 }).collect())
+                        .collect();
+                    (base, values)
+                });
+                if let Some([cu, cw]) = config.pair {
+                    let iu = units.iter().position(|u| u.code == cu);
+                    let iw = units.iter().position(|u| u.code == cw);
+                    if iu.is_some() || iw.is_some() {
+                        partial.pair_events += 1;
+                        pair_rate_acc.add(lam);
+                        let [n_u, n_w] = pair_n;
+                        if let Some((base, values)) = &homer_values {
+                            for (i, &p) in base.iter().enumerate() {
+                                if p == 0.0 {
+                                    continue;
+                                }
+                                let x_u = iu.map_or(0.0, |k| values[k][i]);
+                                let x_w = iw.map_or(0.0, |k| values[k][i]);
+                                deposit_pair(&mut partial.pair, n_u, n_w, x_u, x_w, lam * p, 1.0 / h);
+                            }
+                        } else if exact_path {
+                            // Comonotone: every unit sits in one bucket between
+                            // merged breakpoints; the pair's indices are read off.
+                            let rows: Vec<&[f64]> =
+                                units.iter().zip(&unit_terms).map(|(u, t)| view_rows(u, t, view).0).collect();
+                            let pair = &mut partial.pair;
+                            comonotone_merge(&rows, |idx, mass| {
+                                let a = iu.map_or(0, |k| idx[k]);
+                                let b = iw.map_or(0, |k| idx[k]);
+                                pair[a * n_w + b] += lam * mass;
+                            });
+                        } else {
+                            worker.pair_joint(&units, &unit_terms, view, iu, iw, lam, pair_n, &mut partial.pair);
+                        }
+                    }
+                }
+                if config.first_moments {
+                    let total = &pmfs[0];
+                    worker.weighted.clear();
+                    worker.weighted.resize(total.len(), 0.0);
+                    if let Some((base, values)) = &homer_values {
+                        // Each rolled bucket's mass at the two deposit nodes of
+                        // the view total, split among the units by their
+                        // allocation values' shares of it, so that the moments
+                        // at a node sum to the node's loss times its mass as
+                        // the total's own deposit has it.
+                        for (i, &p) in base.iter().enumerate() {
+                            if p == 0.0 {
+                                continue;
+                            }
+                            let y: f64 = values.iter().map(|v| v[i]).sum();
+                            if y <= 0.0 {
+                                continue;
+                            }
+                            let r = y / h;
+                            let k = (r as usize).min(total.len() - 1);
+                            let f = if k + 1 < total.len() { r - k as f64 } else { 0.0 };
+                            for (ui, u) in units.iter().enumerate() {
+                                let share = values[ui][i] / y;
+                                let m = &mut partial.moments[u.code];
+                                m[k] += lam * p * (1.0 - f) * share * k as f64 * h;
+                                worker.weighted[k] += p * (1.0 - f) * share * k as f64 * h;
+                                if f > 0.0 {
+                                    m[k + 1] += lam * p * f * share * (k + 1) as f64 * h;
+                                    worker.weighted[k + 1] += p * f * share * (k + 1) as f64 * h;
+                                }
+                            }
+                        }
+                    } else if exact_path {
+                        let rows: Vec<&[f64]> =
+                            units.iter().zip(&unit_terms).map(|(u, t)| view_rows(u, t, view).0).collect();
+                        let codes: Vec<usize> = units.iter().map(|u| u.code).collect();
+                        let moments = &mut partial.moments;
+                        let weighted = &mut worker.weighted;
+                        comonotone_merge(&rows, |idx, mass| {
+                            let y = idx.iter().sum::<usize>();
+                            for (k, &code) in codes.iter().enumerate() {
+                                let x = idx[k] as f64 * h;
+                                moments[code][y] += lam * mass * x;
+                                weighted[y] += mass * x;
+                            }
+                        });
+                    } else {
+                        worker.first_moments(&units, &unit_terms, view, lam, &mut partial.moments);
+                    }
+                    // The identity sum_u m_u(y) = y s(y) against the view's own
+                    // pmf, rate-weighted, in loss units.
+                    let err = worker
+                        .weighted
+                        .iter()
+                        .zip(total)
+                        .enumerate()
+                        .map(|(k, (&m, &p))| (m - k as f64 * h * p).abs())
+                        .fold(0.0_f64, f64::max);
+                    partial.moment_identity = partial.moment_identity.max(lam * err);
+                }
+            }
             let layer_means: Vec<LayerMeans> = units.iter().map(|u| LayerMeans::new(&u.plan)).collect();
             let rolled_means = homer.as_ref().map(|(plan, _)| LayerMeans::new(plan));
             for (vi, &view) in computed.iter().enumerate() {
@@ -1108,6 +1455,7 @@ pub fn multiunit_views(
         partial.rate = rate_acc.value();
         partial.aal = aal_acc.value();
         partial.homer_excess = excess_acc.value();
+        partial.pair_rate = pair_rate_acc.value();
         partial.analytic = analytic_acc.iter().map(Neumaier::value).collect();
         Ok(partial)
     };
@@ -1124,6 +1472,12 @@ pub fn multiunit_views(
     let (mut direct_paths, mut fft_paths) = (0, 0);
     let mut one_unit_events = 0;
     let mut homer_excess = Neumaier::default();
+    let mut pair: Vec<f64> = if config.pair.is_some() { vec![0.0; pair_n[0] * pair_n[1]] } else { Vec::new() };
+    let mut pair_rate = Neumaier::default();
+    let mut pair_events = 0;
+    let mut moments: Vec<Vec<f64>> =
+        if config.first_moments { (0..terms.len()).map(|_| vec![0.0; n]).collect() } else { Vec::new() };
+    let mut moment_identity = 0.0_f64;
     let mut fold = |partials: Vec<Result<ChunkPartial, Error>>| -> Result<(), Error> {
         for partial in partials {
             let partial = partial?;
@@ -1145,6 +1499,17 @@ pub fn multiunit_views(
             fft_paths += partial.fft_paths;
             one_unit_events += partial.one_unit_events;
             homer_excess.add(partial.homer_excess);
+            for (d, s) in pair.iter_mut().zip(&partial.pair) {
+                *d += s;
+            }
+            pair_rate.add(partial.pair_rate);
+            pair_events += partial.pair_events;
+            for (dst, src) in moments.iter_mut().zip(&partial.moments) {
+                for (d, s) in dst.iter_mut().zip(src) {
+                    *d += s;
+                }
+            }
+            moment_identity = moment_identity.max(partial.moment_identity);
         }
         Ok(())
     };
@@ -1180,6 +1545,14 @@ pub fn multiunit_views(
         }
         for v in views.iter_mut() {
             for x in v.iter_mut() {
+                *x /= total_rate;
+            }
+        }
+        for x in pair.iter_mut() {
+            *x /= total_rate;
+        }
+        for m in moments.iter_mut() {
+            for x in m.iter_mut() {
                 *x /= total_rate;
             }
         }
@@ -1220,7 +1593,23 @@ pub fn multiunit_views(
         direct_paths,
         fft_paths,
     };
-    Ok(MultiResult { views, meta })
+    let pair = config.pair.map(|_| PairResult {
+        pmf: pair,
+        n_u: pair_n[0],
+        n_w: pair_n[1],
+        rate: pair_rate.value(),
+        events: pair_events,
+    });
+    let first_moments = config.first_moments.then_some(FirstMoments {
+        moments,
+        identity_error: moment_identity,
+    });
+    Ok(MultiResult {
+        views,
+        meta,
+        pair,
+        first_moments,
+    })
 }
 
 #[cfg(test)]

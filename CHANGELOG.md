@@ -3,6 +3,19 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.9.0] - 2026-10-26
+
+### Added
+
+- [joint] `occurrence_pair_joint(..., units=(u, w), view=...)`: the rate-weighted joint occurrence severity `S_uw` of two units for a view on the common grid, each unit's view map applied to its conditional row before the outer product over the factor rule (so the joint is of the losses after each unit's occurrence terms, which terms on a unit's annual loss and an allocation act on); a unit the event does not expose sits at zero, an event exposing neither contributes nothing, and `meta.mass` is the pair's own Poisson rate for compounding (`BivariateAggregate(mode="discrete")`). Under `comonotone` the merged breakpoints deposit at the pair of indices, under `homer` each rolled bucket at its allocations' images (spec section 4A, bivariate outputs).
+- `occurrence_unit_first_moment(..., units=None, view=...)`: for every unit the rate-weighted first-moment vector `m_u(y) = sum_j lambda_j P(X_uj; X_j = y)` on the grid of the view's total, formed per event and stratum from prefix and suffix products of the unit spectra, memory one grid per unit; `sum_u m_u(y) = y s(y)` holds against the view's own total to 1e-16 on the fixture (`meta.identity_error`).
+- `annual_conditional_mean(first_moment, annual_density)`: the annual conditional mean of a unit given the portfolio total by the Mecke identity, `kappa_u = (m_u * f_A) / f_A`, a one-dimensional real-FFT convolution for any number of units; `f_A` is the caller's (the aggregate package, or any compound Poisson of the view's severity), so the package still computes no aggregate. `PairMeta` and `FirstMomentMeta`.
+- Spec test 29 on both backends (marginals, antidiagonals, the identity, backend agreement, the kappa sum); the handoff to the aggregate package's two-dimensional compound and the comparison with `exeqa_df` run only where that package is installed. `notebooks/multiunit_homer_example.ipynb`: Homer and Li's Table 11 end to end, both routes.
+
+### Changed
+
+- The engine's `multiunit_views` returns a third value, the occurrence outputs, when `pair` or `first_moments` is requested; the Python `multiunit_views` is unchanged. `MultiConfig.pair` and `MultiConfig.first_moments` on the Rust core.
+
 ## [2.8.0] - 2026-10-26
 
 ### Added

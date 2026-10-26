@@ -32,11 +32,12 @@ from os import PathLike
 import numpy as np
 
 from eltq._meta import (
-    DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA, CurveMeta, GridMeta, JointMeta, Meta, MultiMeta, RowIssues,
+    DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA, CurveMeta, FirstMomentMeta, GridMeta, JointMeta, Meta,
+    MultiMeta, PairMeta, RowIssues,
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.8.0"
+__version__ = "2.9.0"
 
 try:
     from eltq._eltq import (
@@ -117,6 +118,11 @@ __all__ = [
     "multiunit_views",
     "multiunit_views_dataframe",
     "multiunit_views_into",
+    "occurrence_pair_joint",
+    "occurrence_unit_first_moment",
+    "annual_conditional_mean",
+    "PairMeta",
+    "FirstMomentMeta",
     "parse_terms",
     "TermsError",
     "UnitTerms",
@@ -721,8 +727,11 @@ def _factorize(values):
 
 def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_length, views,
                     z_nodes, z_rule, normalize, variance_policy, clamp_factor, threads,
-                    chunk_rows, roll_up_diagnostic, convolution, coupling):
-    """Run the Rust engine on factorized identifiers; build ``MultiMeta``."""
+                    chunk_rows, roll_up_diagnostic, convolution, coupling, pair=None,
+                    first_moments=False):
+    """Run the Rust engine on factorized identifiers; build ``MultiMeta``.
+    With ``pair`` or ``first_moments`` the occurrence outputs come back as a
+    third value, in the reference's form."""
     from eltq.terms import check_grid_alignment
 
     event_codes, event_uniques = _factorize(event_id)
@@ -742,12 +751,22 @@ def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_leng
         else:
             spec.append((uid, float(t.limit), float(t.ded),
                          [(c.share, c.limit, c.attach) for c in t.clauses]))
-    views_out, meta_dict = _rust_multiunit_views(
+    pair_codes = None
+    if pair is not None:
+        pair = tuple(str(u) for u in pair)
+        if len(pair) != 2:
+            raise EltqError(f"pair must name two units, got {pair}")
+        pair_codes = tuple(unit_ids.index(u) if u in unit_ids else len(unit_ids) for u in pair)
+        for u, code in zip(pair, pair_codes):
+            if code == len(unit_ids):
+                raise EltqError(f"unit {u!r} does not appear in the ELT")
+    views_out, meta_dict, extras = _rust_multiunit_views(
         event_codes, unit_codes, *columns, terms=spec, bucket_size=float(bucket_size),
         grid_length=grid_length, z_nodes=int(z_nodes), z_rule=z_rule,
         views=list(views), normalize=normalize, variance_policy=variance_policy,
         clamp_factor=clamp_factor, threads=threads, chunk_rows=chunk_rows,
         roll_up_diagnostic=roll_up_diagnostic, convolution=convolution, coupling=coupling,
+        pair=pair_codes, first_moments=first_moments,
     )
     event_labels = np.asarray(event_id)
     unit_labels = np.asarray(unit_id)
@@ -769,7 +788,17 @@ def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_leng
         **meta_dict,
     )
     del event_uniques
-    return views_out, meta
+    if pair is None and not first_moments:
+        return views_out, meta
+    out = {}
+    if "pair" in extras:
+        pmf, n_u, n_w, rate, events = extras["pair"]
+        h = float(bucket_size)
+        out["pair"] = (pmf, h * np.arange(n_u), h * np.arange(n_w), rate, events)
+    if "first_moments" in extras:
+        arrays, identity_error = extras["first_moments"]
+        out["first_moments"] = ({uid: arrays[code] for code, uid in enumerate(unit_ids)}, identity_error)
+    return views_out, meta, out
 
 
 def multiunit_views(
@@ -907,6 +936,197 @@ def multiunit_views(
         variance_policy=variance_policy, clamp_factor=clamp_factor,
         roll_up_diagnostic=roll_up_diagnostic, coupling=coupling,
     )
+
+
+def _occurrence_run(event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *, view,
+                    terms, bucket_size, pair, first_moments, **options):
+    """One engine run for the occurrence outputs of ``view``, rate-weighted."""
+    if view not in VIEWS:
+        raise EltqError(f"unknown view {view!r}; expected one of {VIEWS}")
+    if _rust_multiunit_views is not None:
+        _reference_multiunit().warn_if_clamp(options.get("variance_policy", "bernoulli"))
+        columns = tuple(
+            _column(name, values)
+            for name, values in zip(_MULTI_COLUMNS[2:], (rate, mean_loss, sd_indep, sd_corr, max_loss))
+        )
+        rust_options = dict(
+            z_nodes=32, z_rule="stratified", variance_policy="bernoulli", clamp_factor=0.999,
+            threads=None, chunk_rows=None, convolution="auto", coupling="burke",
+        )
+        rust_options.update(options)
+        return _rust_multiunit(
+            event_id, unit_id, columns, terms=terms, bucket_size=bucket_size, grid_length=None,
+            views=(view,), normalize=False, roll_up_diagnostic=False, pair=pair,
+            first_moments=first_moments, **rust_options,
+        )
+    options = {k: v for k, v in options.items() if k not in ("threads", "chunk_rows", "convolution")}
+    return _via_reference(
+        lambda module: module.multiunit_views_reference,
+        event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+        terms=terms, bucket_size=bucket_size, views=(view,), pair=pair,
+        first_moments=first_moments, **options,
+    )
+
+
+def occurrence_pair_joint(
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *, units, view="ground_up",
+    terms=None, bucket_size, **options,
+):
+    """The rate-weighted joint occurrence severity of two units for a view.
+
+    ``S_uw = sum_j lambda_j J_{j,uw}`` on the common grid (spec section 4A,
+    bivariate outputs), with ``J_{j,uw}`` the joint law of the two units'
+    view losses given event j: each unit's view map is applied to its
+    conditional row before the outer product over the factor rule, so the
+    joint is of the losses after each unit's occurrence terms, which is
+    what terms on a unit's annual loss and an allocation act on. An event
+    exposing one of the units puts the other at zero; an event exposing
+    neither contributes nothing, so ``meta.mass`` is the Poisson rate of the
+    pair's own occurrences and ``pmf / meta.mass`` the discrete bivariate
+    severity to compound (``BivariateAggregate(mode="discrete")`` in the
+    aggregate package). Under ``coupling="comonotone"`` the merged
+    breakpoints deposit each interval at the pair of indices; under
+    ``"homer"`` each rolled bucket goes to the pair of its allocations'
+    images.
+
+    Parameters
+    ----------
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss
+        The multi-unit ELT, as for ``multiunit_views``.
+    units : tuple of two unit ids
+        The pair, in the order of the returned axes.
+    view : {"ground_up", "gross", "ceded", "net"}
+        The view of each unit's loss.
+    terms, bucket_size, **options
+        As for ``multiunit_views`` (``z_nodes``, ``z_rule``,
+        ``variance_policy``, ``clamp_factor``, ``coupling``, ``threads``,
+        ``chunk_rows``, ``convolution``).
+
+    Returns
+    -------
+    pmf : numpy.ndarray
+        Row-major ``(n_u, n_w)`` rate weights.
+    x_u, x_w : numpy.ndarray
+        The two loss grids, ``i * h``.
+    meta : PairMeta
+    """
+    units = tuple(units)
+    if len(units) != 2:
+        raise EltqError(f"units must name two units, got {units}")
+    _, meta, extras = _occurrence_run(
+        event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, view=view, terms=terms,
+        bucket_size=bucket_size, pair=units, first_moments=False, **options,
+    )
+    pmf, x_u, x_w, mass, events = extras["pair"]
+    if mass > 0.0:
+        p = pmf / mass
+        marg_u, marg_w = p.sum(axis=1), p.sum(axis=0)
+        mean_u, mean_w = float(marg_u @ x_u), float(marg_w @ x_w)
+        sd_u = float(np.sqrt(max(marg_u @ x_u**2 - mean_u**2, 0.0)))
+        sd_w = float(np.sqrt(max(marg_w @ x_w**2 - mean_w**2, 0.0)))
+        cross = float(x_u @ p @ x_w)
+        corr = (cross - mean_u * mean_w) / (sd_u * sd_w) if sd_u > 0.0 and sd_w > 0.0 else float("nan")
+    else:
+        mean_u = mean_w = sd_u = sd_w = 0.0
+        corr = float("nan")
+    pair_meta = PairMeta(
+        bucket_size=float(bucket_size), units=tuple(str(u) for u in units), view=view,
+        coupling=meta.coupling, z_nodes=meta.z_nodes, z_rule=meta.z_rule, z_strata=meta.z_strata,
+        grid_lengths=(x_u.size, x_w.size), mass=float(mass), events=int(events),
+        grid_mean=(mean_u, mean_w), grid_sd=(sd_u, sd_w), grid_correlation=float(corr),
+    )
+    return pmf, x_u, x_w, pair_meta
+
+
+def occurrence_unit_first_moment(
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *, units=None,
+    view="ground_up", terms=None, bucket_size, **options,
+):
+    """The rate-weighted first-moment vector of each unit at each total.
+
+    ``m_u(y) = sum_j lambda_j P(X_uj; X_j = y)`` on the grid of the view's
+    total ``X_j`` across the event's units (spec section 4A): what the
+    annual conditional mean of a unit given the portfolio total needs
+    (``annual_conditional_mean``), for any number of units, with memory one
+    grid per unit. ``sum_u m_u(y) = y s(y)`` with ``s`` the view's
+    rate-weighted severity (the ``multiunit_views`` total); the largest
+    violation is ``meta.identity_error``.
+
+    Parameters
+    ----------
+    units : sequence of unit ids, optional
+        The units to return; all by default.
+    view, terms, bucket_size, **options
+        As for ``occurrence_pair_joint``.
+
+    Returns
+    -------
+    moments : dict[str, numpy.ndarray]
+        Unit id -> length-n array of rate-weighted first moments.
+    x : numpy.ndarray
+        The grid of the view's total, ``i * h``.
+    meta : FirstMomentMeta
+    """
+    _, meta, extras = _occurrence_run(
+        event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, view=view, terms=terms,
+        bucket_size=bucket_size, pair=None, first_moments=True, **options,
+    )
+    moments, identity_error = extras["first_moments"]
+    if units is not None:
+        wanted = [str(u) for u in units]
+        missing = [u for u in wanted if u not in moments]
+        if missing:
+            raise EltqError(f"units {missing} do not appear in the ELT")
+        moments = {u: moments[u] for u in wanted}
+    x = float(bucket_size) * np.arange(meta.grid_length)
+    fm_meta = FirstMomentMeta(
+        bucket_size=float(bucket_size), grid_length=meta.grid_length, units=tuple(moments),
+        view=view, coupling=meta.coupling, z_nodes=meta.z_nodes, z_rule=meta.z_rule,
+        z_strata=meta.z_strata, total_rate=meta.total_rate, identity_error=float(identity_error),
+        total_mean=float(sum(m.sum() for m in moments.values())),
+    )
+    return moments, x, fm_meta
+
+
+def annual_conditional_mean(first_moment, annual_density):
+    """The annual conditional mean of a unit given the portfolio total.
+
+    By the Mecke identity for the Poisson process of occurrences,
+    ``P(A_u; A = s) = sum_y m_u(y) f_A(s - y)``, so ``kappa_u(s) = (m_u *
+    f_A)(s) / f_A(s)``: a one-dimensional convolution of the rate-weighted
+    first-moment vector ``m_u`` of ``occurrence_unit_first_moment`` with the
+    annual density ``f_A`` of the same view's total on the same bucket size
+    and origin, which the caller takes from the aggregate package or from
+    any compound Poisson calculation on the view's severity (spec section
+    4A, bivariate outputs; the multi-unit article, section on the annual
+    bivariate aggregate). The convolution is by real FFT, zero-padded to the
+    sum of the two lengths so that nothing wraps, and truncated to the
+    length of ``f_A``; only ``f_A`` below that length enters, so the result
+    is as exact as ``f_A`` is there. The result is NaN where ``f_A`` is
+    zero; filtering by a probability floor is the caller's.
+
+    Parameters
+    ----------
+    first_moment : numpy.ndarray or dict[str, numpy.ndarray]
+        ``m_u`` for one unit, or the dict of several from
+        ``occurrence_unit_first_moment``.
+    annual_density : numpy.ndarray
+        ``f_A`` on the grid ``i * h`` from zero.
+
+    Returns
+    -------
+    numpy.ndarray or dict[str, numpy.ndarray]
+        ``kappa_u`` on the grid of ``annual_density``, in the form of
+        ``first_moment``.
+    """
+    f_a = np.asarray(annual_density, dtype=np.float64)
+    if isinstance(first_moment, dict):
+        return {u: annual_conditional_mean(m, f_a) for u, m in first_moment.items()}
+    m_u = np.asarray(first_moment, dtype=np.float64)
+    size = m_u.size + f_a.size - 1
+    numerator = np.fft.irfft(np.fft.rfft(m_u, size) * np.fft.rfft(f_a, size), size)[:f_a.size]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(f_a > 0.0, numerator / f_a, np.nan)
 
 
 def multiunit_views_dataframe(df, *, terms=None, **options):

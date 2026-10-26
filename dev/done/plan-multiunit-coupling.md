@@ -607,3 +607,36 @@ parked, had already been closed as superseded in `dev/done/` on 2026-10-25; noth
   nodes with each unit's whole sd on the factor, agrees with the exact path on the total's
   standard deviation within $10^{-3}$ and on its 99th percentile within $5\times10^{-3}$, the
   midpoint rule's error at that count.
+
+### [joint] 2.9.0, 2026-10-26
+
+- The occurrence outputs are computed inside the existing event loop of `multiunit_views`
+  (`MultiConfig.pair`, `MultiConfig.first_moments`; `MultiResult.pair`,
+  `MultiResult.first_moments`), sharing the classification, the materialized view rows and the
+  chunk fold, rather than in a second driver; the engine's Python binding returns a third value
+  with them, and `occurrence_pair_joint` / `occurrence_unit_first_moment` run the engine with
+  `views=(view,)` and build `PairMeta` / `FirstMomentMeta`. The reference mirrors this through
+  `pair=` and `first_moments=` on `multiunit_views_reference`, which then returns a third value.
+- Divergence, recorded: the pair joint over the factor rule is a weighted sum of outer products
+  in plain loops, not the two-unit GEMM the step names; the flops are the same and the loop
+  keeps the three couplings and the one-present case in one place. Grid lengths of the pair come
+  from each unit's largest support over the events (its share of the rolled exposure under
+  `homer`), tracked in pass 1.
+- The step's "with neither, nothing" is kept: an event exposing neither unit of the pair
+  contributes nothing, so `PairMeta.mass` is the rate of the pair's own occurrences, the
+  Poisson rate to compound with (thinning makes this equivalent to the full rate with an atom at
+  the origin).
+- The identity $\sum_u m_u(y) = y\,s(y)$ is checked against the view's own per-event pmf (the
+  convolution path's), not a second inverse transform, and reported rate-weighted in loss units
+  (`identity_error`, $10^{-16}$ on the fixture). Test 29's "within $10^{-12}$ relative at every
+  total with mass" is applied as $10^{-10}$ of the rate-weighted mean, since the relative form
+  fails where a cell's mass is itself at rounding level.
+- Under `homer` the pair joint deposits a rolled bucket's two allocations on their own axes, so
+  the antidiagonal sums of $S_{uw}$ reproduce the view's total in mass and mean but not cell by
+  cell (the index sum of two linear deposits spreads by up to a bucket); test 29 states the
+  antidiagonal identity for the other three couplings and the mass and mean under `homer`.
+- The aggregate package is not in the project's environment; the handoff test and the `exeqa_df`
+  comparison are skipped without it and were run locally with `uv run --with aggregate` (see the
+  report). Adding it to the `dev` group so that CI runs them is Steve's call.
+- `notebooks/multiunit_homer_example.ipynb`: Homer's Table 11 end to end; its last cell needs the
+  aggregate package.
