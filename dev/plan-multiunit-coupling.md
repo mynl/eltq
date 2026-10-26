@@ -17,7 +17,8 @@ standard and to section 4A of the specification:
 - one-unit events kept out of the mixture;
 - the published coupling rules as a named option, with the comonotone and Homer couplings exact
   on the grid;
-- the occurrence outputs that the joint aggregate route and the conditional means need, as arrays.
+- the occurrence outputs that the joint aggregate route and the conditional means need, as
+  arrays, with a numpy helper for the annual conditional means.
 
 Six steps, each a minor version, in the order below; the sixth is optional. A seventh, [parity],
 covers documentation and benchmarks.
@@ -157,6 +158,10 @@ Steve, 2026-10-26, on review of the first draft (its open questions 1 to 4 are d
 10. A unit with loading one has an exact marginal: under the stratified rule through its closed
     form (step [z-rule]), and under `coupling="comonotone"` through an exact path with no factor
     rule at all (step [coupling]). One atom per node remains only under the node rules.
+11. eltq's Python layer offers `annual_conditional_mean(first_moment, annual_density)`, a numpy
+    helper for the annual conditional means by the Mecke identity (step [joint]). The caller
+    supplies the annual density, so eltq still computes no aggregate; decision 3 allows it,
+    since the result is an array.
 
 ## Steps
 
@@ -324,12 +329,18 @@ step that changes the behavior.
   prefix and suffix products of the unit spectra, accumulated rate-weighted. Memory is $n_\Sigma$
   per unit. $\sum_u m_u(y) = y\,s(y)$, with $s$ the run's rate-weighted total severity, holds
   exactly on the grid and is the run's check.
-- The annual conditional mean is $\kappa_u(s) = (m_u * f_A)(s) / f_A(s)$ by the Mecke identity
-  (Background), a one-dimensional convolution with the annual density of the total, which the
-  caller takes from the aggregate package or from any compound Poisson calculation on $s$; see
-  open question 1. The two-dimensional route through `BivariateAggregate` remains available from
-  `occurrence_pair_joint` and its shear, and is the test of the identity.
-- Reference implementations of both functions.
+- `annual_conditional_mean(first_moment, annual_density)` (decision 11) returns
+  $\kappa_u(s) = (m_u * f_A)(s) / f_A(s)$ for each unit, by the Mecke identity (Background).
+  `first_moment` is the output of `occurrence_unit_first_moment`; `annual_density` is the annual
+  density $f_A$ of the same view's total on the same bucket size and origin, which the caller takes
+  from the aggregate package or from any compound Poisson calculation on $s$. The convolution is
+  by real FFT, zero-padded to the sum of the two lengths so that nothing wraps, and truncated to
+  the length of $f_A$; only $f_A$ below that length enters, so the result is as exact as $f_A$ is
+  there. The result is NaN where $f_A$ is zero; filtering by a probability floor is the caller's.
+  Pure numpy, about ten lines, one implementation for both backends. The two-dimensional route
+  through `BivariateAggregate` remains available from `occurrence_pair_joint` and its shear, and
+  is the test of the identity.
+- Reference implementations of the two occurrence functions.
 - Specification: 4A's bivariate outputs paragraph replaces $S_{u\Sigma}$ and its shear with $m_u$
   and the identity, with the unit's joint with the total, for two units, the shear of
   $S_{uw}$; section 7's multi-unit outputs paragraph likewise; test 29 restated as below.
@@ -344,11 +355,14 @@ step that changes the behavior.
     Poisson($\Lambda$) count by the aggregate package, summed along its antidiagonals, equals the
     one-dimensional compound of the total within the aggregate package's grid tolerance (the
     article reaches $10^{-10}$);
-  - $\kappa_u$ from the Mecke convolution equals `exeqa_df` of the two-dimensional compound of the
-    sheared $S_{uw}$ at every total where the two-dimensional grid does not wrap.
-  The aggregate package is a test-only dependency; the last two tests are skipped without it.
+  - $\sum_u \kappa_u(s) = s$ from `annual_conditional_mean` at every total whose annual density is
+    at least $10^{-12}$, with $f_A$ from a numpy compound Poisson of $s$ built in the test;
+  - $\kappa_u$ from `annual_conditional_mean` equals `exeqa_df` of the two-dimensional compound of
+    the sheared $S_{uw}$ at every total where the two-dimensional grid does not wrap.
+  The aggregate package is a test-only dependency; the handoff test and the last test are skipped
+  without it.
 - Notebook: the Homer Table 11 example end to end, as in the article's `sec-allocation`, with
-  $\kappa_u$ by both methods.
+  $\kappa_u$ by `annual_conditional_mean` and by the two-dimensional route.
 
 ### [matched], optional: the variance-matched loading
 
@@ -378,7 +392,8 @@ step that changes the behavior.
   accumulators), `quadrature.rs` (stratified rule), `config.rs` (coupling, policy default),
   `terms.rs` (composed Homer map), `diagnostics.rs`.
 - `crates/eltq-python/` bindings for the new keywords and functions.
-- `python/eltq/__init__.py`, `_meta.py`, `reference_multiunit.py`.
+- `python/eltq/__init__.py` (including `annual_conditional_mean`), `_meta.py`,
+  `reference_multiunit.py`.
 - `tests/test_multiunit.py` (tests 25 to 29), `fixtures/generate_fixtures.py` and goldens as
   forced, `benchmarks/z_convergence.py`, `benchmarks/run_multiunit.py`, `notebooks/`.
 - `README.md`, `CHANGELOG.md`, `Cargo.toml`, `pyproject.toml`, `python/eltq/__init__.py`
@@ -450,11 +465,8 @@ step that changes the behavior.
 
 ## Open questions for review
 
-1. A helper for the annual conditional mean in eltq's Python layer: about ten lines of numpy, the
-   convolution of each $m_u$ with an annual density the caller supplies, so that eltq still
-   computes no aggregate. Decision 3 allows it, since the result is an array. Proposed: the
-   helper, `annual_conditional_mean(first_moment, annual_density)`; the alternative leaves the
-   convolution to the caller, with the notebook showing it.
+None. The first draft's four questions are decisions 5 to 8, and the revision's one question,
+the helper for the annual conditional mean, is decision 11.
 
 ## Execution log
 
