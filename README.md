@@ -50,9 +50,10 @@ pip install --no-binary eltq eltq
 ```
 
 Setting `RUSTFLAGS="-C target-cpu=native"` for that build tunes it to the
-machine. On the multi-unit route that is about 8% faster than the wheel on a
-Zen 5 CPU; elsewhere the two are equally fast, and every output is bitwise
-identical.
+machine, which is not always a gain: on a Zen 5 CPU the one-row routes run
+4% to 6% slower than the `x86-64-v3` wheel under native (AVX-512 encodings on
+a scalar kernel) and the multi-unit route 3% to 9% faster; every output is
+bitwise identical either way (`benchmarks/report-2.4.2.md`).
 
 ## Status
 
@@ -119,8 +120,13 @@ repository, which cargo reads for every project below it (the author's is
 
 ```toml
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
 ```
+
+That is the level the published wheels use, so local timings are the ones
+users get; `target-cpu=native` was measured slower on the one-row routes on a
+Zen 5 (see Installing), and under rustc 1.99.1 it also breaks the test
+profile's build of `libm`.
 
 uv does not rebuild when that file changes; force it with
 `uv sync --reinstall-package eltq`.
@@ -180,10 +186,10 @@ rows (100k events x 10 units, typical term sparsity) with all four views at
 Q = 32 in 22.5 s, ground_up only in 15.2 s, Q = 8 in 7.9 s; bitwise identical
 across thread counts (whole-event chunks, default 2048 rows); the two-unit
 joint at reference accuracy (Q = 1001) in 10 ms. These figures are for local
-builds with `target-cpu=native` (see Environment), so rebuild after moving
-machines. On an AMD Ryzen 9 9950X3D2 (Zen 5, 16C/32T) the 1M-row headline takes
-0.92 s, and the `x86-64-v3` wheel matches a native build except on the
-multi-unit route, where it is 8% slower (`dev/done/plan-pypi-release.md`).
+builds with `target-cpu=native` on that machine. On an AMD Ryzen 9 9950X3D2
+(Zen 5, 16C/32T) the 1M-row headline takes 0.92 s, and the `x86-64-v3` wheel
+matches or beats a native build except on the multi-unit route, where it is
+3% to 9% slower (`dev/done/plan-pypi-release.md`, `benchmarks/report-2.4.2.md`).
 
 ## Python API
 

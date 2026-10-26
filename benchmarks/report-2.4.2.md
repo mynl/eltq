@@ -127,3 +127,17 @@ Mixtures: the bucketed tail sums of the beta events against their exact exceedan
 | small-alpha portfolio, 5,000-row sample, $h=100$ | survival, reference | 1.6e-08 | 4.4e-08 | 4.6e-06 | 3.5e-06 | 8.3e-07 | agrees within 2e-15 |
 
 The agreement column is the largest difference between the two backends' survival grids as a share of the total rate.
+
+## Build profile and target, 2026-10-26
+
+Release-profile variants built with environment overrides and timed on the mixture portfolio, medians of five at 32 threads and three single-threaded, the default build timed before and after to bound the noise:
+
+| build | survival $10^6$, 32 threads | quantiles $K=32$, $10^6$, 32 threads | survival 262,144, 1 thread | quantiles 262,144, 1 thread |
+|:---|---:|---:|---:|---:|
+| thin LTO, `target-cpu=native` | 1.796 s | 0.497 s | 7.837 s | 2.534 s |
+| fat LTO, native | 2.133 s | 0.527 s | 9.598 s | 2.882 s |
+| fat LTO, `panic=abort`, native | 2.104 s | 0.522 s | 9.598 s | 2.879 s |
+| thin LTO, `target-cpu=x86-64-v3` | 1.677 s | 0.435 s | 7.424 s | 2.443 s |
+| thin LTO, native, again | 1.813 s | 0.456 s | 7.818 s | 2.539 s |
+
+Fat LTO is 12% to 22% slower than thin on every row; `panic=abort` changes nothing. The generic `x86-64-v3` build, the level of the published wheels, is 4% to 6% faster than native on this Zen 5: native enables AVX-512, whose longer instruction encodings and wider auto-vectorization buy a scalar continued fraction nothing and cost it code size. The multi-unit route goes the other way, native 3% to 9% faster (`run_multiunit.py --quick`: all four views at $Q=32$ in 1.98 s against 2.04 s, single-threaded 24.4 s against 26.7 s), where the convolutions vectorize. The machine-level cargo config now targets `x86-64-v3` for every local build; it also restores the test profile under rustc 1.99.1, which failed inside `libm` only under native. The profile stays thin LTO with one codegen unit.

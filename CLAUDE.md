@@ -130,5 +130,7 @@ finished.
   public and a push to `master` runs CI.
 - **Pushing a tag publishes.** `.github/workflows/wheels.yml` publishes to PyPI on a pushed `v*`
   tag; the `pypi` GitHub environment, which requires Steve's approval, is a second gate. x86_64
-  wheels target `x86-64-v3`; local builds use `target-cpu=native` from the machine-level
-  `V:\dev\.cargo\config.toml`, never from this repository (`dev/done/plan-pypi-release.md`).
+  wheels target `x86-64-v3`, and so do local builds, from the machine-level
+  `V:\dev\.cargo\config.toml`, never from this repository (`dev/done/plan-pypi-release.md`;
+  native was measured slower on the one-row routes, `benchmarks/report-2.4.2.md`). The Rust gate
+  is `cargo test -p eltq-core` at the plain test profile.
