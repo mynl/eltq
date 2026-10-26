@@ -517,7 +517,7 @@ type JointReturn<'py> = (
 /// `(pmf[n1, n2], x1, x2, meta_dict)` matching `eltq.reference_multiunit`.
 #[pyfunction]
 #[pyo3(signature = (unit1, unit2, *, bucket_size, n1, n2, z_nodes=1001,
-    z_rule="midpoint", variance_policy="clamp",
+    z_rule="midpoint", variance_policy="bernoulli",
     clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR))]
 #[allow(clippy::too_many_arguments)]
 fn joint_two_units<'py>(
@@ -587,7 +587,7 @@ type TermsSpec = Vec<(String, f64, f64, Vec<(f64, f64, f64)>)>;
 #[pyfunction]
 #[pyo3(signature = (event_code, unit_code, rate, mean_loss, sd_indep, sd_corr,
     max_loss, *, terms, bucket_size, grid_length=None, z_nodes=32,
-    z_rule="midpoint", views=None, normalize=false, variance_policy="clamp",
+    z_rule="midpoint", views=None, normalize=false, variance_policy="bernoulli",
     clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
     chunk_rows=None, roll_up_diagnostic=false, convolution="auto"))]
 #[allow(clippy::too_many_arguments)]

@@ -273,7 +273,8 @@ def multiunit_small_elt() -> pd.DataFrame:
         ("e2", "c", 0.020, 100.0, 120.0, 0.0, 500.0),
         # e3: single-unit event.
         ("e3", "b", 0.005, 400.0, 80.0, 60.0, 1200.0),
-        # e4: four units incl. an atom (sigma = 0) and a clamped row.
+        # e4: four units incl. an atom (sigma = 0); unit b is admissible
+        # (900^2 < 600 * 1400), so the fixture has no inadmissible row.
         ("e4", "a", 0.003, 300.0, 0.0, 0.0, 1000.0),
         ("e4", "b", 0.003, 600.0, 400.0, 500.0, 2000.0),
         ("e4", "d", 0.003, 150.0, 60.0, 40.0, 600.0),

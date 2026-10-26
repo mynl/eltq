@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.5.0] - 2026-10-26
+
+### Changed
+
+- [bernoulli] The multi-unit route treats an inadmissible unit row as the one-row route has since 1.13.0: the two-point law on 0 and M with `P(X = M) = mu / M`, given the shared factor the mass `1 - Phi((Phi^{-1}(1 - p) - w z) / sqrt(1 - w^2))` at M (a step in z at loading one), Burke's loading kept (spec section 4A). `variance_policy="bernoulli"` is the default of `multiunit_views` and `joint_two_units`, reported under `variance_bernoulli`; the rolled row of the roll-up diagnostic classifies the same way. Rows the clamp used to smear across the interior now sit on 0 and M, so a portfolio with inadmissible rows changes numbers; the goldens hold, since the fixture has none.
+- `variance_policy="clamp"` on the multi-unit route is deprecated: still accepted, with a `DeprecationWarning`, until 3.0.0.
+- Spec test 26 (both backends): the two-point conditional law, its marginal, and the three events of Homer and Li 2017, Table 11 against the multi-unit article's own construction within 1e-12 per cell at 64 Gauss-Hermite nodes.
+
 ## [2.4.3] - 2026-10-26
 
 ### Changed

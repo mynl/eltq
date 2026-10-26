@@ -14,18 +14,23 @@ Model (Burke, Rau-Chaplin, Varghese 2016, section III.E; derivations and the
 additivity analysis in ``dev/secondary-uncertainty-additivity.md``). Per unit
 i of an event: total sd ``sigma = sd_indep + sd_corr``, damage ratio
 ``X_i / M_i ~ Beta(alpha_i, beta_i)`` moment-matched to ``(mu_i / M_i,
-sigma_i / M_i)``; one shared standard normal ``Z_c`` per event occurrence and
+sigma_i / M_i)``, or the two-point law on 0 and M with ``P(X_i = M_i) = mu_i
+/ M_i`` when the stated variance is inadmissible (the Bernoulli policy, spec
+section 4A); one shared standard normal ``Z_c`` per event occurrence and
 an independent ``Z_i`` per unit give ``U_i = Phi((sd_corr Z_c + sd_indep
 Z_i) / t_i)``, ``t_i = hypot(sd_indep, sd_corr)``, and ``X_i = M_i
 F_i^{-1}(U_i)``. Conditional on ``Z_c = z`` the units are independent with
-``P(X_i <= x | z) = Phi((Phi^{-1}(F_i(x / M_i)) - w_c z) / w_I)``.
+``P(X_i <= x | z) = Phi((Phi^{-1}(F_i(x / M_i)) - w_c z) / w_I)``; for a
+two-point unit this is the mass ``1 - Phi((Phi^{-1}(1 - p) - w_c z) / w_I)``
+at M and the rest at 0.
 
 Discretization conventions, chosen to match eltq's deposit rule:
 
 - a beta unit's conditional pmf is bucketed by cdf differences at half-bucket
   edges (exact in probability; bucket k holds ``((k - 1/2) h, (k + 1/2) h]``);
-- point values (degenerate atoms, comonotone units' per-z atoms, and every
-  transformed view value) use the linear mass- and mean-preserving deposit;
+- point values (degenerate atoms, the two atoms of a two-point unit,
+  comonotone units' per-z atoms, and every transformed view value) use the
+  linear mass- and mean-preserving deposit;
 - the shared factor is integrated by midpoint quantile nodes
   ``z_q = Phi^{-1}((q + 1/2) / Q)`` with equal weights (default) or
   Gauss-Hermite nodes and weights (``z_rule="gauss_hermite"``).
@@ -39,6 +44,7 @@ eltq pattern.
 from __future__ import annotations
 
 import math
+import warnings
 from collections import namedtuple
 from dataclasses import dataclass, field
 
@@ -58,8 +64,20 @@ from eltq.reference import (
 )
 from eltq.terms import VIEWS, TermsError, UnitTerms, check_grid_alignment, parse_terms
 
-VARIANCE_POLICIES = ("clamp", "error", "drop", "atom")
+VARIANCE_POLICIES = ("bernoulli", "clamp", "error", "drop", "atom")
 Z_RULES = ("midpoint", "gauss_hermite")
+
+CLAMP_DEPRECATION = (
+    "the clamp variance policy on the multi-unit route is deprecated from 2.5.0 "
+    "and will be removed at 3.0.0; the default is now bernoulli (spec section 4A)"
+)
+
+
+def warn_if_clamp(variance_policy: str) -> None:
+    """Emit the deprecation warning for the ``clamp`` policy (decision 5 of
+    ``dev/done/plan-multiunit-coupling.md``)."""
+    if variance_policy == "clamp":
+        warnings.warn(CLAMP_DEPRECATION, DeprecationWarning, stacklevel=3)
 
 #: Input record for one unit, in ELT field order. ``mean_loss`` and the sds are
 #: in loss currency units (not damage ratios); ``max_loss`` is the beta upper
@@ -77,6 +95,7 @@ _DROP = 0        # contributes nothing (invalid or dropped by policy)
 _ATOM = 1        # degenerate: all conditional mass at one loss value
 _COMONOTONE = 2  # sd_indep == 0: loss is a deterministic function of Z_c
 _BETA = 3        # general case
+_TWO_POINT = 4   # inadmissible variance under the Bernoulli policy: 0 or M
 
 
 @dataclass
@@ -98,6 +117,18 @@ class _Prepped:
         """Largest loss the unit can produce."""
         return self.mean_loss if self.kind == _ATOM else self.max_loss
 
+    @property
+    def two_point_p(self) -> float:
+        """``P(X = M) = mu / M`` of a two-point unit."""
+        return self.mean_loss / self.max_loss
+
+    @property
+    def depends_on_factor(self) -> bool:
+        """Whether the conditional law varies with the shared factor."""
+        if self.kind == _COMONOTONE:
+            return True
+        return self.kind in (_BETA, _TWO_POINT) and self.w_corr > 0.0
+
 
 def _note(diagnostics: dict, category: str, example) -> None:
     issues = diagnostics.setdefault(category, RowIssues())
@@ -106,14 +137,17 @@ def _note(diagnostics: dict, category: str, example) -> None:
         issues.examples.append(example)
 
 
-def prepare_unit(unit, label, variance_policy="clamp",
+def prepare_unit(unit, label, variance_policy="bernoulli",
                  clamp_factor=DEFAULT_CLAMP_FACTOR, diagnostics=None) -> _Prepped:
     """Validate one unit and derive beta parameters and copula weights.
 
     Structural problems (nonfinite, negative, mean above max) raise
     ``EltqError`` when ``diagnostics`` is None (the two-unit joint) and are
     recorded as dropped rows otherwise (the multi-unit ELT route, mirroring
-    the one-unit reference's categories).
+    the one-unit reference's categories). An inadmissible variance follows
+    ``variance_policy``: ``bernoulli`` (the default from 2.5.0) makes the
+    unit the two-point law on 0 and M with the maximizer's sd, keeping
+    Burke's loadings; ``clamp`` is deprecated.
     """
     mu, s_i, s_c, m = (float(x) for x in unit)
 
@@ -153,6 +187,16 @@ def prepare_unit(unit, label, variance_policy="clamp",
             prep.notes.append("variance_atom")
             if diagnostics is not None:
                 _note(diagnostics, "variance_atom", label)
+            return prep
+        if variance_policy == "bernoulli":
+            prep.kind = _TWO_POINT
+            prep.sigma_used = math.sqrt(v_max)
+            prep.notes.append("variance_bernoulli")
+            if diagnostics is not None:
+                _note(diagnostics, "variance_bernoulli", label)
+            t = math.hypot(s_i, s_c)
+            prep.w_corr = s_c / t
+            prep.w_indep = s_i / t
             return prep
         sigma = clamp_factor * math.sqrt(v_max)
         prep.sigma_used = sigma
@@ -215,13 +259,31 @@ def grid_length_for(max_loss: float, bucket_size: float) -> int:
 
 def marginal_pmf(prep: _Prepped, bucket_size: float, n: int) -> np.ndarray:
     """Unconditional bucket pmf of one unit (beta cdf differences at
-    half-bucket edges; the linear deposit for an atom)."""
+    half-bucket edges; the linear deposit for an atom; the two atoms of a
+    two-point unit)."""
     if prep.kind == _ATOM:
         row = np.zeros(n)
         _deposit(row, prep.mean_loss, 1.0, 1.0 / bucket_size)
         return row
+    if prep.kind == _TWO_POINT:
+        row = np.zeros(n)
+        p = prep.two_point_p
+        _deposit(row, 0.0, 1.0 - p, 1.0 / bucket_size)
+        _deposit(row, prep.max_loss, p, 1.0 / bucket_size)
+        return row
     edges = (np.arange(n + 1) - 0.5) * bucket_size
     return np.diff(beta_dist.cdf(edges / prep.max_loss, prep.alpha, prep.beta))
+
+
+def two_point_conditional(p: float, w_corr: float, w_indep: float, z: np.ndarray) -> np.ndarray:
+    """``P(X = M | Z_c = z)`` of a two-point unit: ``1 - Phi((Phi^{-1}(1 - p)
+    - w_corr z) / w_indep)``, the step ``1{z > Phi^{-1}(1 - p)}`` at loading
+    one."""
+    y0 = norm.ppf(1.0 - p)
+    z = np.asarray(z, dtype=np.float64)
+    if w_indep == 0.0:
+        return (z > y0).astype(np.float64)
+    return norm.sf((y0 - w_corr * z) / w_indep)
 
 
 def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z: np.ndarray) -> np.ndarray:
@@ -230,7 +292,8 @@ def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z: np.ndarray) 
     Returns a ``(len(z), n)`` array whose row q is the pmf of the unit's loss
     on buckets ``0, h, ..., (n - 1) h`` conditional on ``Z_c = z[q]``. Every
     row sums to one. Beta units use cdf differences at half-bucket edges;
-    atoms and comonotone units use the linear deposit of their point value.
+    atoms, two-point units and comonotone units use the linear deposit of
+    their point values.
     """
     q_n = z.size
     inv_h = 1.0 / bucket_size
@@ -239,6 +302,12 @@ def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z: np.ndarray) 
         row = np.zeros(n)
         _deposit(row, prep.mean_loss, 1.0, inv_h)
         pmf[:] = row
+        return pmf
+    if prep.kind == _TWO_POINT:
+        at_max = two_point_conditional(prep.two_point_p, prep.w_corr, prep.w_indep, z)
+        for q, a in enumerate(at_max):
+            _deposit(pmf[q], 0.0, 1.0 - a, inv_h)
+            _deposit(pmf[q], prep.max_loss, a, inv_h)
         return pmf
     if prep.kind == _COMONOTONE:
         # U = Phi(w_corr z) with no independent noise: an atom per z value.
@@ -300,7 +369,7 @@ class BivariateSU:
 
 
 def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoint",
-                        variance_policy="clamp", clamp_factor=DEFAULT_CLAMP_FACTOR):
+                        variance_policy="bernoulli", clamp_factor=DEFAULT_CLAMP_FACTOR):
     """Joint bucketed loss distribution for one event across two units.
 
     Parameters
@@ -318,10 +387,11 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
         when ``sd_corr`` dominates ``sd_indep``.
     z_rule : {"midpoint", "gauss_hermite"}, optional
         Quadrature rule for the shared factor.
-    variance_policy : {"clamp", "error", "atom"}, optional
-        Treatment of a unit whose sd is inadmissible for a beta: clamp sigma
-        to ``clamp_factor`` times the bound (Burke's own repair, the
-        default), raise, or collapse the unit to an atom at its mean.
+    variance_policy : {"bernoulli", "clamp", "error", "atom"}, optional
+        Treatment of a unit whose sd is inadmissible for a beta: the
+        two-point law on 0 and M (the default), clamp sigma to
+        ``clamp_factor`` times the bound (deprecated; removed at 3.0.0),
+        raise, or collapse the unit to an atom at its mean.
     clamp_factor : float, optional
         Factor in (0, 1) applied to the sd bound under the clamp policy.
 
@@ -335,8 +405,9 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
     h = float(bucket_size)
     if not (h > 0.0) or not math.isfinite(h):
         raise EltqError(f"bucket_size must be finite and positive, got {h}")
-    if variance_policy not in ("clamp", "error", "atom"):
+    if variance_policy not in ("bernoulli", "clamp", "error", "atom"):
         raise EltqError(f"unknown variance_policy {variance_policy!r} for the joint")
+    warn_if_clamp(variance_policy)
     if not (0.0 < clamp_factor < 1.0):
         raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
     z, w = z_quadrature(n_z, z_rule)
@@ -403,6 +474,9 @@ def layer_mean(prep: _Prepped, attach: float, limit: float) -> float:
         return 0.0
     if prep.kind == _ATOM:
         return float(min(max(prep.mean_loss - attach, 0.0), limit))
+    if prep.kind == _TWO_POINT:
+        # The loss is M with probability p and 0 otherwise.
+        return prep.two_point_p * float(min(max(prep.max_loss - attach, 0.0), limit))
     m = prep.max_loss
     lower = attach / m
     upper = (attach + limit) / m
@@ -506,7 +580,7 @@ def multiunit_views_reference(
     z_nodes=32,
     z_rule="midpoint",
     normalize=False,
-    variance_policy="clamp",
+    variance_policy="bernoulli",
     clamp_factor=DEFAULT_CLAMP_FACTOR,
     roll_up_diagnostic=False,
 ):
@@ -537,8 +611,11 @@ def multiunit_views_reference(
         Shared-factor quadrature (see :func:`z_quadrature`).
     normalize : bool
         Divide every view by the total contributing rate.
-    variance_policy : {"clamp", "error", "drop", "atom"}
-        Treatment of a unit row with inadmissible beta variance.
+    variance_policy : {"bernoulli", "clamp", "error", "drop", "atom"}
+        Treatment of a unit row with inadmissible beta variance: the
+        two-point law of spec section 4A (the default from 2.5.0), the
+        deprecated clamp (removed at 3.0.0), an error, a dropped row, or an
+        atom at the mean.
     roll_up_diagnostic : bool
         Also compute, per event with two or more contributing units, the
         sd and 99th-percentile ratios of the exact ground-up total against
@@ -578,6 +655,7 @@ def multiunit_views_reference(
         raise EltqError(f"unknown variance_policy {variance_policy!r}")
     if not (0.0 < clamp_factor < 1.0):
         raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
+    warn_if_clamp(variance_policy)
     z, z_weights = z_quadrature(z_nodes, z_rule)
 
     try:

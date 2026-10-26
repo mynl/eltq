@@ -160,7 +160,7 @@ impl MultiConfig {
             z_rule: ZRule::Midpoint,
             views: View::ALL.to_vec(),
             normalize: false,
-            variance_policy: VariancePolicy::clamp_default(),
+            variance_policy: VariancePolicy::default(),
             threads: None,
             chunk_rows: DEFAULT_MULTI_CHUNK_ROWS,
             roll_up_diagnostic: false,
@@ -932,9 +932,7 @@ pub fn multiunit_views(
                 let spec = input.spec(row);
                 let plan = UnitPlan::from_row(&class, &spec);
                 let n_unit = grid_length_for(plan.support(), h);
-                let correlated = matches!(plan.kind, UnitKind::Comonotone)
-                    || (plan.kind == UnitKind::Beta && plan.w_corr > 0.0);
-                let nodes: &[f64] = if correlated { &z } else { &[0.0] };
+                let nodes: &[f64] = if plan.depends_on_factor() { &z } else { &[0.0] };
                 let base = conditional_matrix(&plan, h, n_unit, nodes).map_err(|_| Error::KernelFailure {
                     row,
                     alpha: plan.alpha,
@@ -1005,7 +1003,7 @@ pub fn multiunit_views(
                         sd_corr: units.iter().map(|u| input.sd_corr[u.row]).sum(),
                         max_loss: units.iter().map(|u| input.max_loss[u.row]).sum(),
                     };
-                    let rolled_plan = prepare_unit(&rolled, "rolled", VariancePolicy::clamp_default())?;
+                    let rolled_plan = prepare_unit(&rolled, "rolled", VariancePolicy::default())?;
                     let rolled_pmf = marginal_pmf(&rolled_plan, h, pmf.len());
                     let (sd_exact, sd_rolled) = (sd_of(pmf, h), sd_of(&rolled_pmf, h));
                     let (q_exact, q_rolled) = (quantile_of(pmf, h, 0.99), quantile_of(&rolled_pmf, h, 0.99));
@@ -1226,7 +1224,7 @@ mod tests {
             (2, 2, 0.020, 100.0, 120.0, 0.0, 500.0),
             (3, 1, 0.005, 400.0, 80.0, 60.0, 1200.0),
             (4, 0, 0.003, 300.0, 0.0, 0.0, 1000.0),
-            (4, 1, 0.003, 600.0, 500.0, 500.0, 2000.0), // 1000^2 >= 600 * 1400: clamped
+            (4, 1, 0.003, 600.0, 500.0, 500.0, 2000.0), // 1000^2 >= 600 * 1400: two-point
             (4, 2, 0.003, 150.0, 60.0, 40.0, 600.0),
             (4, 3, 0.003, 200.0, 30.0, 70.0, 700.0),
             (5, 0, 0.0, 200.0, 50.0, 50.0, 1000.0),
@@ -1272,7 +1270,8 @@ mod tests {
         assert_eq!((meta.events, meta.valid_events, meta.valid_rows), (6, 5, 12));
         assert_eq!(meta.diagnostics.get(Category::ZeroRate).count, 1);
         assert_eq!(meta.diagnostics.get(Category::MeanExceedsMax).count, 1);
-        assert_eq!(meta.diagnostics.get(Category::SigmaClamped).count, 1);
+        assert_eq!(meta.diagnostics.get(Category::VarianceBernoulli).count, 1);
+        assert_eq!(meta.diagnostics.get(Category::SigmaClamped).count, 0);
         let roll_up = meta.roll_up.as_ref().unwrap();
         assert_eq!(roll_up.iter().map(|e| e.event_row).collect::<Vec<_>>(), vec![0, 4, 7]);
         assert!(roll_up.iter().all(|e| e.sd_ratio.is_finite() && e.sd_ratio > 0.0));
@@ -1289,6 +1288,11 @@ mod tests {
                 assert!((x - y).abs() < 1e-14);
             }
         }
+        // The clamp stays selectable (deprecated, removed at 3.0.0).
+        config.variance_policy = VariancePolicy::clamp_default();
+        let clamped = multiunit_views(&input(&r), &terms, &config).unwrap();
+        assert_eq!(clamped.meta.diagnostics.get(Category::SigmaClamped).count, 1);
+        assert_eq!(clamped.meta.diagnostics.get(Category::VarianceBernoulli).count, 0);
     }
 
     #[test]

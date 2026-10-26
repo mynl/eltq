@@ -92,6 +92,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [ratios] the admissibility test, the shape parameters and the cumulants' sd formed in ratios, so a row classifies the same at every monetary scale; the top half-bucket and the tiny-alpha complement documented | 2.4.1 | done |
 | [schedule] the quantiles default chunk a rule of the row count, waves bounded by a 1 GiB memory budget, one thread pool per call | 2.4.2 | done |
 | [tidy] the survival grid walked with an interval cursor, the normal scores shared on the Cornish-Fisher route, the output scans combined; bitwise neutral | 2.4.3 | done |
+| [bernoulli] inadmissible unit rows are two-point units given the shared factor on the multi-unit route; the clamp deprecated there | 2.5.0 | done |
 
 ## Layout
 
@@ -272,7 +273,7 @@ views, meta = eltq.multiunit_views(
     *, terms, bucket_size, grid_length=None,
     views=("ground_up", "gross", "ceded", "net"),
     z_nodes=32, z_rule="midpoint", normalize=False,
-    variance_policy="clamp", clamp_factor=0.999, roll_up_diagnostic=False)
+    variance_policy="bernoulli", clamp_factor=0.999, roll_up_diagnostic=False)
 # views: dict view -> rate-weighted array on the grid i * h; meta: MultiMeta
 
 pmf, x1, x2, meta = eltq.joint_two_units(
@@ -342,8 +343,9 @@ distribution on [0, M] can have) follow `variance_policy`:
 - `atom` — collapsed to an atom at μ, reported.
 
 The `clamp` of versions before 2.0.0 (σ clamped to 0.999 of the bound, the row
-kept as a beta) is refused on this route. The multi-unit route keeps `clamp`
-as its default, with `clamp_factor`, and does not accept `bernoulli` yet.
+kept as a beta) is refused on this route. The multi-unit route has `bernoulli`
+as its default from 2.5.0 (the two-point law given the shared factor, spec
+section 4A) and keeps `clamp`, with `clamp_factor`, deprecated until 3.0.0.
 
 Diagnostics report per-category counts plus up to 10 representative event ids:
 `nonfinite`, `negative_field`, `mean_exceeds_max`, `zero_rate`,

@@ -100,14 +100,16 @@ pub enum VariancePolicy {
     /// Replace the row by the variance maximizer on [0, M]: two atoms,
     /// `rate (1 - p)` at 0 and `rate p` at M with `p = mu / M`. Rate and
     /// mean are exact and the variance is the admissible supremum. The
-    /// default for the one-row route from 1.13.0; reported under
-    /// `variance_bernoulli`. Not available on the multi-unit route, which
-    /// keeps the clamp until it adopts this treatment.
+    /// default for the one-row route from 1.13.0 and for the multi-unit
+    /// route from 2.5.0, where the unit is the two-point law of spec
+    /// section 4A given the shared factor; reported under
+    /// `variance_bernoulli`.
     Bernoulli,
     /// Clamp sigma to `factor * sqrt(mu (M - mu))`, keeping the row as a
-    /// (very U-shaped) beta. Reported under `sigma_clamped`. The multi-unit
-    /// routes' default; the one-row route's default until 1.12.0 and
-    /// refused by it from 2.0.0 (`Error::ClampPolicyRemoved`).
+    /// (very U-shaped) beta. Reported under `sigma_clamped`. The one-row
+    /// route's default until 1.12.0 and refused by it from 2.0.0
+    /// (`Error::ClampPolicyRemoved`); the multi-unit routes' default until
+    /// 2.5.0, deprecated there and removed at 3.0.0.
     ClampSigma { factor: f64 },
     /// Fail with [`Error::InadmissibleVariance`].
     Error,
@@ -124,7 +126,8 @@ impl Default for VariancePolicy {
 }
 
 impl VariancePolicy {
-    /// The clamp at the default factor: the multi-unit routes' default.
+    /// The clamp at the default factor (the multi-unit routes' default
+    /// before 2.5.0).
     pub fn clamp_default() -> Self {
         VariancePolicy::ClampSigma {
             factor: DEFAULT_CLAMP_FACTOR,

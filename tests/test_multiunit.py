@@ -282,7 +282,8 @@ def test_row_policies_and_diagnostics(multi):
     nan_row = ("e", "n", 0.01, math.nan, 1.0, 1.0, 100.0)
     over = ("e", "o", 0.01, 150.0, 1.0, 1.0, 100.0)
     views, meta = run_multi(multi, [good, bad, nan_row, over], bucket_size=1.0)
-    assert diag_count(meta, "sigma_clamped") == 1
+    assert diag_count(meta, "variance_bernoulli") == 1  # the default from 2.5.0
+    assert diag_count(meta, "sigma_clamped") == 0
     assert diag_count(meta, "nonfinite") == 1 and diag_count(meta, "mean_exceeds_max") == 1
     assert meta.valid_rows == 2 and meta.valid_events == 1
     assert meta.diagnostics["nonfinite"].examples == ["e/n"]
@@ -293,9 +294,10 @@ def test_row_policies_and_diagnostics(multi):
     assert diag_count(m_atom, "variance_atom") == 1 and m_atom.grid_length == 1031
     with pytest.raises(multi.variance_error):
         run_multi(multi, [good, bad], bucket_size=1.0, variance_policy="error")
-    # The Bernoulli treatment (1.13.0) belongs to the one-row route for now.
-    with pytest.raises(multi.base_error):
-        run_multi(multi, [good, bad], bucket_size=1.0, variance_policy="bernoulli")
+    # The clamp stays selectable until 3.0.0, with a deprecation warning.
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        _, m_clamp = run_multi(multi, [good, bad], bucket_size=1.0, variance_policy="clamp")
+    assert diag_count(m_clamp, "sigma_clamped") == 1 and m_clamp.grid_length == 1101
     _, m_zero = run_multi(multi, [("z", "a", 0.0, 300.0, 40.0, 30.0, 1000.0), good],
                           bucket_size=1.0)
     assert diag_count(m_zero, "zero_rate") == 1 and m_zero.valid_events == 1
@@ -375,6 +377,129 @@ def test_terms_line_is_reusable_in_engine(multi):
     views, meta = run_multi(multi, [("e", "a", 0.01, 1000.0, 0.0, 0.0, 1000.0)], terms=terms,
                             bucket_size=10.0)
     assert views["net"][30] == pytest.approx(0.01)
+
+
+# ---------------------------------------------------------------------------
+# [bernoulli] spec test 26: inadmissible rows are two-point units (2.5.0).
+
+# Homer and Li 2017, Table 11 (the multi-unit article, `tbl-homer`): the
+# personal (P) and commercial (C) rows of the three events as
+# (mean, sd_indep, sd_corr, M). Event 1's commercial row and event 2's
+# personal row are two-point rows.
+HOMER = {
+    1: ((300.0, 400.0, 300.0, 3000.0), (200.0, 300.0, 200.0, 1000.0)),
+    2: ((100.0, 371.0, 267.0, 1000.0), (200.0, 150.0, 533.0, 4000.0)),
+    3: ((100.0, 224.0, 200.0, 2000.0), (100.0, 200.0, 200.0, 2000.0)),
+}
+HOMER_RATES = {1: 0.1, 2: 0.1, 3: 0.5}
+
+
+def article_unit_cdf(unit, x):
+    """The multi-unit article's ``Unit.cdf`` (chunk `setup`): the beta, or the
+    two-point step when ``sigma^2 >= mu (M - mu)``."""
+    from scipy import stats
+
+    mu, sdi, sdc, m = unit
+    sigma = sdi + sdc
+    if sigma * sigma >= mu * (m - mu):
+        p = mu / m
+        return np.where(x < 0, 0.0, np.where(x < m, 1 - p, 1.0))
+    kappa = (mu / m) * (1 - mu / m) / (sigma / m) ** 2 - 1
+    return stats.beta.cdf(x / m, (mu / m) * kappa, (1 - mu / m) * kappa)
+
+
+def article_conditional_pmf(unit, z, n, h):
+    """The article's ``Unit.conditional_pmf``: bucket probabilities given
+    ``Z_c = z`` by differences of the conditional distribution function at
+    the half-bucket edges, one row per node."""
+    from scipy.special import ndtr, ndtri
+
+    mu, sdi, sdc, m = unit
+    w = sdc / math.hypot(sdi, sdc)
+    edges = (np.arange(n + 1) - 0.5) * h
+    cdf = article_unit_cdf(unit, edges)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = ndtri(np.clip(cdf, 0, 1))
+        if w < 1:
+            cond = ndtr((y[None, :] - w * z[:, None]) / math.sqrt(1 - w**2))
+        else:
+            cond = (y[None, :] >= z[:, None]).astype(float)
+    cond[:, 0] = 0.0
+    cond[:, -1] = 1.0
+    return np.diff(cond, axis=1)
+
+
+def article_joint(u1, u2, n1, n2, h, q=64):
+    """The article's ``joint``: the weighted sum over Gauss-Hermite nodes of
+    the outer products of the conditional bucket probabilities."""
+    z, w = np.polynomial.hermite_e.hermegauss(q)
+    w = w / w.sum()
+    c1, c2 = article_conditional_pmf(u1, z, n1, h), article_conditional_pmf(u2, z, n2, h)
+    return (c1 * w[:, None]).T @ c2
+
+
+def test_two_point_unit_in_the_joint(multi):
+    # 80^2 = 6400 >= 30 * 70: the two-point law with p = 0.3, Burke's loading
+    # kept. Over Gauss-Hermite nodes the mixture of the smooth conditional
+    # law is the marginal to rounding; the atoms sit at 0 and M only.
+    bad = rm.Unit(30.0, 50.0, 30.0, 100.0)
+    pmf, x1, _, meta = multi.joint(bad, U2, bucket_size=H, n1=11, n2=N2, n_z=64,
+                                   z_rule="gauss_hermite")
+    marginal = pmf.sum(axis=1)
+    assert math.isclose(marginal[0], 0.7, abs_tol=1e-12)
+    assert math.isclose(marginal[10], 0.3, abs_tol=1e-12)
+    assert np.all(marginal[1:10] == 0.0)
+    assert math.isclose(pmf.sum(), 1.0, abs_tol=1e-12)
+    assert meta.notes[0] == ("variance_bernoulli",)
+    assert math.isclose(meta.sigma_used[0], math.sqrt(30.0 * 70.0), rel_tol=1e-12)
+    assert math.isclose(meta.copula_normal_correlation,
+                        (30.0 / math.hypot(50.0, 30.0)) * (200.0 / math.hypot(300.0, 200.0)))
+    assert 0.0 < meta.grid_correlation < meta.copula_normal_correlation
+    # Independent of the factor when sd_corr = 0: an outer product.
+    pmf_ind, _, _, _ = multi.joint(bad._replace(sd_corr=0.0, sd_indep=80.0), U2, bucket_size=H,
+                                   n1=11, n2=N2, n_z=8)
+    outer = np.outer(pmf_ind.sum(axis=1), pmf_ind.sum(axis=0))
+    assert np.abs(pmf_ind - outer).max() < 1e-15
+
+
+def test_two_point_event_matches_the_article(multi):
+    # Spec test 26: Homer's event 2 (personal two-point, commercial beta)
+    # against the multi-unit article's construction at 64 Gauss-Hermite nodes.
+    h = 10.0
+    for event, (personal, commercial) in HOMER.items():
+        n1, n2 = int(personal[3] / h) + 1, int(commercial[3] / h) + 1
+        pmf, _, _, _ = multi.joint(personal, commercial, bucket_size=h, n1=n1, n2=n2, n_z=64,
+                                   z_rule="gauss_hermite")
+        want = article_joint(personal, commercial, n1, n2, h)
+        assert np.abs(pmf - want).max() < 1e-12, event
+    # The same joint through the views route: the event total of the joint
+    # equals the ground-up total, and the two-point rows are reported.
+    rows = []
+    for event, (personal, commercial) in HOMER.items():
+        rows.append((f"e{event}", "P", HOMER_RATES[event], *personal))
+        rows.append((f"e{event}", "C", HOMER_RATES[event], *commercial))
+    views, meta = run_multi(multi, rows, bucket_size=h, views=("ground_up",), z_nodes=64,
+                            z_rule="gauss_hermite")
+    assert diag_count(meta, "variance_bernoulli") == 2
+    assert set(meta.diagnostics["variance_bernoulli"].examples) == {"e1/C", "e2/P"}
+    total = np.zeros(meta.grid_length)
+    for event, (personal, commercial) in HOMER.items():
+        n1, n2 = int(personal[3] / h) + 1, int(commercial[3] / h) + 1
+        joint = article_joint(personal, commercial, n1, n2, h)
+        idx = np.add.outer(np.arange(n1), np.arange(n2)).ravel()
+        total[:n1 + n2 - 1] += HOMER_RATES[event] * np.bincount(idx, weights=joint.ravel(),
+                                                               minlength=n1 + n2 - 1)
+    assert np.abs(views["ground_up"] - total).max() < 1e-12 * meta.total_rate
+    assert math.isclose(meta.view_mass["ground_up"], meta.total_rate, rel_tol=1e-12)
+    # Gauss-Hermite at 64 nodes misses the marginal of a beta row with a
+    # loading near one (event 2's commercial row has w = 0.96) at the 1e-4
+    # level; the rule's error, not the two-point rows'.
+    assert abs(meta.view_mean_error["ground_up"]) < 1e-3 * meta.analytic_aal
+    # A two-point row beside an atom reconciles exactly whatever the rule.
+    _, m_exact = run_multi(multi, [("e", "P", 0.1, *HOMER[2][0]), ("e", "A", 0.1, 150.0, 0.0, 0.0, 500.0)],
+                           bucket_size=h, views=("ground_up",), z_nodes=64,
+                           z_rule="gauss_hermite")
+    assert abs(m_exact.view_mean_error["ground_up"]) < 1e-12 * m_exact.analytic_aal
 
 
 # ---------------------------------------------------------------------------

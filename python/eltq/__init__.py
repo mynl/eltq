@@ -36,7 +36,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.4.3"
+__version__ = "2.5.0"
 
 try:
     from eltq._eltq import (
@@ -788,7 +788,7 @@ def multiunit_views(
     z_nodes=32,
     z_rule="midpoint",
     normalize=False,
-    variance_policy="clamp",
+    variance_policy="bernoulli",
     clamp_factor=0.999,
     threads=None,
     chunk_rows=None,
@@ -799,9 +799,10 @@ def multiunit_views(
 
     Rows are event x unit (contiguous per event, one row per unit, rate
     constant within an event). Per unit, the conditional loss is a beta on
-    [0, M] with total sd ``sd_indep + sd_corr``; units of one event share a
-    common factor through Burke's one-factor Gaussian copula and are
-    independent given it. Per-unit DecL-style ``terms`` (see
+    [0, M] with total sd ``sd_indep + sd_corr``, or the two-point law on 0
+    and M when that sd is inadmissible for a beta (spec section 4A); units
+    of one event share a common factor through Burke's one-factor Gaussian
+    copula and are independent given it. Per-unit DecL-style ``terms`` (see
     ``eltq.terms``) define the views: ``ground_up`` = X, ``gross`` after
     deductible and limit, ``ceded`` by the occurrence clauses applied to
     gross, ``net`` = gross - ceded. The total across units of each view is
@@ -832,8 +833,12 @@ def multiunit_views(
         Shared-factor quadrature rule.
     normalize : bool, default False
         Divide every view by the total contributing rate.
-    variance_policy : {"clamp", "error", "drop", "atom"}, default "clamp"
-        Treatment of a unit row with inadmissible beta variance.
+    variance_policy : {"bernoulli", "clamp", "error", "drop", "atom"}, default "bernoulli"
+        Treatment of a unit row with inadmissible beta variance: the
+        two-point law on 0 and M with ``P(X = M) = mu / M`` given the shared
+        factor (reported under ``variance_bernoulli``), the clamp of versions
+        before 2.5.0 (deprecated, with a ``DeprecationWarning``; removed at
+        3.0.0), a ``VarianceError``, a dropped row, or an atom at the mean.
     clamp_factor : float, default 0.999
         Clamp target as a fraction of the admissible sigma bound.
     threads : int, optional
@@ -858,6 +863,7 @@ def multiunit_views(
     meta : MultiMeta
     """
     if _rust_multiunit_views is not None:
+        _reference_multiunit().warn_if_clamp(variance_policy)
         columns = tuple(
             _column(name, values)
             for name, values in zip(
@@ -931,7 +937,7 @@ def joint_two_units(
     n2,
     z_nodes=1001,
     z_rule="midpoint",
-    variance_policy="clamp",
+    variance_policy="bernoulli",
     clamp_factor=0.999,
 ):
     """Exact bucketed bivariate pmf of one event across two units.
@@ -943,9 +949,13 @@ def joint_two_units(
     ``n2`` nodes (each must cover its unit's maximum loss); ``meta`` is a
     ``JointMeta``. The shared factor is integrated by ``z_nodes`` quadrature
     nodes (``z_rule`` midpoint or gauss_hermite); marginals of the pmf agree
-    with directly bucketing each beta up to quadrature error.
+    with directly bucketing each beta up to quadrature error. A unit whose
+    variance is inadmissible follows ``variance_policy`` as in
+    ``multiunit_views`` (``bernoulli``, the deprecated ``clamp``, ``error``
+    or ``atom``).
     """
     if _rust_joint_two_units is not None:
+        _reference_multiunit().warn_if_clamp(variance_policy)
         pmf, x1, x2, meta_dict = _rust_joint_two_units(
             tuple(float(v) for v in unit1), tuple(float(v) for v in unit2),
             bucket_size=float(bucket_size), n1=int(n1), n2=int(n2),

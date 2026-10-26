@@ -92,11 +92,6 @@ pub enum Error {
     UnitInadmissibleVariance { unit: String, sigma2: f64, v_max: f64 },
     #[error("the drop variance policy is not available for the two-unit joint")]
     BadJointPolicy,
-    #[error(
-        "the bernoulli variance policy is not available for the multi-unit route \
-         (use clamp, error, drop, or atom)"
-    )]
-    BernoulliPolicyUnavailable,
     #[error("terms: {0}")]
     Terms(String),
     #[error("multi-unit structure: {0}")]

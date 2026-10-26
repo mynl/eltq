@@ -1,7 +1,8 @@
 # Plan: multi-unit coupling rules, Bernoulli rows, the stratified factor rule and occurrence outputs
 
 Date: 2026-10-25, revised 2026-10-26 after the multi-unit article's analysis of the routes
-Status: draft for review; not started. Section 4A of the specification, the contract this plan
+Status: executing from 2026-10-26 (Steve's `/execute-plan`, with decision 2 revised to uncapped
+only); see the execution log. Section 4A of the specification, the contract this plan
 implements, was written with the first draft and committed with it; its routes paragraph was
 revised on 2026-10-26 (commit e749f1a). The further amendments this revision needs are listed in
 the steps that make them.
@@ -122,18 +123,16 @@ standardization, and sets it aside as less conservative than Burke's; it is not 
 
 ## Decisions taken
 
-Steve, 2026-10-25:
+Steve, 2026-10-25 (and change 2026-10-26):
 
 1. Burke's coupling is the default; comonotone, independent and Homer are supported; the
    variance-matched loading is optional and last.
-2. Homer's allocation is offered both ways, by a keyword `homer_cap` (revised the same day; the
-   first version capped always). Uncapped, as published, $X_k = X_R\mu_k/\mu_R$: the allocations
-   sum to the rolled loss and keep the mean, but a unit can receive more than $M_k$. Capped,
-   $X_k = \min(X_R\mu_k/\mu_R, M_k)$, as the one-row route caps at $M$: no unit exceeds its
-   exposure, the allocations no longer sum to the rolled loss, and the mean falls by the
-   expected excess. Nothing is reallocated and no offset restores the mean. The expected excess
-   over the exposures is reported either way: lost when capped, carried when not. The default is
-   decision 8.
+2. Homer's allocation is offered uncapped only, as published: $X_k = X_R\mu_k/\mu_R$, the
+   allocations sum to the rolled loss and keep the mean, and a unit can receive more than $M_k$.
+   There is no `homer_cap` keyword and no capped mode (revised 2026-10-26 at execution; the
+   first version capped always, the second offered both). The expected allocation over the
+   exposures, $\sum_j\lambda_j\mathsf P(\sum_k(X_{R,j}\mu_k/\mu_R-M_k)^+)$, is still reported
+   (`homer_excess_mean`) as the one figure that shows the published rule's defect.
 3. Outputs are arrays only. The annual bivariate aggregate, its marginals and its conditional
    distributions are the aggregate package's (`BivariateAggregate(mode="discrete")`, `exeqa_df`),
    fed from eltq's occurrence arrays; eltq writes no DecL.
@@ -149,8 +148,8 @@ Steve, 2026-10-26, on review of the first draft (its open questions 1 to 4 are d
    `pair_severity` and `unit_total_severity`. The first draft's unit-against-total matrices
    $S_{u\Sigma}$ are dropped: the conditional means need only the vectors $m_u$ (step [joint]).
 7. The default $Q$ may differ by rule.
-8. `homer_cap` defaults to `False`, the published rule, so that `coupling="homer"` reproduces the
-   paper.
+8. Withdrawn 2026-10-26 with the revision of decision 2: there is no cap to default, and
+   `coupling="homer"` reproduces the paper.
 9. Every one-dimensional bucketing on this route is by cdf differences at the half-bucket edges of
    the fixed grid: one-unit events and the rolled row of the `homer` coupling alike. Section 4A
    and tests 25 and 27 require the one-row survival grid instead and are amended; the survival
@@ -470,4 +469,27 @@ the helper for the annual conditional mean, is decision 11.
 
 ## Execution log
 
-(empty)
+Claude commits, Steve pushes. The Rust gate is `cargo test -p eltq-core` at the plain test
+profile (the acceptance section above says `--release`; the project's delta of 2026-10-26 moved
+the gate, and that is the one used). `dev/plan-chebyshev-z.md`, which [z-rule] above says stays
+parked, had already been closed as superseded in `dev/done/` on 2026-10-25; nothing to park.
+
+### [bernoulli] 2.5.0, 2026-10-26
+
+- `UnitKind::TwoPoint` (Rust) and `_TWO_POINT` (reference) with `two_point_conditional` on both
+  backends; `UnitPlan::depends_on_factor` replaces the ad hoc test in `views.rs` pass 2. The
+  default policy of `MultiConfig`, `JointConfig`, both Python entry points and the reference
+  is `bernoulli`; the roll-up diagnostic's rolled row follows it.
+- `Error::BernoulliPolicyUnavailable` removed. The deprecation warning for `clamp` is raised in
+  the Python layer (`reference_multiunit.warn_if_clamp`, called by the reference functions and
+  by the package wrapper on the Rust path), since the engine has no warning channel.
+- Divergence: the plan's test for event 2 of Homer's table against the article's construction
+  is run for all three events; the article's `Unit`, `conditional_pmf` and `joint` are ported
+  into `tests/test_multiunit.py` (a test must not import the article), and both backends agree
+  with them within $10^{-12}$ per cell. The views route's mean reconciliation on that table is
+  checked at $10^{-3}$ relative, not to rounding: Gauss-Hermite at 64 nodes misses the marginal
+  of event 2's commercial row ($w = 0.96$) at the $10^{-4}$ level, the rule's error that
+  [z-rule] addresses; a two-point row beside an atom reconciles within $10^{-12}$.
+- No golden moved: the multi-unit fixture has no inadmissible row (the generator's comment on
+  e4/b said "clamped"; $900^2 < 600\times1400$, and the comment is corrected).
+- Spec: section 4's `clamp` bullet and test 26's last clause amended as the step says.

@@ -50,6 +50,12 @@ pub enum UnitKind {
     Comonotone,
     /// General case.
     Beta,
+    /// Inadmissible variance under the Bernoulli policy: the two-point law
+    /// on 0 and M with `P(X = M) = mu / M` (spec section 4A). Given `Z_c =
+    /// z` the unit loses M with probability `1 - Phi((Phi^{-1}(1 - p) -
+    /// w_corr z) / w_indep)`, a step at `z = Phi^{-1}(1 - p)` when `w_corr
+    /// = 1`.
+    TwoPoint,
 }
 
 /// Validated, derived per-unit parameters.
@@ -74,6 +80,20 @@ impl UnitPlan {
     /// Largest loss the unit can produce.
     pub fn support(&self) -> f64 {
         if self.kind == UnitKind::Atom { self.mean_loss } else { self.max_loss }
+    }
+
+    /// `P(X = M) = mu / M` of a two-point unit.
+    pub fn two_point_p(&self) -> f64 {
+        self.mean_loss / self.max_loss
+    }
+
+    /// Whether the unit's conditional law varies with the shared factor.
+    pub fn depends_on_factor(&self) -> bool {
+        match self.kind {
+            UnitKind::Comonotone => true,
+            UnitKind::Beta | UnitKind::TwoPoint => self.w_corr > 0.0,
+            UnitKind::Atom | UnitKind::Drop => false,
+        }
     }
 }
 
@@ -145,17 +165,31 @@ pub fn prepare_unit(
                 plan.sigma_used = sigma;
                 plan.notes.push("sigma_clamped");
             }
-            VariancePolicy::Bernoulli => return Err(Error::BernoulliPolicyUnavailable),
+            VariancePolicy::Bernoulli => {
+                // The variance maximizer on [0, M]; its sd in ratios.
+                plan.sigma_used = mu * bound.sqrt();
+                plan.notes.push("variance_bernoulli");
+                plan.kind = UnitKind::TwoPoint;
+                set_loadings(&mut plan, s_i, s_c);
+                return Ok(plan);
+            }
         }
     }
     let (alpha, beta) = beta_params(m, mu, sigma);
     plan.alpha = alpha;
     plan.beta = beta;
+    set_loadings(&mut plan, s_i, s_c);
+    plan.kind = if s_i == 0.0 { UnitKind::Comonotone } else { UnitKind::Beta };
+    Ok(plan)
+}
+
+/// The copula loadings `w_corr = sd_corr / t`, `w_indep = sd_indep / t`,
+/// `t = hypot(sd_indep, sd_corr)` (Burke 2016, step iv); `t > 0` here since
+/// a unit with both sds zero is an atom.
+fn set_loadings(plan: &mut UnitPlan, s_i: f64, s_c: f64) {
     let t = s_i.hypot(s_c);
     plan.w_corr = s_c / t;
     plan.w_indep = s_i / t;
-    plan.kind = if s_i == 0.0 { UnitKind::Comonotone } else { UnitKind::Beta };
-    Ok(plan)
 }
 
 /// Row classification for the multi-unit ELT route: the outcome of
@@ -241,7 +275,14 @@ pub fn classify_unit_row(
                     sigma: factor * mu * bound.sqrt(),
                 })
             }
-            VariancePolicy::Bernoulli => Err(Error::BernoulliPolicyUnavailable),
+            VariancePolicy::Bernoulli => {
+                diagnostics.note(Category::VarianceBernoulli, row);
+                Ok(RowClass {
+                    kind: UnitKind::TwoPoint,
+                    mu,
+                    sigma: mu * bound.sqrt(),
+                })
+            }
         };
     }
     Ok(RowClass {
@@ -270,20 +311,27 @@ impl UnitPlan {
             let (alpha, beta) = beta_params(spec.max_loss, class.mu, class.sigma);
             plan.alpha = alpha;
             plan.beta = beta;
-            let t = spec.sd_indep.hypot(spec.sd_corr);
-            plan.w_corr = spec.sd_corr / t;
-            plan.w_indep = spec.sd_indep / t;
+        }
+        if matches!(class.kind, UnitKind::Beta | UnitKind::Comonotone | UnitKind::TwoPoint) {
+            set_loadings(&mut plan, spec.sd_indep, spec.sd_corr);
         }
         plan
     }
 }
 
 /// Unconditional bucket pmf of one unit: beta cdf differences at
-/// half-bucket edges, or the linear deposit of an atom.
+/// half-bucket edges, the linear deposit of an atom, or the two atoms of a
+/// two-point unit.
 pub fn marginal_pmf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
     let mut row = vec![0.0_f64; n];
     if plan.kind == UnitKind::Atom {
         deposit(&mut row, plan.mean_loss, 1.0, 1.0 / bucket_size);
+        return row;
+    }
+    if plan.kind == UnitKind::TwoPoint {
+        let p = plan.two_point_p();
+        deposit(&mut row, 0.0, 1.0 - p, 1.0 / bucket_size);
+        deposit(&mut row, plan.max_loss, p, 1.0 / bucket_size);
         return row;
     }
     if plan.kind == UnitKind::Drop {
@@ -340,6 +388,8 @@ impl<'a> LayerMeans<'a> {
         }
         match self.plan.kind {
             UnitKind::Atom => (self.plan.mean_loss - attach).max(0.0).min(limit),
+            // The loss is M with probability p and 0 otherwise.
+            UnitKind::TwoPoint => self.plan.two_point_p() * (self.plan.max_loss - attach).max(0.0).min(limit),
             UnitKind::Drop => 0.0,
             _ => {
                 let m = self.plan.max_loss;
@@ -437,8 +487,27 @@ pub fn conditional_matrix(
             let y = edge_scores(plan, bucket_size, n);
             conditional_rows_from_scores(&y, plan.w_corr, plan.w_indep, z, &mut out);
         }
+        UnitKind::TwoPoint => {
+            let p = plan.two_point_p();
+            for (r, &zq) in out.chunks_exact_mut(n).zip(z) {
+                let at_max = two_point_conditional(p, plan.w_corr, plan.w_indep, zq);
+                deposit(r, 0.0, 1.0 - at_max, inv_h);
+                deposit(r, plan.max_loss, at_max, inv_h);
+            }
+        }
     }
     Ok(out)
+}
+
+/// `P(X = M | Z_c = z)` of a two-point unit: `1 - Phi((Phi^{-1}(1 - p) -
+/// w_corr z) / w_indep)`, the step `1{z > Phi^{-1}(1 - p)}` at loading one.
+pub fn two_point_conditional(p: f64, w_corr: f64, w_indep: f64, z: f64) -> f64 {
+    let y0 = normal::quantile(1.0 - p);
+    if w_indep == 0.0 {
+        if z > y0 { 1.0 } else { 0.0 }
+    } else {
+        1.0 - normal::cdf((y0 - w_corr * z) / w_indep)
+    }
 }
 
 /// Fill `out` (row-major `(z.len() x (y.len() - 1))`) with the adjacent
@@ -476,7 +545,7 @@ impl JointConfig {
             n2,
             z_nodes: 1001,
             z_rule: ZRule::Midpoint,
-            variance_policy: VariancePolicy::clamp_default(),
+            variance_policy: VariancePolicy::default(),
         }
     }
 }
@@ -687,11 +756,14 @@ mod tests {
         let clamped = prepare_unit(&bad, "u", VariancePolicy::clamp_default()).unwrap();
         assert_eq!(clamped.notes, vec!["sigma_clamped"]);
         assert!(clamped.sigma_used < (30.0_f64 * 70.0).sqrt());
-        // The Bernoulli treatment belongs to the one-row route for now.
-        assert!(matches!(
-            prepare_unit(&bad, "u", VariancePolicy::Bernoulli),
-            Err(Error::BernoulliPolicyUnavailable)
-        ));
+        // The default (2.5.0): the two-point law with the maximizer's sd and
+        // Burke's loadings.
+        let two_point = prepare_unit(&bad, "u", VariancePolicy::default()).unwrap();
+        assert_eq!(two_point.kind, UnitKind::TwoPoint);
+        assert_eq!(two_point.notes, vec!["variance_bernoulli"]);
+        assert!((two_point.sigma_used - (30.0_f64 * 70.0).sqrt()).abs() < 1e-12);
+        assert!((two_point.w_corr - 30.0 / 50.0_f64.hypot(30.0)).abs() < 1e-15);
+        assert!((two_point.two_point_p() - 0.3).abs() < 1e-15);
         assert_eq!(prepare_unit(&bad, "u", VariancePolicy::Atom).unwrap().kind, UnitKind::Atom);
         assert_eq!(prepare_unit(&bad, "u", VariancePolicy::Drop).unwrap().kind, UnitKind::Drop);
         assert!(matches!(
@@ -707,6 +779,14 @@ mod tests {
         ));
     }
 
+    /// Inadmissible: 80^2 = 6400 >= 30 * 70.
+    const BAD: UnitSpec = UnitSpec {
+        mean_loss: 30.0,
+        sd_indep: 50.0,
+        sd_corr: 30.0,
+        max_loss: 100.0,
+    };
+
     #[test]
     fn conditional_rows_are_distributions() {
         let (z, _) = z_quadrature(16, ZRule::Midpoint).unwrap();
@@ -721,6 +801,12 @@ mod tests {
                 sd_corr: 0.0,
                 ..U1
             },
+            BAD,
+            UnitSpec {
+                sd_indep: 0.0,
+                sd_corr: 80.0,
+                ..BAD
+            },
         ] {
             let plan = prepare_unit(&spec, "u", VariancePolicy::default()).unwrap();
             let n = grid_length_for(plan.support(), 10.0);
@@ -731,6 +817,56 @@ mod tests {
                 assert!(row.iter().all(|&p| p >= -1e-16));
             }
         }
+    }
+
+    // [bernoulli] Spec test 26: the two-point conditional law. Its mixture
+    // over Gauss-Hermite nodes is the marginal (smooth in z for w < 1), the
+    // atoms sit at 0 and M only, and the step at loading one resolves to the
+    // nodes' cumulative weight.
+    #[test]
+    fn two_point_conditional_law() {
+        let plan = prepare_unit(&BAD, "u", VariancePolicy::default()).unwrap();
+        let (z, w) = z_quadrature(64, ZRule::GaussHermite).unwrap();
+        let n = grid_length_for(plan.support(), 10.0);
+        let c = conditional_matrix(&plan, 10.0, n, &z).unwrap();
+        let mut marginal = vec![0.0; n];
+        for (row, &wq) in c.chunks_exact(n).zip(&w) {
+            for (m, &p) in marginal.iter_mut().zip(row) {
+                *m += wq * p;
+            }
+        }
+        assert!((marginal[0] - 0.7).abs() < 1e-12);
+        assert!((marginal[n - 1] - 0.3).abs() < 1e-12);
+        assert!(marginal[1..n - 1].iter().all(|&p| p == 0.0));
+        let direct = marginal_pmf(&plan, 10.0, n);
+        assert_eq!((direct[0], direct[n - 1]), (0.7, 0.3));
+        // Each row's mass at M is the closed form.
+        for (row, &zq) in c.chunks_exact(n).zip(&z) {
+            let want = 1.0 - normal::cdf((normal::quantile(0.7) - plan.w_corr * zq) / plan.w_indep);
+            assert!((row[n - 1] - want).abs() < 1e-15);
+        }
+        // Layer means: the loss is M with probability p.
+        let lm = LayerMeans::new(&plan);
+        assert!((lm.layer_mean(0.0, f64::INFINITY) - 30.0).abs() < 1e-12);
+        assert!((lm.layer_mean(40.0, 50.0) - 0.3 * 50.0).abs() < 1e-12);
+        // Loading one: a step at Phi^{-1}(1 - p); at the midpoint nodes the
+        // mixture gives p to the nearest cumulative node weight.
+        let step = prepare_unit(
+            &UnitSpec {
+                sd_indep: 0.0,
+                sd_corr: 80.0,
+                ..BAD
+            },
+            "u",
+            VariancePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!((step.kind, step.w_corr), (UnitKind::TwoPoint, 1.0));
+        let (z, w) = z_quadrature(1000, ZRule::Midpoint).unwrap();
+        let c = conditional_matrix(&step, 10.0, n, &z).unwrap();
+        let at_max: f64 = c.chunks_exact(n).zip(&w).map(|(row, &wq)| wq * row[n - 1]).sum();
+        assert!((at_max - 0.3).abs() <= 1.0 / 1000.0 + 1e-12);
+        assert!(c.chunks_exact(n).all(|row| row[n - 1] == 0.0 || row[n - 1] == 1.0));
     }
 
     #[test]
