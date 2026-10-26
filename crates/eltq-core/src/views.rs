@@ -1239,15 +1239,16 @@ pub fn multiunit_views(
                     plan = plan.with_loading(w);
                 }
                 let n_unit = grid_length_for(plan.support(), h);
+                let kernel_failure = |_| Error::KernelFailure {
+                    row,
+                    alpha: plan.alpha,
+                    beta: plan.beta,
+                };
                 let (base, rows) = if one_unit || exact_path {
-                    (marginal_pmf(&plan, h, n_unit), 1)
+                    (marginal_pmf(&plan, h, n_unit).map_err(kernel_failure)?, 1)
                 } else {
                     let unit_rule = if plan.depends_on_factor() { &rule } else { &single };
-                    let base = conditional_matrix(&plan, h, n_unit, unit_rule).map_err(|_| Error::KernelFailure {
-                        row,
-                        alpha: plan.alpha,
-                        beta: plan.beta,
-                    })?;
+                    let base = conditional_matrix(&plan, h, n_unit, unit_rule).map_err(kernel_failure)?;
                     (base, unit_rule.len())
                 };
                 mu_sum += plan.mean_loss;
@@ -1277,7 +1278,7 @@ pub fn multiunit_views(
                     .map(|s| if rolled.mean_loss > 0.0 { s.mean_loss / rolled.mean_loss } else { 0.0 })
                     .collect();
                 let n_r = grid_length_for(rolled_plan.support(), h);
-                let base = marginal_pmf(&rolled_plan, h, n_r);
+                let base = marginal_pmf(&rolled_plan, h, n_r)?;
                 let unit_terms: Vec<&UnitTerms> = units.iter().map(|u| &terms[u.code]).collect();
                 for (vi, &view) in computed.iter().enumerate() {
                     if view == View::GroundUp {
@@ -1292,7 +1293,7 @@ pub fn multiunit_views(
                     }
                 }
                 let max_losses: Vec<f64> = specs.iter().map(|s| s.max_loss).collect();
-                excess_acc.add(lam * homer_excess(&LayerMeans::new(&rolled_plan), &shares, &max_losses));
+                excess_acc.add(lam * homer_excess(&LayerMeans::new(&rolled_plan)?, &shares, &max_losses));
                 Some((rolled_plan, shares))
             } else {
                 worker.materialize(&mut units, terms, &computed);
@@ -1329,16 +1330,16 @@ pub fn multiunit_views(
             if config.pair.is_some() || config.first_moments {
                 let view = computed[0];
                 let unit_terms: Vec<&UnitTerms> = units.iter().map(|u| &terms[u.code]).collect();
-                let homer_values: Option<(Vec<f64>, Vec<Vec<f64>>)> = homer.as_ref().map(|(plan, shares)| {
+                let homer_values: Option<(Vec<f64>, Vec<Vec<f64>>)> = homer.as_ref().map(|(plan, shares)| -> Result<_, Error> {
                     let n_r = grid_length_for(plan.support(), h);
-                    let base = marginal_pmf(plan, h, n_r);
+                    let base = marginal_pmf(plan, h, n_r)?;
                     let values: Vec<Vec<f64>> = unit_terms
                         .iter()
                         .zip(shares)
                         .map(|(t, &s)| (0..n_r).map(|i| if s > 0.0 { t.view(view, s * i as f64 * h) } else { 0.0 }).collect())
                         .collect();
-                    (base, values)
-                });
+                    Ok((base, values))
+                }).transpose()?;
                 if let Some([cu, cw]) = config.pair {
                     let iu = units.iter().position(|u| u.code == cu);
                     let iw = units.iter().position(|u| u.code == cw);
@@ -1432,8 +1433,8 @@ pub fn multiunit_views(
                     partial.moment_identity = partial.moment_identity.max(lam * err);
                 }
             }
-            let layer_means: Vec<LayerMeans> = units.iter().map(|u| LayerMeans::new(&u.plan)).collect();
-            let rolled_means = homer.as_ref().map(|(plan, _)| LayerMeans::new(plan));
+            let layer_means: Vec<LayerMeans> = units.iter().map(|u| LayerMeans::new(&u.plan)).collect::<Result<_, _>>()?;
+            let rolled_means = homer.as_ref().map(|(plan, _)| LayerMeans::new(plan)).transpose()?;
             for (vi, &view) in computed.iter().enumerate() {
                 let pmf = &pmfs[vi];
                 let mass: f64 = pmf.iter().sum();
@@ -1470,7 +1471,7 @@ pub fn multiunit_views(
                 if roll_up_slot == Some(vi) && units.len() >= 2 {
                     let specs: Vec<UnitSpec> = units.iter().map(|u| input.spec(u.row)).collect();
                     let rolled_plan = prepare_unit(&rolled_spec(&specs), "rolled", VariancePolicy::default())?;
-                    let rolled_pmf = marginal_pmf(&rolled_plan, h, pmf.len());
+                    let rolled_pmf = marginal_pmf(&rolled_plan, h, pmf.len())?;
                     let (sd_exact, sd_rolled) = (sd_of(pmf, h), sd_of(&rolled_pmf, h));
                     let (q_exact, q_rolled) = (quantile_of(pmf, h, 0.99), quantile_of(&rolled_pmf, h, 0.99));
                     partial.roll_up.push(RollUpEntry {
@@ -1722,8 +1723,8 @@ mod tests {
             let class = classify_unit_row(row, &spec, VariancePolicy::clamp_default(), &mut Diagnostics::default()).unwrap();
             UnitPlan::from_row(&class, &spec)
         };
-        let p1 = marginal_pmf(&plan(0), 10.0, 101);
-        let p2 = marginal_pmf(&plan(1), 10.0, 201);
+        let p1 = marginal_pmf(&plan(0), 10.0, 101).unwrap();
+        let p2 = marginal_pmf(&plan(1), 10.0, 201).unwrap();
         let mut want = Vec::new();
         convolve_direct(&p1, &p2, &mut want);
         assert_eq!(result.meta.grid_length, 301);

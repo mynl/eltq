@@ -25,10 +25,12 @@ use crate::deposit::deposit;
 use crate::diagnostics::{Category, Diagnostics};
 use crate::error::Error;
 use crate::incbeta::BetaFn;
+use crate::law::{BetaLaw, NarrowLaw};
 use crate::normal;
 use crate::quadrature::{FactorRule, ZRule};
 use crate::sum::{Neumaier, sum};
 use crate::terms::{Clause, UnitTerms, View};
+use crate::validate::ATOM_RESOLUTION;
 
 /// Per-unit ELT fields in loss currency units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -417,6 +419,12 @@ pub fn prepare_unit(
         plan.notes.push("degenerate_atom");
         return Ok(plan);
     }
+    // Narrower than the standardized coordinate resolves: an atom at mu,
+    // as `validate::classify_row` makes it (spec sections 4 and 4A).
+    if sigma < mu * ATOM_RESOLUTION {
+        plan.notes.push("atom_by_resolution");
+        return Ok(plan);
+    }
     // In ratios, as `validate::classify_row` (peer review, finding I3).
     let bound = (m - mu) / mu;
     if (sigma / mu) * (sigma / mu) >= bound {
@@ -522,6 +530,18 @@ pub fn classify_unit_row(
             sigma,
         });
     }
+    // Each unit row is classified exactly as a one-row ELT row (spec section
+    // 4A), so a standard deviation below 2^-48 of the mean is an atom at mu
+    // here too, under its own category (before 2.10.1 it was a beta, and one
+    // that narrow is beyond every kernel).
+    if sigma < mu * ATOM_RESOLUTION {
+        diagnostics.note(Category::AtomByResolution, row);
+        return Ok(RowClass {
+            kind: UnitKind::Atom,
+            mu,
+            sigma,
+        });
+    }
     // In ratios, as `validate::classify_row` (peer review, finding I3).
     let bound = (m - mu) / mu;
     let nondegenerate = if s_i == 0.0 { UnitKind::Comonotone } else { UnitKind::Beta };
@@ -596,33 +616,45 @@ impl UnitPlan {
     }
 }
 
+/// The law of a beta or comonotone unit's loss share at its parameters: the
+/// incomplete beta, or the narrow kernel from `LARGE_PARAMETER_FROM` (spec
+/// section 5A), whose continued fraction would return NaN there; a law that
+/// cannot be evaluated is the typed kernel error, never a NaN.
+pub fn unit_law(plan: &UnitPlan) -> Result<BetaLaw, Error> {
+    BetaLaw::new(plan.alpha, plan.beta).ok_or(Error::KernelFailure {
+        row: 0,
+        alpha: plan.alpha,
+        beta: plan.beta,
+    })
+}
+
 /// Unconditional bucket pmf of one unit: beta cdf differences at
 /// half-bucket edges, the linear deposit of an atom, or the two atoms of a
 /// two-point unit.
-pub fn marginal_pmf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
+pub fn marginal_pmf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Result<Vec<f64>, Error> {
     let mut row = vec![0.0_f64; n];
     if plan.kind == UnitKind::Atom {
         deposit(&mut row, plan.mean_loss, 1.0, 1.0 / bucket_size);
-        return row;
+        return Ok(row);
     }
     if plan.kind == UnitKind::TwoPoint {
         let p = plan.two_point_p();
         deposit(&mut row, 0.0, 1.0 - p, 1.0 / bucket_size);
         deposit(&mut row, plan.max_loss, p, 1.0 / bucket_size);
-        return row;
+        return Ok(row);
     }
     if plan.kind == UnitKind::Drop {
-        return row;
+        return Ok(row);
     }
-    let bf = BetaFn::new(plan.alpha, plan.beta);
+    let law = unit_law(plan)?;
     let mut prev = 0.0;
     for (k, slot) in row.iter_mut().enumerate() {
         let edge = (k as f64 + 0.5) * bucket_size;
-        let next = bf.cdf(edge / plan.max_loss);
+        let next = law.cdf(edge / plan.max_loss);
         *slot = next - prev;
         prev = next;
     }
-    row
+    Ok(row)
 }
 
 /// Analytic layer means of one unit's marginal (the LEV identity
@@ -630,31 +662,40 @@ pub fn marginal_pmf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
 /// two incomplete-beta bundles built once per unit.
 pub struct LayerMeans<'a> {
     plan: &'a UnitPlan,
-    bf: Option<(BetaFn, BetaFn)>,
+    law: Option<LayerLaw>,
+}
+
+/// The limited mean's kernel: the two incomplete betas, or the narrow
+/// kernel's moment from `LARGE_PARAMETER_FROM`.
+enum LayerLaw {
+    Regular(BetaFn, BetaFn),
+    Narrow(NarrowLaw),
 }
 
 impl<'a> LayerMeans<'a> {
-    pub fn new(plan: &'a UnitPlan) -> Self {
-        let bf = if matches!(plan.kind, UnitKind::Beta | UnitKind::Comonotone) {
-            Some((
-                BetaFn::new(plan.alpha, plan.beta),
-                BetaFn::new(plan.alpha + 1.0, plan.beta),
-            ))
+    pub fn new(plan: &'a UnitPlan) -> Result<Self, Error> {
+        let law = if matches!(plan.kind, UnitKind::Beta | UnitKind::Comonotone) {
+            Some(match unit_law(plan)? {
+                BetaLaw::Regular(bf) => LayerLaw::Regular(bf, BetaFn::new(plan.alpha + 1.0, plan.beta)),
+                BetaLaw::Narrow(law) => LayerLaw::Narrow(law),
+            })
         } else {
             None
         };
-        LayerMeans { plan, bf }
+        Ok(LayerMeans { plan, law })
     }
 
     fn limited_mean(&self, y: f64) -> f64 {
-        let (bf, bf_plus) = self.bf.as_ref().expect("beta unit");
         let mean = self.plan.alpha / (self.plan.alpha + self.plan.beta);
         if y <= 0.0 {
-            0.0
-        } else if y >= 1.0 {
-            mean
-        } else {
-            y * (1.0 - bf.cdf(y)) + mean * bf_plus.cdf(y)
+            return 0.0;
+        }
+        if y >= 1.0 {
+            return mean;
+        }
+        match self.law.as_ref().expect("beta unit") {
+            LayerLaw::Regular(bf, bf_plus) => y * (1.0 - bf.cdf(y)) + mean * bf_plus.cdf(y),
+            LayerLaw::Narrow(law) => law.limited_mean(y),
         }
     }
 
@@ -714,24 +755,24 @@ pub fn grid_length_for(max_loss: f64, bucket_size: f64) -> usize {
 /// Normal scores of the n + 1 half-bucket edges of a beta unit,
 /// `y_e = Phi^{-1}(I_{edge_e / M}(alpha, beta))`, `edge_e = (e - 1/2) h`.
 /// Edges below 0 map to -inf and edges at or above M to +inf.
-pub fn edge_scores(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
-    let bf = BetaFn::new(plan.alpha, plan.beta);
-    (0..=n)
+pub fn edge_scores(plan: &UnitPlan, bucket_size: f64, n: usize) -> Result<Vec<f64>, Error> {
+    let law = unit_law(plan)?;
+    Ok((0..=n)
         .map(|e| {
             let edge = (e as f64 - 0.5) * bucket_size;
-            normal::quantile(bf.cdf(edge / plan.max_loss))
+            normal::quantile(law.cdf(edge / plan.max_loss))
         })
-        .collect()
+        .collect())
 }
 
 /// The unit's marginal distribution function at the `n + 1` half-bucket
 /// edges `(e - 1/2) h`: 0 below zero, 1 at or above M; the beta's
 /// incomplete beta or the two-point step `1 - p` in between.
-pub fn edge_cdf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
+pub fn edge_cdf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Result<Vec<f64>, Error> {
     match plan.kind {
         UnitKind::TwoPoint => {
             let p = plan.two_point_p();
-            (0..=n)
+            Ok((0..=n)
                 .map(|e| {
                     let edge = (e as f64 - 0.5) * bucket_size;
                     if edge < 0.0 {
@@ -742,16 +783,16 @@ pub fn edge_cdf(plan: &UnitPlan, bucket_size: f64, n: usize) -> Vec<f64> {
                         1.0
                     }
                 })
-                .collect()
+                .collect())
         }
         _ => {
-            let bf = BetaFn::new(plan.alpha, plan.beta);
-            (0..=n)
+            let law = unit_law(plan)?;
+            Ok((0..=n)
                 .map(|e| {
                     let edge = (e as f64 - 0.5) * bucket_size;
-                    bf.cdf(edge / plan.max_loss)
+                    law.cdf(edge / plan.max_loss)
                 })
-                .collect()
+                .collect())
         }
     }
 }
@@ -789,7 +830,7 @@ pub fn conditional_matrix(
         return Ok(out);
     }
     if rule.is_stratified() {
-        stratified_rows(plan, bucket_size, n, rule, &mut out);
+        stratified_rows(plan, bucket_size, n, rule, &mut out)?;
         return Ok(out);
     }
     let z = &rule.nodes;
@@ -812,7 +853,7 @@ pub fn conditional_matrix(
             }
         }
         UnitKind::Beta => {
-            let y = edge_scores(plan, bucket_size, n);
+            let y = edge_scores(plan, bucket_size, n)?;
             conditional_rows_from_scores(&y, plan.w_corr, plan.w_indep, z, &mut out);
         }
         UnitKind::TwoPoint => {
@@ -839,8 +880,8 @@ pub fn two_point_conditional(p: f64, w_corr: f64, w_indep: f64, z: f64) -> f64 {
 }
 
 /// The stratified rule's rows for a beta, comonotone or two-point unit.
-fn stratified_rows(plan: &UnitPlan, bucket_size: f64, n: usize, rule: &FactorRule, out: &mut [f64]) {
-    let f = edge_cdf(plan, bucket_size, n);
+fn stratified_rows(plan: &UnitPlan, bucket_size: f64, n: usize, rule: &FactorRule, out: &mut [f64]) -> Result<(), Error> {
+    let f = edge_cdf(plan, bucket_size, n)?;
     if plan.kind == UnitKind::Comonotone || plan.w_indep == 0.0 {
         // Loading one: the marginal restricted to the stratum, exact.
         for (s, r) in out.chunks_exact_mut(n).enumerate() {
@@ -853,7 +894,7 @@ fn stratified_rows(plan: &UnitPlan, bucket_size: f64, n: usize, rule: &FactorRul
                 prev = next;
             }
         }
-        return;
+        return Ok(());
     }
     // Loading below one: the stratum average of Phi((y - w z) / w_indep) at
     // each edge score y is (U(y, z_s) - U(y, z_{s+1})) over the stratum's
@@ -892,6 +933,7 @@ fn stratified_rows(plan: &UnitPlan, bucket_size: f64, n: usize, rule: &FactorRul
         }
         std::mem::swap(&mut prev_col, &mut next_col);
     }
+    Ok(())
 }
 
 /// Fill `out` (row-major `(z.len() x (y.len() - 1))`) with the adjacent
@@ -1043,7 +1085,7 @@ pub fn joint_two_units(units: [UnitSpec; 2], config: &JointConfig) -> Result<Joi
             // Each bucket of the rolled row at the pair of its allocations,
             // deposited linearly on each axis.
             let n_r = grid_length_for(rolled_plan.support(), h);
-            let base = marginal_pmf(rolled_plan, h, n_r);
+            let base = marginal_pmf(rolled_plan, h, n_r)?;
             let inv_h = 1.0 / h;
             let mut row1 = vec![0.0_f64; n1];
             let mut row2 = vec![0.0_f64; n2];
@@ -1070,8 +1112,8 @@ pub fn joint_two_units(units: [UnitSpec; 2], config: &JointConfig) -> Result<Joi
         }
         (Coupling::Comonotone, _) => {
             // Exact: the merged breakpoints of the two bucketed marginals.
-            let m1 = marginal_pmf(&plans[0], h, n1);
-            let m2 = marginal_pmf(&plans[1], h, n2);
+            let m1 = marginal_pmf(&plans[0], h, n1)?;
+            let m2 = marginal_pmf(&plans[1], h, n2)?;
             comonotone_merge(&[&m1, &m2], |idx, mass| pmf[idx[0] * n2 + idx[1]] += mass);
         }
         _ => {
@@ -1244,6 +1286,31 @@ mod tests {
         ));
     }
 
+    // [Eltq-Multiunit-Narrow-Units] Spec test 34: a unit narrower than 2^-48
+    // of its mean is an atom by resolution, on both classifiers, and a unit
+    // past the fraction's regime is bucketed by the narrow kernel, half on
+    // each side of its mean, with no NaN.
+    #[test]
+    fn narrow_units_are_atoms_or_narrow_kernels() {
+        let tiny = UnitSpec { mean_loss: 0.5, sd_indep: 1e-16, sd_corr: 0.0, max_loss: 1.0 };
+        let plan = prepare_unit(&tiny, "u", VariancePolicy::default()).unwrap();
+        assert_eq!((plan.kind, plan.notes.clone()), (UnitKind::Atom, vec!["atom_by_resolution"]));
+        let mut diag = Diagnostics::default();
+        let class = classify_unit_row(0, &tiny, VariancePolicy::default(), &mut diag).unwrap();
+        assert_eq!(class.kind, UnitKind::Atom);
+        assert_eq!(diag.get(Category::AtomByResolution).count, 1);
+        let narrow = UnitSpec { sd_indep: 1e-5, ..tiny };
+        let plan = prepare_unit(&narrow, "u", VariancePolicy::default()).unwrap();
+        assert!(unit_law(&plan).unwrap().is_narrow());
+        let pmf = marginal_pmf(&plan, 0.2, 6).unwrap();
+        assert!(pmf.iter().all(|p| p.is_finite()));
+        assert!((pmf[2] - 0.5).abs() < 1e-12 && (pmf[3] - 0.5).abs() < 1e-12);
+        let strata = FactorRule::new(32, ZRule::Stratified).unwrap();
+        let rows = conditional_matrix(&plan, 0.2, 6, &strata).unwrap();
+        assert!(rows.iter().all(|p| p.is_finite() && *p >= 0.0));
+        assert!((LayerMeans::new(&plan).unwrap().layer_mean(0.0, 0.4) - 0.4).abs() < 1e-12);
+    }
+
     /// Inadmissible: 80^2 = 6400 >= 30 * 70.
     const BAD: UnitSpec = UnitSpec {
         mean_loss: 30.0,
@@ -1307,7 +1374,7 @@ mod tests {
                 let plan = prepare_unit(&spec, "u", VariancePolicy::default()).unwrap();
                 let n = grid_length_for(plan.support(), 10.0);
                 let c = conditional_matrix(&plan, 10.0, n, &strata).unwrap();
-                let direct = marginal_pmf(&plan, 10.0, n);
+                let direct = marginal_pmf(&plan, 10.0, n).unwrap();
                 let mut mixed = vec![0.0; n];
                 for (row, &wq) in c.chunks_exact(n).zip(&strata.weights) {
                     for (m, &p) in mixed.iter_mut().zip(row) {
@@ -1348,7 +1415,7 @@ mod tests {
         assert!((marginal[0] - 0.7).abs() < 1e-12);
         assert!((marginal[n - 1] - 0.3).abs() < 1e-12);
         assert!(marginal[1..n - 1].iter().all(|&p| p == 0.0));
-        let direct = marginal_pmf(&plan, 10.0, n);
+        let direct = marginal_pmf(&plan, 10.0, n).unwrap();
         assert_eq!((direct[0], direct[n - 1]), (0.7, 0.3));
         // Each row's mass at M is the closed form.
         for (row, &zq) in c.chunks_exact(n).zip(z) {
@@ -1356,7 +1423,7 @@ mod tests {
             assert!((row[n - 1] - want).abs() < 1e-15);
         }
         // Layer means: the loss is M with probability p.
-        let lm = LayerMeans::new(&plan);
+        let lm = LayerMeans::new(&plan).unwrap();
         assert!((lm.layer_mean(0.0, f64::INFINITY) - 30.0).abs() < 1e-12);
         assert!((lm.layer_mean(40.0, 50.0) - 0.3 * 50.0).abs() < 1e-12);
         // Loading one: a step at Phi^{-1}(1 - p); at the midpoint nodes the

@@ -1284,3 +1284,85 @@ def test_fft_weights_are_nonnegative():
         for view in meta.views:
             assert views[view].min() >= 0.0, view
             assert math.isclose(views[view].sum(), meta.total_rate, rel_tol=1e-12), view
+
+
+# ---------------------------------------------------------------------------
+# [Eltq-Multiunit-Narrow-Units] spec test 34: large parameters and atoms by
+# resolution on the multi-unit route (`dev/done/plan-model-moments-and-
+# windowed-views.md`).
+
+#: mu = 1/2, sigma = 1e-5 on [0, 1]: alpha = beta of about 1.25e9, beyond the
+#: continued fraction's regime, which gave NaN on the engine before 2.10.1.
+NARROW_UNIT = ("e", "a", 0.1, 0.5, 1e-5, 0.0, 1.0)
+PARTNER = ("e", "b", 0.1, 0.3, 0.0, 0.1, 1.0)
+
+
+def test_narrow_unit_is_half_on_each_side_of_its_mean(multi):
+    views, meta = run_multi(multi, [NARROW_UNIT], bucket_size=0.2, views=("ground_up",))
+    grid = views["ground_up"]
+    assert np.isfinite(grid).all()
+    assert np.abs(grid[[2, 3]] - 0.05).max() < 1e-12 * 0.1
+    assert grid[[0, 1, 4, 5]].max() == 0.0
+    assert math.isclose(meta.view_mass["ground_up"], 0.1, rel_tol=1e-14)
+
+
+def test_narrow_unit_beside_a_partner_agrees_across_backends():
+    reference, package = MULTI_IMPLS
+    out = [run_multi(impl, [NARROW_UNIT, PARTNER], bucket_size=0.2, views=("ground_up",))[0]["ground_up"]
+           for impl in (reference, package)]
+    assert all(np.isfinite(grid).all() for grid in out)
+    assert np.abs(out[0] - out[1]).max() < 1e-12 * 0.1
+    assert math.isclose(out[1].sum(), 0.1, rel_tol=1e-14)
+
+
+def _unit_with_min_parameter(smallest, share):
+    """``(mu, sigma)`` on ``M = 1`` of the beta with mean ``share`` and
+    ``min(alpha, beta) = smallest``."""
+    kappa = smallest / min(share, 1.0 - share)
+    return share, math.sqrt(share * (1.0 - share) / (kappa + 1.0))
+
+
+@pytest.mark.parametrize("coupling", ["burke", "comonotone", "independent", "homer"])
+def test_large_parameter_sweep_agrees_across_backends(coupling):
+    # Measured 2026-10-26: within 1.4e-12 of the rate at 1e4 (the engine's
+    # fraction against SciPy), 6e-14 from 2e5 to 2e6, 1.3e-13 at 1e9,
+    # 5.8e-11 at 1e14 (the quadrature kernel nearest its handover), 6e-14 at
+    # 1e16 and 1.1e-13 at 1e24 (both the normal law).
+    reference, package = MULTI_IMPLS
+    for smallest in (1e4, 2e5, 2e6, 1e9, 1e14, 1e16, 1e24):
+        for share in (0.5, 0.25):
+            mu, sd = _unit_with_min_parameter(smallest, share)
+            rows = [("e", "a", 0.1, mu, sd / 2.0, sd / 2.0, 1.0), ("e", "b", 0.1, 0.3, 0.05, 0.05, 1.0)]
+            for rule in ("stratified", "midpoint", "gauss_hermite"):
+                options = dict(bucket_size=0.2, views=("ground_up",), coupling=coupling, z_rule=rule)
+                out = [run_multi(impl, rows, **options)[0]["ground_up"] for impl in (reference, package)]
+                for grid in out:
+                    assert np.isfinite(grid).all() and grid.min() >= 0.0, (smallest, share, rule)
+                    assert math.isclose(grid.sum(), 0.1, rel_tol=1e-14), (smallest, share, rule)
+                assert np.abs(out[0] - out[1]).max() < 1e-10 * 0.1, (smallest, share, rule)
+
+
+def test_unit_below_the_resolution_is_an_atom(multi):
+    tiny = ("e", "a", 0.1, 0.5, 1e-16, 0.0, 1.0)
+    views, meta = run_multi(multi, [tiny, PARTNER], bucket_size=0.2, views=("ground_up",))
+    assert diag_count(meta, "atom_by_resolution") == 1
+    # The same unit stated as an atom, sigma zero, gives the same grid.
+    exact = ("e", "a", 0.1, 0.5, 0.0, 0.0, 1.0)
+    atom, atom_meta = run_multi(multi, [exact, PARTNER], bucket_size=0.2, views=("ground_up",))
+    assert diag_count(atom_meta, "degenerate_atom") == 1
+    assert np.abs(views["ground_up"] - atom["ground_up"]).max() == 0.0
+
+
+@pytest.mark.parametrize("scale", [1e160, 1e-200])
+def test_scaled_units_classify_as_at_unit_scale(multi, scale):
+    # Spec test 10's row (M, mu, sigma) = (1, 0.4, 0.1) beside a partner: at
+    # these scales sigma^2 and mu (M - mu) overflow or underflow, and the
+    # reference's product-form test made the row a Bernoulli row (1e160) or
+    # an atom (1e-200) before 2.10.1.
+    rows = [("e", "a", 1.0, 0.4, 0.05, 0.05, 1.0), ("e", "b", 1.0, 0.3, 0.05, 0.05, 1.0)]
+    scaled = [(e, u, lam, mu * scale, si * scale, sc * scale, m * scale) for e, u, lam, mu, si, sc, m in rows]
+    base, base_meta = run_multi(multi, rows, bucket_size=0.1, views=("ground_up",))
+    views, meta = run_multi(multi, scaled, bucket_size=0.1 * scale, views=("ground_up",))
+    assert meta.diagnostics == {} and base_meta.diagnostics == {}
+    assert meta.grid_length == base_meta.grid_length
+    assert np.abs(views["ground_up"] - base["ground_up"]).max() < 1e-12

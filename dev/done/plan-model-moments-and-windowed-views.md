@@ -703,10 +703,9 @@ Divergences:
 - The union bound's lower bounds are spelled out: $1-\prod_u\mathsf P(X_u\le t\mid z)$ for $R$, and
   the larger of $t^r\mathsf P(S>t\mid z)$ and the units' own tails for $T_r$ (with $t^r-c^r$ for
   $D_r$). The lattice bracket is described as waiting on evidence (ruling 10), not specified.
-- Test 34's agreement between the implementations is $10^{-10}$ of the rate below
-  $\min(\alpha,\beta)=10^{14}$ and test 31's $10^{-8}$ from there: near $10^{16}$ the engine's
-  quadrature kernel and the reference's SciPy each carry about $10^{-6}$ (spec section 5A), so the
-  plan's single $10^{-10}$ is not attainable across the handover.
+- Test 34's agreement was first written as $10^{-10}$ below $\min(\alpha,\beta)=10^{14}$ and
+  test 31's $10^{-8}$ from there, fearing the kernels' $10^{-6}$ near the handover; the
+  measurement at 2.10.1 met the plan's single $10^{-10}$ throughout, and the spec says so.
 - Tidying in the same commit: the header's path to the coupling plan now points into `dev/done/`,
   and a literal `\n\n` in test 32 that had put the sentence introducing the multi-unit tests ahead
   of test 33 is replaced, the sentence now preceding test 25.
@@ -718,3 +717,29 @@ Planning checks, 2026-10-26: read aggregate's plan (rulings, `[ELT-Row-Laws]`,
 behavior above against the source at the cited lines. Recomputed the two regression rows with SciPy
 and mpmath. Probed the multi-unit route on both backends for the narrow and sub-resolution rows.
 Searched the proposed names. No code, specification or other repository was changed.
+
+### [Eltq-Multiunit-Narrow-Units], 2.10.1
+
+The probe reproduced on the engine (NaN at nodes 2 and 3, mass NaN) before the change; after it
+both backends give 0.05 and 0.05, and the two-unit event agrees to $5.5\times10^{-18}$. Test 34 on
+both backends; the sweep over $\min(\alpha,\beta)\in\{10^4,2\times10^5,2\times10^6,10^9,10^{14},
+10^{16},10^{24}\}$ at mean shares $\tfrac12$ and $\tfrac14$, under `burke`, `comonotone`,
+`independent` and `homer` and the three factor rules, has the backends within $1.4\times10^{-12}$
+of the rate at $10^4$, $6\times10^{-14}$ at $2\times10^5$ and $2\times10^6$, $1.3\times10^{-13}$ at
+$10^9$, $5.8\times10^{-11}$ at $10^{14}$, $6\times10^{-14}$ at $10^{16}$ and $1.1\times10^{-13}$ at
+$10^{24}$, the rate exact to $10^{-14}$ everywhere. No golden held such a row; all hold.
+Divergences:
+
+- A new module `crates/eltq-core/src/law.rs` (`BetaLaw`, `NarrowLaw`) carries the law of a beta
+  share at every parameter size, the incomplete beta below $2\times10^5$ bit for bit and the
+  narrow kernel normalized on its bulk (relative floor `TAIL_RATE_FLOOR`) above; the plan's file
+  list did not name it. `narrow_bulk` became `pub(crate)` and `NarrowKernel` gained `mean` and
+  `sd`. The multi-unit functions `marginal_pmf`, `edge_cdf`, `edge_scores` and
+  `LayerMeans::new` now return `Result`, the typed kernel error replacing what would have been a
+  NaN.
+- On the reference, units past $2\times10^5$ take the one-row reference's law (SciPy's incomplete
+  beta with the normal law where SciPy fails, and the normal law from $10^{16}$), and the
+  comonotone node path takes `large_parameter_quantiles`, which the engine's `beta_quantiles`
+  already used; the plan named the classification only. The reference's clamp is also in ratios.
+- `atom_by_resolution` applies in `prepare_unit` too, so the two-unit joint and the rolled row of
+  the `homer` coupling and of the roll-up diagnostic classify the same way.

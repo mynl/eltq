@@ -341,6 +341,16 @@ impl NarrowKernel {
         self.normal
     }
 
+    /// The mean of the loss share, `alpha / (alpha + beta)`.
+    pub fn mean(&self) -> f64 {
+        self.ybar
+    }
+
+    /// The standard deviation of the loss share.
+    pub fn sd(&self) -> f64 {
+        self.sd
+    }
+
     /// The normal law's `int_lo^hi exp(-z^2 / 2) dy` and the same with `y`,
     /// `z = (y - ybar) / sd`, through `erfc` on the side where the tail is
     /// thin so that a far upper-tail difference keeps its relative precision.
@@ -457,7 +467,7 @@ impl NarrowEvent {
 /// tenth of the floor's share of the running mass (so the mass dropped
 /// beyond it is below the floor), or at 0 and `M`: `(lower, stop)`, or
 /// `None` when either side needs more than `NARROW_STEPS` steps.
-fn narrow_bulk(kernel: &NarrowKernel, m: f64, mu: f64, sigma: f64, lam: f64, floor: f64) -> Option<(f64, f64)> {
+pub(crate) fn narrow_bulk(kernel: &NarrowKernel, m: f64, mu: f64, sigma: f64, lam: f64, floor: f64) -> Option<(f64, f64)> {
     let cut = 0.1 * floor / lam;
     let side = |direction: f64, limit: f64| -> Option<f64> {
         let mut acc = 0.0;

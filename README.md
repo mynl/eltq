@@ -98,6 +98,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [coupling] `coupling=` burke, comonotone, independent, homer; the comonotone and Homer paths exact with no factor rule; the Homer allocation uncapped with `homer_excess_mean` | 2.8.0 | done |
 | [joint] `occurrence_pair_joint`, `occurrence_unit_first_moment` and `annual_conditional_mean`: the joint aggregate route's inputs and the conditional means by the Mecke identity | 2.9.0 | done |
 | [matched] `coupling="matched"`, Burke's loadings scaled per event to the roll-up convention's variance, with `matched_shortfall`; [parity] the multi-unit benchmark rerun under the stratified default (`benchmarks/report-2.10.0.md`) | 2.10.0 | done |
+| [narrow-units] beta units past the continued fraction's regime evaluated by the narrow kernel, no NaN; units below the resolution are atoms; the reference's unit classification in ratios | 2.10.1 | done |
 
 ## Layout
 

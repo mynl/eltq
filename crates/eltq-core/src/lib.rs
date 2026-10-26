@@ -26,6 +26,7 @@ pub mod incbeta;
 pub mod diagnostics;
 pub mod error;
 pub mod kernel;
+pub mod law;
 pub mod multiunit;
 pub mod normal;
 pub mod quadrature;

@@ -60,7 +60,8 @@ from scipy.stats import beta as beta_dist
 from scipy.stats import norm
 
 from eltq._meta import (
-    STRATA_BODY_TOP, STRATA_TAIL_FLOOR, STRATA_TAIL_RATIO, JointMeta, MultiMeta, RowIssues,
+    ATOM_RESOLUTION, LARGE_PARAMETER_FROM, STRATA_BODY_TOP, STRATA_TAIL_FLOOR, STRATA_TAIL_RATIO, JointMeta,
+    MultiMeta, RowIssues,
 )
 from eltq.reference import (
     DEFAULT_CLAMP_FACTOR,
@@ -69,6 +70,9 @@ from eltq.reference import (
     GridOverflowError,
     VarianceError,
     _deposit,
+    _law,
+    beta_params,
+    large_parameter_quantiles,
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, check_grid_alignment, parse_terms
 
@@ -180,11 +184,21 @@ def prepare_unit(unit, label, variance_policy="bernoulli",
         if diagnostics is not None:
             _note(diagnostics, "degenerate_atom", label)
         return prep
-    v_max = mu * (m - mu)
-    if sigma * sigma >= v_max:
+    if sigma < mu * ATOM_RESOLUTION:
+        # Narrower than the standardized coordinate resolves: an atom at mu,
+        # as the one-row classification makes it (spec sections 4 and 4A).
+        prep.notes.append("atom_by_resolution")
+        if diagnostics is not None:
+            _note(diagnostics, "atom_by_resolution", label)
+        return prep
+    # The admissibility test in ratios, (sigma / mu)^2 against M / mu - 1,
+    # as the engine and the one-row reference form it (peer review, finding
+    # I3): sigma^2 and mu (M - mu) overflow from a scale of about 1e154.
+    bound = (m - mu) / mu
+    if (sigma / mu) ** 2 >= bound:
         if variance_policy == "error":
             raise VarianceError(
-                f"{label}: sigma^2 = {sigma * sigma} >= mu (M - mu) = {v_max} "
+                f"{label}: sigma^2 = {sigma * sigma} >= mu (M - mu) = {mu * (m - mu)} "
                 "is inadmissible for a beta")
         if variance_policy == "drop":
             prep.kind = _DROP
@@ -199,7 +213,7 @@ def prepare_unit(unit, label, variance_policy="bernoulli",
             return prep
         if variance_policy == "bernoulli":
             prep.kind = _TWO_POINT
-            prep.sigma_used = math.sqrt(v_max)
+            prep.sigma_used = mu * math.sqrt(bound)
             prep.notes.append("variance_bernoulli")
             if diagnostics is not None:
                 _note(diagnostics, "variance_bernoulli", label)
@@ -207,15 +221,12 @@ def prepare_unit(unit, label, variance_policy="bernoulli",
             prep.w_corr = s_c / t
             prep.w_indep = s_i / t
             return prep
-        sigma = clamp_factor * math.sqrt(v_max)
+        sigma = clamp_factor * mu * math.sqrt(bound)
         prep.sigma_used = sigma
         prep.notes.append("sigma_clamped")
         if diagnostics is not None:
             _note(diagnostics, "sigma_clamped", label)
-    p = mu / m
-    kappa = mu * (m - mu) / (sigma * sigma) - 1.0
-    prep.alpha = p * kappa
-    prep.beta = (1.0 - p) * kappa
+    prep.alpha, prep.beta = beta_params(m, mu, sigma)
     t = math.hypot(s_i, s_c)
     prep.w_corr = s_c / t
     prep.w_indep = s_i / t
@@ -540,6 +551,23 @@ def _gauss_hermite(n: int):
     return nodes, weights / weights.sum()
 
 
+def _large(prep: _Prepped) -> bool:
+    """Whether a beta unit's parameters are past ``LARGE_PARAMETER_FROM``,
+    from which the engine takes the narrow kernel (spec section 5A) and the
+    reference the one-row reference's law: SciPy's incomplete beta with the
+    normal law where it fails, and the normal law from
+    ``NARROW_NORMAL_FROM``."""
+    return min(prep.alpha, prep.beta) >= LARGE_PARAMETER_FROM
+
+
+def beta_cdf(prep: _Prepped, y) -> np.ndarray:
+    """``P(Y <= y)`` of a beta unit's loss share: SciPy's beta below
+    ``LARGE_PARAMETER_FROM``, the one-row reference's law from there."""
+    if _large(prep):
+        return np.clip(_law(prep.alpha, prep.beta).cdf(np.clip(y, 0.0, 1.0)), 0.0, 1.0)
+    return beta_dist.cdf(y, prep.alpha, prep.beta)
+
+
 def grid_length_for(max_loss: float, bucket_size: float) -> int:
     """Smallest grid length covering ``max_loss``: ceil(M / h) + 1."""
     return int(math.ceil(max_loss / bucket_size)) + 1 if max_loss > 0.0 else 1
@@ -560,7 +588,7 @@ def marginal_pmf(prep: _Prepped, bucket_size: float, n: int) -> np.ndarray:
         _deposit(row, prep.max_loss, p, 1.0 / bucket_size)
         return row
     edges = (np.arange(n + 1) - 0.5) * bucket_size
-    return np.diff(beta_dist.cdf(edges / prep.max_loss, prep.alpha, prep.beta))
+    return np.diff(beta_cdf(prep, edges / prep.max_loss))
 
 
 def two_point_conditional(p: float, w_corr: float, w_indep: float, z: np.ndarray) -> np.ndarray:
@@ -581,7 +609,7 @@ def edge_cdf(prep: _Prepped, bucket_size: float, n: int) -> np.ndarray:
     edges = (np.arange(n + 1) - 0.5) * bucket_size
     if prep.kind == _TWO_POINT:
         return np.where(edges < 0.0, 0.0, np.where(edges < prep.max_loss, 1.0 - prep.two_point_p, 1.0))
-    return beta_dist.cdf(edges / prep.max_loss, prep.alpha, prep.beta)
+    return beta_cdf(prep, edges / prep.max_loss)
 
 
 def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z) -> np.ndarray:
@@ -643,7 +671,12 @@ def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z) -> np.ndarra
     if prep.kind == _COMONOTONE:
         # U = Phi(w_corr z) with no independent noise: an atom per z value.
         u = norm.cdf(prep.w_corr * z)
-        xs = prep.max_loss * beta_dist.ppf(u, prep.alpha, prep.beta)
+        if _large(prep):
+            # The Cornish-Fisher expansion both backends take there (spec
+            # section 5); SciPy's inverse drifts at large parameters.
+            xs = prep.max_loss * large_parameter_quantiles(prep.alpha, prep.beta, u)
+        else:
+            xs = prep.max_loss * beta_dist.ppf(u, prep.alpha, prep.beta)
         for q, x in enumerate(xs):
             _deposit(pmf[q], min(x, prep.max_loss), 1.0, inv_h)
         return pmf
@@ -651,7 +684,7 @@ def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z) -> np.ndarra
     # y = Phi^{-1}(F_beta(edge / M)), is computed once; edges below 0 map to
     # -inf and edges at or above M to +inf, so each row is complete.
     edges = (np.arange(n + 1) - 0.5) * bucket_size
-    y = norm.ppf(beta_dist.cdf(edges / prep.max_loss, prep.alpha, prep.beta))
+    y = norm.ppf(beta_cdf(prep, edges / prep.max_loss))
     with np.errstate(invalid="ignore"):
         cdf = norm.cdf((y[None, :] - prep.w_corr * z[:, None]) / prep.w_indep)
     return np.diff(cdf, axis=1)
@@ -878,6 +911,11 @@ def beta_limited_mean(y: float, alpha: float, beta: float) -> float:
         return 0.0
     if y >= 1.0:
         return alpha / (alpha + beta)
+    if min(alpha, beta) >= LARGE_PARAMETER_FROM:
+        # The one-row reference's law, whose partial expectation is the
+        # first moment above y.
+        law = _law(alpha, beta)
+        return y * float(law.sf(y)) + alpha / (alpha + beta) - float(law.partial(y))
     return y * (1.0 - betainc(alpha, beta, y)) + alpha / (alpha + beta) * betainc(alpha + 1.0, beta, y)
 
 

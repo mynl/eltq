@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.10.1] - 2026-10-26
+
+### Fixed
+
+- [narrow-units] A beta unit past the continued fraction's regime, `min(alpha, beta)` from 2e5, no longer turns `multiunit_views` grids to NaN on the engine: its distribution function, edge scores, stratified rows and layer means go through the one-row route's narrow kernel, the normal law from 1e16 (spec section 5A), and a law that cannot be evaluated is the typed kernel error. The unit mu = 1/2, sigma = 1e-5 on [0, 1] (alpha = beta = 1.25e9) gives 0.05 and 0.05 at h = 0.2 where it gave NaN. The reference takes the one-row reference's law there and the Cornish-Fisher quantiles on its comonotone node path. Spec test 34: across `min(alpha, beta)` from 1e4 to 1e24, every coupling but `matched` and every factor rule, no NaN, the rate exact and the backends within 6e-11 of the rate (worst at 1e14).
+- [atoms] A unit with `sigma < 2^-48 mu` is an atom under `atom_by_resolution` on the multi-unit route, as on the one-row route; it was a beta beyond every kernel.
+- [ratios] The reference's multi-unit admissibility test, shape parameters and clamp are formed in ratios, as the engine's have been since 2.4.1, so a unit classifies the same at monetary scales of 1e160 and 1e-200 on both backends. Grids at ordinary scales are unchanged (the goldens hold).
+
 ## [2.10.0] - 2026-10-26
 
 ### Added
