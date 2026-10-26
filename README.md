@@ -169,7 +169,11 @@ Survival method (`benchmarks/report-1.16.0.md`, Zen 5 desktop): the
 million-row mixture portfolio at the default 100 nodes per decade in 0.96 s
 against 0.78 s for the quantiles method at K = 32, and a million-row
 small-alpha portfolio in 2.7 s against 1.0 s, where the quantiles method
-loses 20% of the expected loss and the survival method 0.6%.
+loses 20% of the expected loss and the survival method 0.6%. That is a cost
+comparison, not an efficiency one: `benchmarks/run_accuracy.py` reports the
+error each method's time buys, by band of the exceedance rate, and at K = 32
+the quantiles method is wrong by its whole value from the hundred-year band
+on where the survival method is within 1e-5 (`benchmarks/report-2.4.2.md`).
 
 Multi-unit route (`benchmarks/report-1.11.0.md`, same laptop): ~0.91M unit
 rows (100k events x 10 units, typical term sparsity) with all four views at
