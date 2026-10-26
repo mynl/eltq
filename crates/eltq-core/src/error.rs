@@ -104,4 +104,6 @@ pub enum Error {
     BadConvolution(String),
     #[error("unknown coupling {0:?} (expected burke, comonotone, independent, homer, or matched)")]
     BadCoupling(String),
+    #[error("tail query edge {edge} with top node {top_node}: both must be finite with 0 <= top_node <= edge")]
+    BadTailEdge { edge: f64, top_node: f64 },
 }

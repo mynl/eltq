@@ -33,6 +33,7 @@ pub mod normal;
 pub mod quadrature;
 pub mod quantize;
 pub mod sum;
+pub mod tails;
 pub mod terms;
 pub mod validate;
 pub mod views;
@@ -52,6 +53,7 @@ pub use multiunit::{Coupling, JointConfig, JointMeta, JointResult, MatchedScale,
 pub use quadrature::{FactorRule, ZRule, z_quadrature};
 pub use quantize::{Classified, EltInput, classify_rows, classify_rows_with, quantize};
 pub use moments::{ModelMoments, RowLaw, model_moments};
+pub use tails::{TailMoments, TailRegimes, tail_moments};
 pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};
 pub use views::{
     Convolution, FirstMoments, MatchedEntry, MultiConfig, MultiInput, MultiMeta, MultiResult, PairResult, RollUpEntry,

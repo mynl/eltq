@@ -44,6 +44,10 @@ FALLBACK_SCRIPT = textwrap.dedent(
         [0.1], [100.0], [50.0], [10.0], [10.0], event_ids=["a"])
     assert math.isclose(moments.raw_moments[1], 290.0, rel_tol=1e-14)
     assert moments.method == "closed_form"
+    tail = eltq.tail_moments_arrays(
+        [0.1], [100.0], [50.0], [10.0], [10.0], edge=[50.0, 100.0])
+    assert math.isclose(tail.rate_above[0], 0.05, rel_tol=1e-12)
+    assert tail.rate_above[1] == 0.0 and tail.method == "exact"
 
     # CSV fallback route with the canonical fixture.
     raw_c, secondary_c, meta_c = eltq.quantize_csv(

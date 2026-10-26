@@ -17,7 +17,7 @@ use std::sync::Arc;
 use eltq_core::{
     ClassifyOptions, Clause, Config, Convolution, Coupling, Curve, EltInput, Error as CoreError, JointConfig, Meta,
     Method, MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule, build_curve,
-    classify_rows, joint_two_units as core_joint_two_units, model_moments,
+    classify_rows, joint_two_units as core_joint_two_units, model_moments, tail_moments,
     multiunit_views as core_multiunit_views, quantize,
 };
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
@@ -554,6 +554,70 @@ fn moments_arrays<'py>(
     Ok(dict)
 }
 
+/// Tail measures of a one-row ELT at candidate edges with no grid (spec
+/// section 4B): a dict of flat arrays (the per-order ones edge-major, three
+/// per edge, reshaped by the Python wrapper), the regimes, the overflow flags
+/// and the diagnostics.
+#[pyfunction]
+#[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *, edge,
+    top_node=None, mean_is_loss_rate=false, variance_policy="bernoulli", threads=None))]
+#[allow(clippy::too_many_arguments)]
+fn tail_moments_arrays<'py>(
+    py: Python<'py>,
+    rate: PyReadonlyArray1<'py, f64>,
+    max_loss: PyReadonlyArray1<'py, f64>,
+    mean_loss: PyReadonlyArray1<'py, f64>,
+    sd_indep: PyReadonlyArray1<'py, f64>,
+    sd_corr: PyReadonlyArray1<'py, f64>,
+    edge: PyReadonlyArray1<'py, f64>,
+    top_node: Option<PyReadonlyArray1<'py, f64>>,
+    mean_is_loss_rate: bool,
+    variance_policy: &str,
+    threads: Option<usize>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let options = ClassifyOptions {
+        mean_is_loss_rate,
+        variance_policy: parse_one_row_variance_policy(variance_policy)?,
+    };
+    let input = EltInput {
+        rate: contiguous("rate", &rate)?,
+        max_loss: contiguous("max_loss", &max_loss)?,
+        mean_loss: contiguous("mean_loss", &mean_loss)?,
+        sd_indep: contiguous("sd_indep", &sd_indep)?,
+        sd_corr: contiguous("sd_corr", &sd_corr)?,
+    };
+    let edges = contiguous("edge", &edge)?;
+    let nodes = match &top_node {
+        Some(c) => Some(contiguous("top_node", c)?),
+        None => None,
+    };
+    let t = py
+        .detach(|| tail_moments(&input, &options, edges, nodes, threads))
+        .map_err(|e| to_py_err(py, e))?;
+    let flat = |v: &[[f64; 3]]| -> Vec<f64> { v.iter().flatten().copied().collect() };
+    let dict = PyDict::new(py);
+    dict.set_item("moments_above", flat(&t.moments_above).into_pyarray(py))?;
+    dict.set_item("excess_above", flat(&t.excess_above).into_pyarray(py))?;
+    dict.set_item("top_half_excess", flat(&t.top_half_excess).into_pyarray(py))?;
+    dict.set_item("edge", t.edge.into_pyarray(py))?;
+    dict.set_item("top_node", t.top_node.into_pyarray(py))?;
+    dict.set_item("rate_above", t.rate_above.into_pyarray(py))?;
+    dict.set_item("top_half_rate", t.top_half_rate.into_pyarray(py))?;
+    dict.set_item("total_rate", t.total_rate)?;
+    let regimes = PyDict::new(py);
+    regimes.set_item("incomplete_beta", t.regimes.incomplete_beta)?;
+    regimes.set_item("narrow_kernel", t.regimes.narrow_kernel)?;
+    regimes.set_item("normal_law", t.regimes.normal_law)?;
+    regimes.set_item("atoms", t.regimes.atoms)?;
+    regimes.set_item("two_point", t.regimes.two_point)?;
+    dict.set_item("regimes", regimes)?;
+    dict.set_item("moment_overflow", t.moment_overflow.to_vec())?;
+    dict.set_item("input_rows", t.input_rows)?;
+    dict.set_item("valid_rows", t.valid_rows)?;
+    dict.set_item("diagnostics", diagnostics_to_dict(py, &t.diagnostics, None)?)?;
+    Ok(dict)
+}
+
 type JointReturn<'py> = (
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray1<f64>>,
@@ -847,5 +911,6 @@ fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(joint_two_units, m)?)?;
     m.add_function(wrap_pyfunction!(multiunit_views, m)?)?;
     m.add_function(wrap_pyfunction!(moments_arrays, m)?)?;
+    m.add_function(wrap_pyfunction!(tail_moments_arrays, m)?)?;
     Ok(())
 }

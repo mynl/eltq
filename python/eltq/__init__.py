@@ -33,11 +33,11 @@ import numpy as np
 
 from eltq._meta import (
     DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA, CurveMeta, FirstMomentMeta, GridMeta, JointMeta, Meta,
-    ModelMoments, MultiMeta, PairMeta, RowIssues,
+    ModelMoments, MultiMeta, PairMeta, RowIssues, TailMoments,
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.11.0"
+__version__ = "2.12.0"
 
 try:
     from eltq._eltq import (
@@ -69,6 +69,10 @@ try:
         from eltq._eltq import moments_arrays as _rust_moments_arrays
     except ImportError:  # extension older than 2.11.0
         _rust_moments_arrays = None
+    try:
+        from eltq._eltq import tail_moments_arrays as _rust_tail_moments_arrays
+    except ImportError:  # extension older than 2.12.0
+        _rust_tail_moments_arrays = None
 
     BACKEND = "rust"
 except ImportError:
@@ -88,6 +92,7 @@ except ImportError:
     _rust_multiunit_views = None
     _rust_exceedance_curve = None
     _rust_moments_arrays = None
+    _rust_tail_moments_arrays = None
 
 if BACKEND == "rust":
     try:
@@ -119,6 +124,8 @@ __all__ = [
     "ExceedanceCurve",
     "moments_arrays",
     "ModelMoments",
+    "tail_moments_arrays",
+    "TailMoments",
     "CurveMeta",
     "GridMeta",
     "joint_two_units",
@@ -414,6 +421,92 @@ def moments_arrays(
         diagnostics=diagnostics,
         **out,
     )
+
+
+def tail_moments_arrays(
+    rate,
+    max_loss,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    *,
+    edge,
+    top_node=None,
+    mean_is_loss_rate=False,
+    variance_policy="bernoulli",
+    threads=None,
+    event_ids=None,
+) -> TailMoments:
+    """Tail measures of a one-row ELT at candidate edges, with no grid (spec
+    section 4B).
+
+    For each edge ``t`` with node ``c``: the tail rate ``R(t) = sum lambda
+    P(X > t)``, the tail moments ``T_r(t) = sum lambda P(X^r; X > t)`` and
+    the excess moments ``D_r(t, c) = sum lambda P(X^r - c^r; X > t)`` for
+    ``r = 1, 2, 3``, and apart from them the atoms in the final half bucket
+    ``(c, t]``. A consumer sizing a grid of spacing ``h`` and length ``n``
+    asks at ``t = (n - 1/2) h`` and ``c = (n - 1) h``: under the
+    ``top_bucket`` overflow policy the annual cumulants fall by exactly
+    ``D_r``, and ``R`` and ``D_1`` are the grid's ``rate_above_grid`` and
+    ``mean_above_grid``. Every row is exact by its law (the partial-moment
+    identity ``P(X^r; X > t) = P(X^r) I-bar_{t/M}(alpha + r, beta)`` and a
+    centred recurrence that keeps a short tail's digits; the narrow kernel
+    and the normal law at large parameters); ``R`` and ``T_r`` are
+    nonincreasing in ``t``, so a caller can bisect for an edge.
+
+    Parameters
+    ----------
+    rate, max_loss, mean_loss, sd_indep, sd_corr : array_like
+        One-dimensional numeric columns of equal length, as
+        ``quantize_arrays`` takes them.
+    edge : array_like
+        Candidate edges ``t >= 0``, any order.
+    top_node : array_like, optional
+        The node ``c`` of each edge, ``0 <= c <= t``; the edge itself when
+        None (then ``D_r`` is the excess over the edge).
+    mean_is_loss_rate, variance_policy : as ``quantize_arrays``.
+    threads : int, optional
+        Worker threads; None uses all cores. Results are bitwise identical
+        for any thread count. Ignored by the reference backend.
+    event_ids : sequence, optional
+        Per-row identifiers used in diagnostic examples (audit only).
+
+    Returns
+    -------
+    TailMoments
+        Arrays per edge: ``rate_above`` and ``top_half_rate`` of shape
+        ``(E,)``; ``moments_above``, ``excess_above`` and ``top_half_excess``
+        of shape ``(E, 3)``, column ``r - 1`` for order ``r``.
+    """
+    cols = tuple(
+        _column(name, values)
+        for name, values in zip(
+            _CANONICAL_COLUMNS, (rate, max_loss, mean_loss, sd_indep, sd_corr)
+        )
+    )
+    edges = np.ascontiguousarray(np.atleast_1d(np.asarray(edge, dtype=np.float64)))
+    nodes = None if top_node is None else np.ascontiguousarray(
+        np.atleast_1d(np.asarray(top_node, dtype=np.float64)))
+    if edges.ndim != 1:
+        raise EltqError(f"edge must be one-dimensional, got shape {edges.shape}")
+    ids = list(event_ids) if event_ids is not None else None
+    if _rust_tail_moments_arrays is None:
+        from eltq import reference as _ref
+
+        return _ref.tail_moments_reference(*cols, edge=edges, top_node=nodes,
+                                           mean_is_loss_rate=mean_is_loss_rate,
+                                           variance_policy=variance_policy, event_ids=ids)
+    out = _rust_tail_moments_arrays(*cols, edge=edges, top_node=nodes, mean_is_loss_rate=mean_is_loss_rate,
+                                    variance_policy=variance_policy, threads=threads)
+    diagnostics = {}
+    for category, entry in out.pop("diagnostics").items():
+        examples = entry["examples"]
+        if ids is not None:
+            examples = [ids[row] for row in examples]
+        diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
+    for name in ("moments_above", "excess_above", "top_half_excess"):
+        out[name] = out[name].reshape(-1, 3)
+    return TailMoments(diagnostics=diagnostics, moment_overflow=tuple(out.pop("moment_overflow")), **out)
 
 
 def quantize_csv(

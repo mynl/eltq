@@ -2262,5 +2262,69 @@
       }
     },
     "peak_rss_mb": 728.3
+  },
+  {
+    "suite": "moments",
+    "timestamp": "2026-10-26T23:14:48.787296+00:00",
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.12.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "rows": 1000000,
+    "edges": 64,
+    "runs": {
+      "mixture": {
+        "moments_seconds": 0.0196,
+        "tails_seconds": 0.161,
+        "tails_seconds_one_thread": 3.223,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 979806,
+        "regimes": {
+          "incomplete_beta": 849522,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 90272,
+          "two_point": 40012
+        },
+        "max_support": 4999949.479549875
+      },
+      "small_alpha": {
+        "moments_seconds": 0.02,
+        "tails_seconds": 0.291,
+        "tails_seconds_one_thread": 6.106,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 1000000,
+        "regimes": {
+          "incomplete_beta": 1000000,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 0,
+          "two_point": 0
+        },
+        "max_support": 1000000.0
+      },
+      "large_m": {
+        "moments_seconds": 0.02,
+        "tails_seconds": 0.2,
+        "tails_seconds_one_thread": 4.26,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 1000000,
+        "regimes": {
+          "incomplete_beta": 1000000,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 0,
+          "two_point": 0
+        },
+        "max_support": 999987015.8879712
+      }
+    },
+    "peak_rss_mb": 191.5
   }
 ]

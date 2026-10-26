@@ -3,6 +3,15 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.12.0] - 2026-10-26
+
+### Added
+
+- [tail-queries] `tail_moments_arrays(rate, max_loss, mean_loss, sd_indep, sd_corr, *, edge, top_node, ...)` returns a `TailMoments` with no grid (spec section 4B): at every candidate edge `t` with node `c`, the tail rate `R(t)`, the tail moments `T_r(t) = sum lambda P(X^r; X > t)` and the excess moments `D_r(t, c) = sum lambda P(X^r - c^r; X > t)` for `r = 1, 2, 3`, and apart from them the rate and displaced moments of the atoms in the final half bucket `(c, t]`. At a grid's top edge and node they are the overflow a window would have (`rate_above_grid`, `mean_above_grid`, and the cumulant losses `D_2`, `D_3` under `top_bucket`), for a consumer choosing a window shorter than the largest exposed value.
+- Every row is exact by its law: the partial-moment identity `P(X^r; X > t) = P(X^r) I-bar(alpha + r, beta)` in recursive form and a centred recurrence from the beta's differential equation, so `D_r` keeps its digits where the tail beyond `t` is short and close to `c`, all four orders from one continued fraction and one density value; past `min(alpha, beta) = 2e5` the narrow kernel's quadrature extended to the third moment, from 1e16 the normal law in closed form; atoms and two-point rows with the deposit's strict inequality. The reference forms `T_r` by the identity through SciPy and, where both parameters reach 1e3, the centred moments by adaptive quadrature (SciPy's `betaln` is off by 7e-6 at (1e9, 1e9)).
+- Spec test 37 on both backends: the aggregate package's regression rows (67.05% of the second's mean above `mu + 40 sigma`), test 18's Beta(2, 1000) window to 1e-12, Beta(1e6, 1/2) at its endpoint to 1e-8, the strict edge for atoms and two-point rows, the grid route's overflow within 1e-4 (atoms exactly), monotone in `t`, bitwise across threads, and a sweep against 60-digit arithmetic: within 1e-12 except the continued fraction's documented residuals (spec section 5A), up to 2.6e-10 relative at beta = 1e7.
+- `benchmarks/run_moments.py` and `benchmarks/report-2.12.0.md`: a million rows by 64 edges in 0.16 s to 0.29 s on 16 cores, bitwise across thread counts.
+
 ## [2.11.0] - 2026-10-26
 
 ### Added

@@ -29,7 +29,7 @@ import numpy as np
 from scipy.special import betainc, betaincc, betaln, ndtri, erfc
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import (ATOM_RESOLUTION, ModelMoments, DEFAULT_NODES_PER_DECADE,
+from eltq._meta import (ATOM_RESOLUTION, ModelMoments, TailMoments, DEFAULT_NODES_PER_DECADE,
                         DEFAULT_NODES_PER_SIGMA, LARGE_PARAMETER_FROM, NARROW_MIN_PARAMETER,
                         NARROW_NORMAL_FROM, NARROW_STEPS,
                         TAIL_FINE_ZONE, TAIL_INTERVALS, TAIL_POWER_LAW_LIMIT, TAIL_RATE_FLOOR,
@@ -1192,6 +1192,211 @@ def moments_reference(rate, max_loss, mean_loss, sd_indep, sd_corr, *, mean_is_l
         dropped_rows=n_rows - valid,
         moment_overflow=tuple(flag for _, flag in sums),
         diagnostics=diagnostics,
+    )
+
+
+def _power_excess(x: float, c: float) -> tuple:
+    """``x^r - c^r`` for ``r = 1, 2, 3``, ``c <= x``, as ``(x - c)`` times a
+    sum of nonnegative terms."""
+    d = x - c
+    return d, d * (x + c), d * (x * x + x * c + c * c)
+
+
+def _centred_recurrence(a: float, b: float, y: float, chat: float, sf: float, boundary: float) -> tuple:
+    """``K_k = P((Y - chat)^k; Y > y)``, ``k = 0..3``, of ``Beta(a, b)`` from
+    ``K_0 = sf`` and ``boundary = y (1 - y) f(y)`` by the recurrence of the
+    density's differential equation (spec section 4B)."""
+    lead = a - (a + b) * chat
+    spread = 1.0 - 2.0 * chat
+    cc = chat * (1.0 - chat)
+    d = y - chat
+    k1 = (boundary + lead * sf) / (a + b)
+    k2 = (d * boundary + (lead + spread) * k1 + cc * sf) / (a + b + 1.0)
+    k3 = (d * d * boundary + (lead + 2.0 * spread) * k2 + 2.0 * cc * k1) / (a + b + 2.0)
+    return tuple(max(k, 0.0) for k in (sf, k1, k2, k3))
+
+
+def _normal_centred_tail(a: float, b: float, y: float, chat: float) -> tuple:
+    """``K_0..3`` over ``(y, inf)`` of the normal law ``Beta(a, b)`` tends
+    to: ``sd^k J_k`` with ``J_(k+1) = (z0 - e)^k phi(z0) + k J_(k-1) - e
+    J_k`` (``phi' = -z phi`` integrated by parts), ``z0 = (y - ybar) / sd``
+    and ``e = (chat - ybar) / sd``."""
+    law = _NormalLaw(a, b)
+    z0, e = (y - law.ybar) / law.sd, (chat - law.ybar) / law.sd
+    phi = math.exp(-0.5 * z0 * z0) / math.sqrt(2.0 * math.pi)
+    j0 = 0.5 * float(erfc(z0 / math.sqrt(2.0)))
+    j1 = phi - e * j0
+    j2 = (z0 - e) * phi + j0 - e * j1
+    j3 = (z0 - e) ** 2 * phi + 2.0 * j1 - e * j2
+    return tuple(max(j, 0.0) * law.sd ** k for k, j in enumerate((j0, j1, j2, j3)))
+
+
+def _from_centred(k: tuple, chat: float, m: float) -> tuple:
+    """``(R, T_1..3, D_1..3)`` per unit of rate from ``K_0..3`` at ``chat``:
+    sums of nonnegative terms (spec section 4B)."""
+    d = (k[1], 2.0 * chat * k[1] + k[2], 3.0 * chat * chat * k[1] + 3.0 * chat * k[2] + k[3])
+    t = (chat * k[0] + d[0], chat * chat * k[0] + d[1], chat ** 3 * k[0] + d[2])
+    return (k[0], m * t[0], m * m * t[1], m ** 3 * t[2], m * d[0], m * m * d[1], m ** 3 * d[2])
+
+
+#: From this smaller parameter the reference forms the centred tail moments
+#: by quadrature of the density's ratio form instead of the recurrence: the
+#: recurrence's density value needs ``ln B(a, b)``, and SciPy's ``betaln`` is
+#: off by 1e-9 at (1e6, 1e6) and 7e-6 at (1e9, 1e9) in absolute terms.
+_QUADRATURE_TAIL_FROM = 1e3
+
+
+def _quadrature_centred_tail(a: float, b: float, y: float, chat: float) -> tuple:
+    """``K_k = P((Y - chat)^k; Y > y)``, ``k = 0..3``, of a bell-shaped
+    ``Beta(a, b)`` by adaptive quadrature (``scipy.integrate.quad``) of
+    ``(u - chat)^k f(u) / f(ybar)``, the density relative to its value at
+    the mean in ``log1p`` form, normalized by its own integral over the mean
+    plus and minus 40 standard deviations; every integrand is nonnegative,
+    so nothing cancels. An independent check on the engine's narrow kernel."""
+    from scipy.integrate import quad
+
+    ybar = a / (a + b)
+    sd = math.sqrt(ybar * (1.0 - ybar) / (a + b + 1.0))
+    lo, hi = max(0.0, ybar - 40.0 * sd), min(1.0, ybar + 40.0 * sd)
+
+    def ratio(u):
+        d = u - ybar
+        return math.exp((a - 1.0) * math.log1p(d / ybar) + (b - 1.0) * math.log1p(-d / (1.0 - ybar)))
+
+    options = dict(epsabs=0.0, epsrel=1e-13, limit=400)
+    norm = quad(ratio, lo, hi, points=[ybar], **options)[0]
+    start = max(y, lo)
+    if start >= hi:
+        return (0.0, 0.0, 0.0, 0.0)
+    inner = [ybar] if start < ybar else None
+    return tuple(quad(lambda u, k=k: (u - chat) ** k * ratio(u), start, hi, points=inner, **options)[0] / norm
+                 for k in range(4))
+
+
+def _beta_tail_contribution(a: float, b: float, m: float, t: float, c: float) -> tuple:
+    """``(R, T_1..3, D_1..3)`` per unit of rate of ``M Beta(a, b)`` at edge
+    ``t`` and node ``c``. Below ``NARROW_NORMAL_FROM``: SciPy's incomplete
+    beta, ``T_r`` by the partial-moment identity ``P(X^r) I-bar_y(a + r, b)``
+    (independent of the engine's recurrence) and ``D_r`` by the centred
+    recurrence; from there, and wherever SciPy returns no number, the normal
+    law in closed form."""
+    if t >= m:
+        return (0.0,) * 7
+    y, chat = t / m, c / m
+    if min(a, b) >= NARROW_NORMAL_FROM:
+        return _from_centred(_normal_centred_tail(a, b, y, chat), chat, m)
+    sf = float(betaincc(a, b, y))
+    boundary = math.exp(a * math.log(y) + b * math.log1p(-y) - float(betaln(a, b))) if y > 0.0 else 0.0
+    moment, t_r = 1.0, []
+    for r in (1, 2, 3):
+        moment *= (a + r - 1.0) / (a + b + r - 1.0)
+        t_r.append(moment * float(betaincc(a + r, b, y)))
+    if not all(map(math.isfinite, (sf, boundary, *t_r))):
+        return _from_centred(_normal_centred_tail(a, b, y, chat), chat, m)
+    if min(a, b) >= _QUADRATURE_TAIL_FROM:
+        k = _quadrature_centred_tail(a, b, y, chat)
+    else:
+        k = _centred_recurrence(a, b, y, chat, sf, boundary)
+    d = (k[1], 2.0 * chat * k[1] + k[2], 3.0 * chat * chat * k[1] + 3.0 * chat * k[2] + k[3])
+    return (k[0], m * t_r[0], m * m * t_r[1], m ** 3 * t_r[2], m * d[0], m * m * d[1], m ** 3 * d[2])
+
+
+def tail_moments_reference(rate, max_loss, mean_loss, sd_indep, sd_corr, *, edge, top_node=None,
+                           mean_is_loss_rate=False, variance_policy="bernoulli",
+                           event_ids=None) -> TailMoments:
+    """Tail measures of a one-row ELT at ``edge`` with nodes ``top_node``
+    (the edges themselves when None), with no grid (spec section 4B).
+
+    The classification is ``quantize_reference``'s; each contributing row
+    adds its exact tail at every edge, and the sums are exact
+    (``math.fsum``).
+
+    Returns
+    -------
+    TailMoments
+    """
+    rate = np.asarray(rate, dtype=np.float64)
+    max_loss = np.asarray(max_loss, dtype=np.float64)
+    mean_loss = np.asarray(mean_loss, dtype=np.float64)
+    sd_indep = np.asarray(sd_indep, dtype=np.float64)
+    sd_corr = np.asarray(sd_corr, dtype=np.float64)
+    n_rows = rate.size
+    for name, arr in (("max_loss", max_loss), ("mean_loss", mean_loss),
+                      ("sd_indep", sd_indep), ("sd_corr", sd_corr)):
+        if arr.size != n_rows:
+            raise EltqError(f"column {name} has {arr.size} rows, expected {n_rows}")
+    edges = np.atleast_1d(np.asarray(edge, dtype=np.float64))
+    nodes = edges.copy() if top_node is None else np.atleast_1d(np.asarray(top_node, dtype=np.float64))
+    if edges.ndim != 1 or nodes.shape != edges.shape:
+        raise EltqError(f"top_node has shape {nodes.shape}, expected {edges.shape}")
+    for t, c in zip(edges, nodes):
+        if not (math.isfinite(t) and math.isfinite(c) and 0.0 <= c <= t):
+            raise EltqError(
+                f"tail query edge {t} with top node {c}: both must be finite with 0 <= top_node <= edge")
+    if event_ids is None:
+        event_ids = list(range(n_rows))
+    _check_variance_policy(variance_policy)
+    kinds, mu_eff, sd_eff, _, diagnostics = _classify_rows(
+        rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
+        mean_is_loss_rate, variance_policy)
+    n_edges = edges.size
+    terms = [[[] for _ in range(11)] for _ in range(n_edges)]
+    regimes = {"incomplete_beta": 0, "narrow_kernel": 0, "normal_law": 0, "atoms": 0, "two_point": 0}
+    rates = []
+    for j in range(n_rows):
+        kind = int(kinds[j])
+        if kind == _DROP:
+            continue
+        lam, mu, m = float(rate[j]), float(mu_eff[j]), float(max_loss[j])
+        rates.append(lam)
+        if kind == _BETA:
+            a, b = beta_params(m, mu, float(sd_eff[j]))
+            smallest = min(a, b)
+            regime = ("normal_law" if smallest >= NARROW_NORMAL_FROM
+                      else "narrow_kernel" if smallest >= LARGE_PARAMETER_FROM else "incomplete_beta")
+            regimes[regime] += 1
+        else:
+            regimes["atoms" if kind == _ATOM else "two_point"] += 1
+        for e in range(n_edges):
+            t, c = float(edges[e]), float(nodes[e])
+            if kind == _BETA:
+                values = _beta_tail_contribution(a, b, m, t, c) + (0.0,) * 4
+                weight = lam
+            else:
+                # The two-point row's atom at zero exceeds no edge.
+                x, weight = (mu, lam) if kind == _ATOM else (m, lam * (mu / m))
+                if x > t:
+                    values = (1.0, x, x * x, x * x * x, *_power_excess(x, c), 0.0, 0.0, 0.0, 0.0)
+                elif x > c:
+                    values = (0.0,) * 7 + (1.0, *_power_excess(x, c))
+                else:
+                    continue
+            for i, v in enumerate(values):
+                if v != 0.0:
+                    terms[e][i].append(weight * v)
+    sums = [[_exact_sum(terms[e][i]) for i in range(11)] for e in range(n_edges)]
+    overflow = [False, False, False]
+
+    def triple(e, start):
+        out = []
+        for r in range(3):
+            value, flag = sums[e][start + r]
+            overflow[r] = overflow[r] or flag
+            out.append(value)
+        return out
+
+    moments_above = np.array([triple(e, 1) for e in range(n_edges)]).reshape(n_edges, 3)
+    excess_above = np.array([triple(e, 4) for e in range(n_edges)]).reshape(n_edges, 3)
+    top_half_excess = np.array([triple(e, 8) for e in range(n_edges)]).reshape(n_edges, 3)
+    valid = sum(1 for k in kinds if int(k) != _DROP)
+    return TailMoments(
+        edge=edges, top_node=nodes,
+        rate_above=np.array([sums[e][0][0] for e in range(n_edges)]),
+        moments_above=moments_above, excess_above=excess_above,
+        top_half_rate=np.array([sums[e][7][0] for e in range(n_edges)]),
+        top_half_excess=top_half_excess,
+        total_rate=math.fsum(rates), regimes=regimes, moment_overflow=tuple(overflow),
+        input_rows=n_rows, valid_rows=valid, diagnostics=diagnostics,
     )
 
 

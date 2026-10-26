@@ -763,3 +763,35 @@ fallback subprocess calls the function. A million rows take 20 ms. Divergences:
   something else installs mpmath (open item for Steve).
 - The plan's consistency check (grid moments approaching $C_r$ as $h$ halves) is in the test with
   the measured figures in the spec.
+
+### [Eltq-Tail-Queries], one-row ELTs, 2.12.0
+
+`tail_moments_arrays` on both backends; `TailMoments` in `_meta.py`; `crates/eltq-core/src/tails.rs`
+(`tail_moments`, `beta_tail`), `NarrowKernel::centred_integrals` and `NarrowLaw::centred_tail`.
+Test 37 in `tests/test_tails.py` (both backends, plus the engine against 60-digit arithmetic where
+mpmath is installed); `benchmarks/run_moments.py` and `benchmarks/report-2.12.0.md`: a million rows
+by 64 edges in 0.16 s to 0.29 s on 16 cores, 3.2 s to 6.1 s on one, bitwise across thread counts.
+Divergences:
+
+- The plan's `top_half_atoms` is two arrays, `top_half_rate` and `top_half_excess`; `regimes`
+  counts the rows by evaluation (`incomplete_beta`, `narrow_kernel`, `normal_law`, `atoms`,
+  `two_point`); `method` is `exact`; `moment_overflow` flags an order that leaves double
+  precision, as `ModelMoments` does.
+- The plan's "within $10^{-12}$ relative over $\beta$ from $\tfrac12$ to $10^7$" does not hold
+  everywhere: the engine's continued fraction carries the residuals spec section 5A already
+  documents, measured here at up to $2.6\times10^{-10}$ relative above the switch point at
+  $\beta=10^7$ (of order $\varepsilon\beta$), an absolute $\varepsilon$ below it, and a few units
+  in $10^{-12}$ near the mean when both parameters are large; the excess moments about a node a
+  thousandth below the edge are within $1.5\times10^{-9}$ there. Test 37 in the spec states these
+  figures. Removing them would mean a different incomplete beta, not a change to the tail query.
+- The reference forms the centred moments by adaptive quadrature (`scipy.integrate.quad`) where
+  both parameters reach $10^3$: its recurrence needs the density value, and SciPy's `betaln` is
+  off by $10^{-9}$ at $(10^6,10^6)$ and $7\times10^{-6}$ at $(10^9,10^9)$ absolute, which put the
+  reference's $D_1$ at $(10^9,10^9)$ $4.6\times10^{-5}$ off before the change. $T_r$ on the
+  reference is the partial-moment identity through SciPy, so the two backends do not share a
+  formula for it.
+- The 60-digit oracle at $\beta=10^7$ with $\alpha=10^4$ is a quadrature of the density (mpmath's
+  incomplete beta did not finish there in ten minutes); the sweep runs only where mpmath is
+  installed, as CI does not install it.
+- A beta row stops at the first edge, in ascending order, where its whole contribution is zero;
+  atoms never stop early, since a later edge's node can still put them in its half bucket.

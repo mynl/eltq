@@ -104,6 +104,22 @@ impl NarrowLaw {
         }
     }
 
+    /// `P((Y - c)^k; Y > y)` for `k = 0, 1, 2, 3` and `c <= y`, the centred
+    /// tail moments of spec section 4B, by the kernel over the bulk above
+    /// `y` (nothing at or beyond its end, which holds less than the floor).
+    pub fn centred_tail(&self, y: f64, c: f64) -> [f64; 4] {
+        if y >= self.stop {
+            return [0.0; 4];
+        }
+        let raw = self.kernel.centred_integrals(y.max(self.lower), self.stop, c);
+        raw.map(|v| v / self.norm)
+    }
+
+    /// Whether the kernel is the normal law, from `NARROW_NORMAL_FROM`.
+    pub fn is_normal(&self) -> bool {
+        self.kernel.is_normal()
+    }
+
     /// `P(min(Y, y))`, the limited mean in the share: the first moment below
     /// `y` by the kernel plus `y` times the survival there.
     pub fn limited_mean(&self, y: f64) -> f64 {

@@ -197,6 +197,48 @@ class ModelMoments:
 
 
 @dataclass
+class TailMoments:
+    """Tail measures of an ELT at candidate edges with no loss grid (spec
+    section 4B).
+
+    For each edge ``t`` with node ``c <= t``: ``rate_above`` is ``R(t) =
+    sum lambda P(X > t)``, ``moments_above[:, r - 1]`` is ``T_r(t) = sum
+    lambda P(X^r; X > t)`` and ``excess_above[:, r - 1]`` is ``D_r(t, c) =
+    sum lambda P(X^r - c^r; X > t)``, for ``r = 1, 2, 3``, the inequality
+    strict as the deposit's. Under the ``top_bucket`` policy the annual
+    cumulants fall by exactly ``D_r``; under ``drop`` the rate falls by ``R``
+    and the cumulants by ``T_r``; ``1 - exp(-R)`` is the probability of an
+    overflowing occurrence in a year. The atoms in the final half bucket
+    ``(c, t]``, which a grid keeps at ``c``, are apart: ``top_half_rate``
+    and ``top_half_excess[:, r - 1] = sum lambda (x^r - c^r)``. At ``t = (n
+    - 1/2) h`` and ``c = (n - 1) h`` the rate and ``D_1`` are a grid's
+    ``rate_above_grid`` and ``mean_above_grid``.
+
+    ``method`` is ``exact`` for a one-row ELT. ``regimes`` counts the rows by
+    evaluation: ``incomplete_beta`` (the continued fraction),
+    ``narrow_kernel`` (the quadrature from ``min(alpha, beta) = 2e5``),
+    ``normal_law`` (from ``1e16``), ``atoms`` and ``two_point``. An order
+    whose value leaves double precision is infinite and flagged in
+    ``moment_overflow``.
+    """
+
+    edge: object
+    top_node: object
+    rate_above: object
+    moments_above: object
+    excess_above: object
+    top_half_rate: object
+    top_half_excess: object
+    total_rate: float
+    regimes: dict
+    moment_overflow: tuple
+    input_rows: int
+    valid_rows: int
+    diagnostics: dict[str, RowIssues]
+    method: str = "exact"
+
+
+@dataclass
 class CurveMeta:
     """Metadata of an exceedance curve: its node range and count, the
     sampled interpolation error, the totals over the contributing rows and

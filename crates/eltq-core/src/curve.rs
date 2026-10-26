@@ -402,6 +402,67 @@ impl NarrowKernel {
     pub fn integral(&self, lo: f64, hi: f64) -> f64 {
         self.integrals(lo, hi).0
     }
+
+    /// `int_lo^hi (y - c)^k f(y) / f(ybar) dy` for `k = 0, 1, 2, 3`, the
+    /// centred moments the tail measures of spec section 4B need, by the same
+    /// quadrature as `integrals` (every integrand nonnegative for `c <= lo`,
+    /// so nothing cancels), or under the normal law in closed form.
+    ///
+    /// Notes
+    /// -----
+    /// Under the normal law, with `z = (y - ybar) / sd` and `e = (c - ybar) /
+    /// sd`, the integral is `sd^(k+1) sqrt(2 pi) J_k` with `J_k = int_zl^zh (z
+    /// - e)^k phi(z) dz`, and `phi' = -z phi` integrated by parts gives
+    /// `J_(k+1) = (zl - e)^k phi(zl) - (zh - e)^k phi(zh) + k J_(k-1) - e
+    /// J_k` from `J_0 = Phi(zh) - Phi(zl)`.
+    pub fn centred_integrals(&self, lo: f64, hi: f64, c: f64) -> [f64; 4] {
+        if !(hi > lo) {
+            return [0.0; 4];
+        }
+        if self.normal {
+            let (zl, zh, e) = ((lo - self.ybar) / self.sd, (hi - self.ybar) / self.sd, (c - self.ybar) / self.sd);
+            let r = std::f64::consts::FRAC_1_SQRT_2;
+            let j0 = 0.5
+                * if zl >= 0.0 {
+                    normal::erfc(zl * r) - normal::erfc(zh * r)
+                } else if zh <= 0.0 {
+                    normal::erfc(-zh * r) - normal::erfc(-zl * r)
+                } else {
+                    normal::erf(zh * r) - normal::erf(zl * r)
+                };
+            let phi = |z: f64| (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
+            let (pl, ph) = (phi(zl), phi(zh));
+            let (dl, dh) = (zl - e, zh - e);
+            let j1 = pl - ph - e * j0;
+            let j2 = dl * pl - dh * ph + j0 - e * j1;
+            let j3 = dl * dl * pl - dh * dh * ph + 2.0 * j1 - e * j2;
+            let scale = self.sd * (2.0 * std::f64::consts::PI).sqrt();
+            return [
+                scale * j0.max(0.0),
+                scale * self.sd * j1.max(0.0),
+                scale * self.sd * self.sd * j2.max(0.0),
+                scale * self.sd * self.sd * self.sd * j3.max(0.0),
+            ];
+        }
+        let pieces = ((hi - lo) / self.piece).ceil().max(1.0) as usize;
+        let width = (hi - lo) / pieces as f64;
+        let mut out = [0.0_f64; 4];
+        for k in 0..pieces {
+            let mid = lo + (k as f64 + 0.5) * width;
+            let half = 0.5 * width;
+            for (&node, &weight) in GL_NODES.iter().zip(&GL_WEIGHTS) {
+                for y in [mid - half * node, mid + half * node] {
+                    let w = half * weight * self.ratio(y);
+                    let v = y - c;
+                    out[0] += w;
+                    out[1] += w * v;
+                    out[2] += w * v * v;
+                    out[3] += w * v * v * v;
+                }
+            }
+        }
+        out
+    }
 }
 
 /// A beta event narrower than a node interval at its mean (spec section
