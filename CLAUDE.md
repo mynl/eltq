@@ -113,7 +113,7 @@ finished.
   PyO3 bindings, not a pure-Python uv project. Both `cargo` and the Python tooling are in play.
 - **Overrides single-sourced versioning.** The version appears in `Cargo.toml`,
   `pyproject.toml` and `python/eltq/__init__.py` (`__version__`), and all three must be bumped
-  together (`Cargo.lock` and `uv.lock` follow on build). Currently 2.3.6.
+  together (`Cargo.lock` and `uv.lock` follow on build). Currently 2.4.0.
 - **Speed is a product requirement, not a nice-to-have** — "ferociously fast" is in the project's
   own description, the work has a `[ferocious]` milestone, and there is a benchmark suite.
   Performance regressions are defects. Equally, per the house KISS rule: raise it before trading

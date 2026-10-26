@@ -86,6 +86,7 @@ identical.
 | [atoms] the normal law for narrow events from min(alpha, beta) = 1e16 replaces the step at the mean; rows too narrow to resolve are atoms under `atom_by_resolution` | 2.3.4 | done |
 | [overflow] the windowed grid's excess moment from the integral of the curve, so events whose endpoint survival underflows keep theirs | 2.3.5 | done |
 | [tails] the endpoint ladder's power law gated on its asymptotic criterion, the one edge below it evaluated exactly, quarter-octave steps across the transition | 2.3.6 | done |
+| [mesh] bell-shaped events on a fine curve of `nodes_per_sigma` nodes per standard deviation; the accuracy contract of spec test 33 | 2.4.0 | done |
 
 ## Layout
 
@@ -178,7 +179,7 @@ import eltq
 raw, secondary, meta = eltq.quantize_arrays(
     rate, max_loss, mean_loss, sd_indep, sd_corr,
     *, bucket_size, grid_length=None,
-    method="survival", quadrature_points=32, nodes_per_decade=None,
+    method="survival", quadrature_points=32, nodes_per_decade=None, nodes_per_sigma=None,
     overflow="top_bucket", normalize=False, mean_is_loss_rate=False,
     variance_policy="bernoulli", event_ids=None)
 
@@ -194,7 +195,7 @@ meta = eltq.quantize_to_npy(source, "grids.npy", *, bucket_size, ...)
     # transactional (2, n) .npy + grids.meta.json; np.load(..., mmap_mode="r")
 
 curve = eltq.exceedance_curve(rate, max_loss, mean_loss, sd_indep, sd_corr,
-    *, min_loss, nodes_per_decade=None, ...)   # the survival curve, built once
+    *, min_loss, nodes_per_decade=None, nodes_per_sigma=None, ...)   # the survival curve, built once
 curve.loss, curve.exceedance_rate              # nodes and the exact rate there
 curve.atom_loss, curve.atom_rate, curve.meta   # atoms; CurveMeta
 curve.exceedance(x)                            # Lambda(x), atoms included
@@ -207,7 +208,9 @@ secondary, gmeta = curve.grid(bucket_size, grid_length=None, overflow="top_bucke
 a `(rate, max_loss, mean_loss, sd_indep, sd_corr)` tuple.
 
 **Methods.** `method="survival"` (the default from 2.0.0) evaluates the
-portfolio exceedance rate exactly at `nodes_per_decade` geometric nodes,
+portfolio exceedance rate exactly at `nodes_per_decade` geometric nodes (and
+the bell-shaped events on a finer mesh of `nodes_per_sigma` nodes per standard
+deviation around their means, the method's accuracy knob),
 interpolates it monotonically and buckets it by the nearest rule, with each
 event's endpoint handled per event, its tail walked only while its rate
 exceeds 1e-20 of the total, and events narrower than a node interval kept

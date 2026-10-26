@@ -648,6 +648,102 @@ def test_32_endpoint_tails():
             assert np.max(np.abs(grids[0] - grids[1])) <= 1e-11, (a, b)
 
 
+# [33] The fine mesh and the accuracy contract: a bell-shaped event narrower
+# than nodes_per_sigma base intervals asks for nodes_per_sigma nodes per
+# standard deviation around its mean and lives on the fine curve, so the
+# curve is within 1e-4 relative of its survival where that is at least 1e-4,
+# within 1e-3 where at least 1e-8 and within 3e-3 where at least 1e-12 (the
+# review's A3, Beta(1800, 1e6), was 22.8% off at S = 3e-4 on the shared
+# cubic: one base interval wide, it could not be followed). Both backends,
+# across alpha and the coefficient of variation; then a block of policies at
+# a common limit with coefficients of variation across the fine mesh's range
+# against SciPy at every bucket edge, the backends agreeing and the engine
+# deterministic across threads.
+def test_33_fine_mesh_contract():
+    from scipy import special
+    import eltq
+
+    def row(a, b):
+        p = a / (a + b)
+        sd = math.sqrt(p * (1.0 - p) / (a + b + 1.0))
+        return tuple(np.array([v]) for v in (1.0, 1.0, p, sd, 0.0)), p, sd
+
+    def check_bands(got, exact, label):
+        for floor, tol in ((1e-4, 1e-4), (1e-8, 1e-3), (1e-12, 3e-3)):
+            keep = exact >= floor
+            if keep.any():
+                err = np.max(np.abs(got[keep] / exact[keep] - 1.0))
+                assert err <= tol, (label, floor, err)
+
+    # The A3 case first.
+    cols, p, sd = row(1800.0, 1e6)
+    x = 0.001944568270403778
+    exact = special.betaincc(1800.0, 1e6, x)
+    for build in (eltq.exceedance_curve, lambda *c, **k: reference.exceedance_curve_reference(*c, **k)[0]):
+        curve = build(*cols, min_loss=p * 1e-4)
+        got = float(np.asarray(curve.exceedance(np.array([x])))[0])
+        assert abs(got / exact - 1.0) <= 1e-4, (build, got, exact)
+    meta = eltq.exceedance_curve(*cols, min_loss=p * 1e-4).meta
+    assert meta.requesting_events == 1 and meta.fine_nodes > meta.nodes
+    # The sweep over shape and width: the bell's range, plus the base
+    # intervals' midpoints.
+    for a in (1.5, 3.0, 10.0, 1e2, 1e3, 1e4):
+        for cv in (5e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0):
+            if cv * cv * a >= 1.0:
+                continue
+            b = cv * cv * a * (a + 1.0) / (1.0 - cv * cv * a)
+            if b <= 1.0:
+                continue
+            cols, p, sd = row(a, b)
+            xs = np.concatenate([p + np.linspace(-3.0, 7.0, 101) * sd, []])
+            xs = xs[(xs > p * 1e-3) & (xs < 1.0)]
+            exact = special.betaincc(a, b, xs)
+            results = []
+            for build in (eltq.exceedance_curve, lambda *c, **k: reference.exceedance_curve_reference(*c, **k)[0]):
+                curve = build(*cols, min_loss=p * 1e-3)
+                got = np.asarray(curve.exceedance(xs), dtype=np.float64)
+                check_bands(got, exact, (a, cv, build))
+                results.append(got)
+            # The backends agree to the engine's fraction against SciPy,
+            # about 1e-9 relative deep in a tail (2e-9 measured at S = 1e-11
+            # on Beta(10, 99)), and absolutely below the floor.
+            assert np.max(np.abs(results[0] - results[1])) <= 1e-8 * np.max(exact) or                 np.all(np.abs(results[0] - results[1]) <= 1e-8 * exact + 1e-16), (a, cv)
+    # A block of 300 policies at a common limit, coefficients of variation
+    # from 1e-3 to 1e-1 (between the narrow route and the base density), on
+    # a grid of 25 against SciPy at every edge in the block's range.
+    rng = np.random.default_rng(33)
+    center, n_block = 250_000.0, 300
+    cols = (np.full(n_block, 2.5e-7), 10.0 ** rng.uniform(np.log10(3e5), 7, n_block),
+            np.full(n_block, center), center * 10.0 ** rng.uniform(-3, -1, n_block), np.zeros(n_block))
+    h = 25.0
+    ref_curve, ref_meta = reference.exceedance_curve_reference(*cols, min_loss=0.5 * h)
+    curve = eltq.exceedance_curve(*cols, min_loss=0.5 * h)
+    # Every policy is a bell: narrower than a base interval it is narrow,
+    # otherwise it asks for density; the backends agree on both counts.
+    assert ref_meta.requesting_events + ref_meta.narrow_events == n_block
+    assert (curve.meta.requesting_events, curve.meta.narrow_events) == (ref_meta.requesting_events, ref_meta.narrow_events)
+    assert curve.meta.requesting_events > 0
+    assert ref_meta.fine_nodes == curve.meta.fine_nodes
+    grid, _ = curve.grid(h)
+    ref_grid, _ = ref_curve.grid(h)
+    total = curve.meta.total_rate
+    assert math.isclose(grid.sum(), total, rel_tol=1e-14)
+    assert np.max(np.abs(grid - ref_grid)) <= 1e-12 * total
+    sums = tail_sums(grid)
+    edges = (np.arange(sums.size) + 0.5) * h
+    near = (edges >= 0.6 * center) & (edges <= 1.8 * center)
+    want = ref_curve.exact(edges[near])
+    # The contract's bands, on the portfolio's exceedance relative to its
+    # total rate.
+    for floor, tol in ((1e-4, 1e-4), (1e-8, 1e-3), (1e-12, 3e-3)):
+        keep = want >= floor * total
+        err = np.max(np.abs(sums[near][keep] - want[keep]) / want[keep])
+        assert err <= tol, (floor, err)
+    r1, s1, m1 = eltq.quantize_arrays(*cols, bucket_size=h, threads=1)
+    r2, s2, m2 = eltq.quantize_arrays(*cols, bucket_size=h)
+    assert np.array_equal(s1, s2) and m1.fine_nodes == m2.fine_nodes
+
+
 def test_curve_matches_quantize_and_exact(impl):
     import eltq
 

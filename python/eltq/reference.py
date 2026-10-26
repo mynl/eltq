@@ -29,9 +29,11 @@ import numpy as np
 from scipy.special import betainc, betaincc, betaln, ndtri, erfc
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import (ATOM_RESOLUTION, DEFAULT_NODES_PER_DECADE, LARGE_PARAMETER_FROM,
-                        NARROW_NORMAL_FROM, NARROW_STEPS, TAIL_FINE_ZONE, TAIL_INTERVALS,
-                        TAIL_POWER_LAW_LIMIT, TAIL_RATE_FLOOR, CurveMeta, GridMeta, Meta, RowIssues)
+from eltq._meta import (ATOM_RESOLUTION, DEFAULT_NODES_PER_DECADE,
+                        DEFAULT_NODES_PER_SIGMA, LARGE_PARAMETER_FROM, NARROW_MIN_PARAMETER,
+                        NARROW_NORMAL_FROM, NARROW_STEPS,
+                        TAIL_FINE_ZONE, TAIL_INTERVALS, TAIL_POWER_LAW_LIMIT, TAIL_RATE_FLOOR,
+                        UPPER_SKIP_SURVIVAL, CurveMeta, GridMeta, Meta, RowIssues)
 
 DEFAULT_CLAMP_FACTOR = 0.999
 MAX_EXAMPLES = 10
@@ -263,6 +265,14 @@ def _law(a: float, b: float):
     return _NormalLaw(a, b) if min(a, b) >= NARROW_NORMAL_FROM else _BetaLaw(a, b)
 
 
+def _check_nodes_per_sigma(nodes_per_sigma) -> int:
+    """Validate the fine mesh's accuracy knob; return it as an int."""
+    nps = int(nodes_per_sigma)
+    if nps < 1:
+        raise EltqError(f"nodes_per_sigma must be >= 1, got {nodes_per_sigma}")
+    return nps
+
+
 def _tail_moment(lam: float, m: float, a: float, b: float, e: float) -> float:
     """``lam P(X; X > e)`` for ``X = m Beta(a, b)`` (or its normal limit)."""
     if e >= m:
@@ -400,11 +410,24 @@ class SurvivalCurve:
     """
 
     def __init__(self, loss, curve, slope_out, slope_in, groups, below_rate,
-                 beta_rate, atom_loss, atom_rate, whole=(), narrow=()):
+                 beta_rate, atom_loss, atom_rate, whole=(), narrow=(), fine=None,
+                 requesting_events=0):
         self.loss = np.asarray(loss, dtype=np.float64)
         self.curve = np.asarray(curve, dtype=np.float64)
         self.slope_out = np.asarray(slope_out, dtype=np.float64)
         self.slope_in = np.asarray(slope_in, dtype=np.float64)
+        # The fine mesh and the requesting events' curve on it (spec section
+        # 5A): (loss, curve, slope_out, slope_in), or None when no event
+        # requested density.
+        if fine is None:
+            self.fine_loss = np.zeros(0)
+            self.fine_curve = np.zeros(0)
+            self.fine_slope_out = np.zeros(0)
+            self.fine_slope_in = np.zeros(0)
+        else:
+            self.fine_loss, self.fine_curve, self.fine_slope_out, self.fine_slope_in = (
+                np.asarray(v, dtype=np.float64) for v in fine)
+        self._requesting_events = int(requesting_events)
         # groups[k]: list of (lam, M, alpha, beta, s) for the events whose
         # last node below M is node k, s = S(x_k); their tails live on
         # (x_k, M] inside the node interval k.
@@ -440,24 +463,18 @@ class SurvivalCurve:
     # -- construction ---------------------------------------------------
 
     def _prepare_interpolant(self) -> None:
-        """Per interval, the limited end slopes ``dy/dx`` of the cubic
-        Hermite in plain coordinates (the slopes are stored as ``-x y'``).
+        """Per interval of each mesh, the limited end slopes ``dy/dx`` of the
+        cubic Hermite in plain coordinates (the slopes are stored as
+        ``-x y'``).
 
         A log-log Hermite was tried first and rejected: near a node where
         several truncated survival functions vanish together the logarithm
         magnifies the curvature, and on portfolios of J-shaped events it
         missed by 1e-2 where the plain cubic is within 1e-5.
         """
-        x, y = self.loss, self.curve
-        n_int = max(x.size - 1, 0)
-        self._m0 = np.zeros(n_int)
-        self._m1 = np.zeros(n_int)
-        for i in range(n_int):
-            if y[i] <= 0.0:
-                continue
-            d = (y[i + 1] - y[i]) / (x[i + 1] - x[i])
-            self._m0[i], self._m1[i] = _limit_slopes(
-                d, -self.slope_out[i] / x[i], -self.slope_in[i + 1] / x[i + 1])
+        self._m0, self._m1 = _limited_slopes(self.loss, self.curve, self.slope_out, self.slope_in)
+        self._fine_m0, self._fine_m1 = _limited_slopes(
+            self.fine_loss, self.fine_curve, self.fine_slope_out, self.fine_slope_in)
 
     @property
     def nodes(self) -> int:
@@ -467,6 +484,16 @@ class SurvivalCurve:
     def narrow_events(self) -> int:
         """The beta events kept out of the curve as narrow."""
         return len(self._narrow)
+
+    @property
+    def fine_nodes(self) -> int:
+        """The fine mesh's node count (0 when no event requested density)."""
+        return int(self.fine_loss.size)
+
+    @property
+    def requesting_events(self) -> int:
+        """The bell-shaped events carried on the fine curve."""
+        return self._requesting_events
 
     @property
     def exceedance_rate(self) -> np.ndarray:
@@ -534,26 +561,12 @@ class SurvivalCurve:
 
     def interpolate(self, x) -> np.ndarray:
         """The summed truncated exceedance rate (the curve part of
-        ``Lambda``) by the interpolant; NaN below the lowest node, 0 above
-        the highest."""
+        ``Lambda``) by the interpolants, the base curve plus the fine curve;
+        NaN below the lowest node, 0 above the highest."""
         x = np.asarray(x, dtype=np.float64)
-        out = np.full(x.shape, np.nan)
-        loss, y = self.loss, self.curve
-        if loss.size == 0:
-            return out
-        out[x >= loss[-1]] = 0.0
-        inside = (x >= loss[0]) & (x < loss[-1])
-        if loss.size == 1 or not inside.any():
-            return out
-        xi = x[inside]
-        k = np.searchsorted(loss, xi, side="right") - 1
-        x0, x1 = loss[k], loss[k + 1]
-        t = (xi - x0) / (x1 - x0)
-        res = np.maximum(_hermite(t, y[k], y[k + 1], x1 - x0, self._m0[k], self._m1[k]), 0.0)
-        # Exact at the nodes themselves.
-        at_node = x0 == xi
-        res[at_node] = y[k[at_node]]
-        out[inside] = res
+        out = _cubic_at(x, self.loss, self.curve, self._m0, self._m1)
+        if self.fine_loss.size:
+            out = out + _cubic_at(x, self.fine_loss, self.fine_curve, self._fine_m0, self._fine_m1)
         return out
 
     def exact_curve(self, x) -> np.ndarray:
@@ -677,10 +690,11 @@ class SurvivalCurve:
         weights = np.zeros(n, dtype=np.float64)
         if loss.size:
             values = self.exact_curve(edges) if exact_edges else self.interpolate(edges)
-            values = np.where(np.isnan(values), self.curve[0], values)
+            top_value = float(self.interpolate(np.array([self.loss[0]]))[0])   # base and fine together
+            values = np.where(np.isnan(values), top_value, values)
             # Monotone by construction; enforce it against rounding so that
             # no bucket is negative and the telescoping sum stays exact.
-            values = np.minimum.accumulate(np.minimum(values, self.curve[0]))
+            values = np.minimum.accumulate(np.minimum(values, top_value))
             # Below e_0 = x_0: everything the curve and the tails do not hold.
             weights[0] = self.beta_rate - values[0] - self.tail_above[0] - self.narrow_mass
             weights[1:] = values[:-1] - values[1:]
@@ -777,20 +791,111 @@ class SurvivalCurve:
             over_rate_terms.append(w)
 
 
+def _limited_slopes(x, y, slope_out, slope_in):
+    """Per interval, the limited end slopes ``dy/dx`` of the monotone cubic
+    from the accumulated ``-x Lambda'`` on each side."""
+    n_int = max(x.size - 1, 0)
+    m0 = np.zeros(n_int)
+    m1 = np.zeros(n_int)
+    for i in range(n_int):
+        if y[i] <= 0.0:
+            continue
+        d = (y[i + 1] - y[i]) / (x[i + 1] - x[i])
+        m0[i], m1[i] = _limit_slopes(d, -slope_out[i] / x[i], -slope_in[i + 1] / x[i + 1])
+    return m0, m1
+
+
+def _cubic_at(x, loss, y, m0, m1):
+    """A monotone cubic Hermite on ``loss`` at ``x``: NaN below the first
+    node, 0 at and beyond the last, exact at a node."""
+    out = np.full(x.shape, np.nan)
+    if loss.size == 0:
+        return out
+    out[x >= loss[-1]] = 0.0
+    inside = (x >= loss[0]) & (x < loss[-1])
+    if loss.size == 1 or not inside.any():
+        return out
+    xi = x[inside]
+    k = np.searchsorted(loss, xi, side="right") - 1
+    x0, x1 = loss[k], loss[k + 1]
+    t = (xi - x0) / (x1 - x0)
+    res = np.maximum(_hermite(t, y[k], y[k + 1], x1 - x0, m0[k], m1[k]), 0.0)
+    at_node = x0 == xi
+    res[at_node] = y[k[at_node]]
+    out[inside] = res
+    return out
+
+
+def _refine_mesh(loss, splits):
+    """The base mesh refined: base interval ``i`` split into ``splits[i]``
+    equal pieces in ``ln x``, the base nodes kept as they are; returns the
+    fine nodes and each base node's index in them. The same arithmetic as
+    the Rust engine, ``exp(u0 + k (u1 - u0) / s)``."""
+    fine, of_base = [], []
+    for i in range(loss.size - 1):
+        of_base.append(len(fine))
+        fine.append(float(loss[i]))
+        s = int(splits[i])
+        if s > 1:
+            u0, u1 = math.log(loss[i]), math.log(loss[i + 1])
+            for k in range(1, s):
+                fine.append(math.exp(u0 + k * (u1 - u0) / s))
+    of_base.append(len(fine))
+    fine.append(float(loss[-1]))
+    return np.array(fine, dtype=np.float64), np.array(of_base, dtype=int)
+
+
+def _deposit_event(lam, m, a, b, ln_b, k, s, mesh, curve, slope_both, slope_end, bell):
+    """One beta event's truncated survival ``lam (S - s)^+`` and slope
+    ``-x Lambda'`` onto ``mesh`` up to its truncation node ``k``, where
+    ``S = s``: nodes below the lower skip count the plateau ``lam (1 - s)``,
+    the slope at ``k`` goes to the incoming side, and a bell-shaped event
+    contributes nothing from the upper skip on (spec section 5A)."""
+    y = mesh[:k + 1] / m
+    # Lower skip: below the closed-form lower-tail quantile at
+    # LOWER_SKIP_PROBABILITY the survival function is exactly 1.
+    ln_plateau = (math.log(LOWER_SKIP_PROBABILITY) + math.log(a) + ln_b) / a
+    plateau = y < math.exp(ln_plateau) if ln_plateau > -745.0 else np.zeros(y.shape, dtype=bool)
+    surv = np.ones(y.shape)
+    active = ~plateau
+    surv[active] = betaincc(a, b, y[active])
+    # x f(x / M) / M = exp(a ln y + (b - 1) ln(1 - y) - ln B): the density
+    # times y, finite as y -> 0 for every alpha > 0.
+    g = np.zeros(y.shape)
+    g[active] = lam * np.exp(a * np.log(y[active]) + (b - 1.0) * np.log1p(-y[active]) - ln_b)
+    if bell:
+        below = np.flatnonzero(active & (surv < UPPER_SKIP_SURVIVAL))
+        if below.size:
+            surv[below[0]:] = s
+            g[below[0]:] = 0.0
+    curve[:k + 1] += lam * (surv - s)
+    slope_both[:k] += g[:k]
+    slope_end[k] += g[k]
+
+
 def build_survival_curve(beta_rows, atoms, min_loss: float,
-                         nodes_per_decade: int) -> SurvivalCurve:
+                         nodes_per_decade: int,
+                         nodes_per_sigma: int = DEFAULT_NODES_PER_SIGMA) -> SurvivalCurve:
     """Evaluate the truncated exceedance rate and its one-sided slopes at
-    geometric nodes; group the events' tails by node.
+    geometric nodes, the bell-shaped events that ask for density on a fine
+    mesh of their own; group the events' tails by node.
 
     Parameters
     ----------
-    beta_rows : sequence of (rate, max_loss, alpha, beta)
+    beta_rows : sequence of (rate, max_loss, alpha, beta, mean, sd)
     atoms : sequence of (loss, rate)
     min_loss : float
         The lowest node ``x_0`` (the smallest loss the consumer uses).
     nodes_per_decade : int
-        Node density; the nodes run from ``min_loss`` to the largest beta
-        ``max_loss`` with ``ceil(nodes_per_decade * log10(ratio))`` intervals.
+        Base node density; the nodes run from ``min_loss`` to the largest
+        beta ``max_loss`` with ``ceil(nodes_per_decade * log10(ratio))``
+        intervals.
+    nodes_per_sigma : int
+        Nodes per standard deviation a bell-shaped event asks of the fine
+        mesh on ``[mu - 3 sigma, mu + 7 sigma]``; one asking more than the
+        base density lives on the fine curve (one narrower than a base
+        interval is narrow, so the fine density is at most this times the
+        base).
 
     Notes
     -----
@@ -826,23 +931,50 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
     groups = [[] for _ in range(m1)]
     below_rate = 0.0
     whole = []   # events whose tail region starts at the lowest node
-    narrow = []  # events narrower than a node interval, walked exactly
-    # The narrow criterion, one node interval at the mean, and the rate
-    # floor of the bulk search.
-    narrow_ratio = 10.0 ** (1.0 / nodes_per_decade) - 1.0
+    narrow = []  # events kept out of the curve, walked exactly
     narrow_floor = TAIL_RATE_FLOOR * beta_rate
+    # The routes (spec section 5A), the same decision as the Rust engine: a
+    # bell-shaped event (both parameters above 1) narrower than a base
+    # interval at its mean, or beyond the continued fraction's regime, is
+    # narrow; one asking more than the base density, T ln(10) mu / sigma
+    # nodes per decade for nodes_per_sigma per standard deviation on
+    # [mu - 3 sigma, mu + 7 sigma], lives on the fine curve; the rest are
+    # regular. The fine mesh splits each base interval into the most equal
+    # pieces asked of it.
+    t_sigma, base_density = float(nodes_per_sigma), float(nodes_per_decade)
+    narrow_ratio = 10.0 ** (1.0 / nodes_per_decade) - 1.0
+    routes = []
+    splits = np.ones(m1 - 1, dtype=int)
     for lam, m, a, b, mu, sigma in beta_rows:
+        route = "regular"
+        if m > min_loss and a > 1.0 and b > 1.0:
+            density = t_sigma * math.log(10.0) * mu / sigma
+            quadrature_ok = min(a, b) >= NARROW_MIN_PARAMETER
+            if quadrature_ok and (min(a, b) >= LARGE_PARAMETER_FROM or sigma < mu * narrow_ratio):
+                route = "narrow"
+            elif density > base_density:
+                route = "requesting"
+                lo, hi = max(mu - 3.0 * sigma, min_loss), min(mu + 7.0 * sigma, m)
+                if hi > lo:
+                    i_lo = int(np.searchsorted(loss, lo, side="right")) - 1
+                    i_hi = min(int(np.searchsorted(loss, hi, side="right")) - 1, m1 - 2)
+                    # At most nodes_per_sigma pieces per base interval (an
+                    # event the quadrature cannot take rides its tail ladder).
+                    pieces = min(int(math.ceil(density / base_density)), int(nodes_per_sigma))
+                    splits[i_lo:i_hi + 1] = np.maximum(splits[i_lo:i_hi + 1], pieces)
+        routes.append(route)
+    has_fine = "requesting" in routes
+    if has_fine:
+        fine_loss, fine_of_base = _refine_mesh(loss, splits)
+        fine_curve = np.zeros(fine_loss.size)
+        fine_slope_both = np.zeros(fine_loss.size)
+        fine_slope_end = np.zeros(fine_loss.size)
+    requesting_events = 0
+    for (lam, m, a, b, mu, sigma), route in zip(beta_rows, routes):
         if m <= min_loss:
             below_rate += lam
             continue
-        # Only bounded, log-concave densities (both parameters above 1)
-        # qualify: an event narrower than a node interval, and one whose
-        # parameters are both at or above LARGE_PARAMETER_FROM, where the
-        # engine's continued fraction is untrustworthy, whatever the node
-        # density; from NARROW_NORMAL_FROM its law is the normal, as in the
-        # Rust engine (a row narrower than the resolution of its mean is an
-        # atom from the classification).
-        if (sigma < mu * narrow_ratio or min(a, b) >= LARGE_PARAMETER_FROM) and a > 1.0 and b > 1.0:
+        if route == "narrow":
             bulk = _narrow_bulk(a, b, m, mu, sigma, lam, narrow_floor, min_loss)
             if bulk is not None:
                 start, stop = bulk
@@ -856,27 +988,25 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
             # Its tail starts at the lowest node: S there is its "s".
             whole.append((lam, m, a, b, float(betaincc(a, b, loss[0] / m))))
             continue
-        y = loss[:k + 1] / m
         ln_b = betaln(a, b)
-        # Lower skip: below the closed-form lower-tail quantile at
-        # LOWER_SKIP_PROBABILITY the survival function is exactly 1.
-        ln_plateau = (math.log(LOWER_SKIP_PROBABILITY) + math.log(a) + ln_b) / a
-        plateau = y < math.exp(ln_plateau) if ln_plateau > -745.0 else np.zeros(y.shape, dtype=bool)
-        surv = np.ones(y.shape)
-        active = ~plateau
-        surv[active] = betaincc(a, b, y[active])
-        s = float(surv[k])
-        curve[:k + 1] += lam * (surv - s)
-        # x f(x / M) / M = exp(a ln y + (b - 1) ln(1 - y) - ln B): the
-        # density times y, finite as y -> 0 for every alpha > 0.
-        g = np.zeros(y.shape)
-        g[active] = lam * np.exp(a * np.log(y[active]) + (b - 1.0) * np.log1p(-y[active]) - ln_b)
-        slope_both[:k] += g[:k]
-        slope_end[k] += g[k]
+        s = float(betaincc(a, b, loss[k] / m))
+        bell = a > 1.0 and b > 1.0
+        if route == "requesting":
+            # On the fine mesh, whose node for x_k is the base node itself.
+            requesting_events += 1
+            _deposit_event(lam, m, a, b, ln_b, int(fine_of_base[k]), s, fine_loss,
+                           fine_curve, fine_slope_both, fine_slope_end, bell)
+        else:
+            _deposit_event(lam, m, a, b, ln_b, k, s, loss, curve, slope_both, slope_end, bell)
         groups[k].append((lam, m, a, b, s))
     curve[curve < 0.0] = 0.0
+    fine = None
+    if has_fine:
+        fine_curve[fine_curve < 0.0] = 0.0
+        fine = (fine_loss, fine_curve, fine_slope_both, fine_slope_both + fine_slope_end)
     return SurvivalCurve(loss, curve, slope_both, slope_both + slope_end, groups,
-                         below_rate, beta_rate, atom_loss, atom_rate, whole, narrow)
+                         below_rate, beta_rate, atom_loss, atom_rate, whole, narrow,
+                         fine=fine, requesting_events=requesting_events)
 
 
 def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
@@ -957,6 +1087,7 @@ def exceedance_curve_reference(
     *,
     min_loss,
     nodes_per_decade=DEFAULT_NODES_PER_DECADE,
+    nodes_per_sigma=DEFAULT_NODES_PER_SIGMA,
     mean_is_loss_rate=False,
     variance_policy="bernoulli",
     event_ids=None,
@@ -987,6 +1118,7 @@ def exceedance_curve_reference(
     npd = int(nodes_per_decade)
     if npd < 1:
         raise EltqError(f"nodes_per_decade must be >= 1, got {npd}")
+    nps = _check_nodes_per_sigma(nodes_per_sigma)
     _check_variance_policy(variance_policy)
     kinds, mu_eff, var_eff, _, diagnostics = _classify_rows(
         rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
@@ -1010,7 +1142,7 @@ def exceedance_curve_reference(
         else:
             a, b = beta_params(m, mu, var_eff[j])
             beta_rows.append((lam, m, a, b, mu, math.sqrt(var_eff[j])))
-    curve = build_survival_curve(beta_rows, atoms, x0, npd)
+    curve = build_survival_curve(beta_rows, atoms, x0, npd, nps)
     curve.total_rate = math.fsum(rates_kept)
     curve.analytic_aal = math.fsum(aal_terms)
     meta = CurveMeta(
@@ -1020,6 +1152,7 @@ def exceedance_curve_reference(
         total_rate=curve.total_rate, analytic_aal=curve.analytic_aal,
         input_rows=n_rows, valid_rows=valid_rows, diagnostics=diagnostics,
         narrow_events=curve.narrow_events,
+        fine_nodes=curve.fine_nodes, requesting_events=curve.requesting_events,
     )
     return curve, meta
 
@@ -1078,6 +1211,7 @@ def quantize_reference(
     method="survival",
     quadrature_points=32,
     nodes_per_decade=DEFAULT_NODES_PER_DECADE,
+    nodes_per_sigma=DEFAULT_NODES_PER_SIGMA,
     overflow="top_bucket",
     normalize=False,
     mean_is_loss_rate=False,
@@ -1130,6 +1264,7 @@ def quantize_reference(
     npd = int(nodes_per_decade)
     if npd < 1:
         raise EltqError(f"nodes_per_decade must be >= 1, got {npd}")
+    nps = _check_nodes_per_sigma(nodes_per_sigma)
     if overflow not in OVERFLOW_POLICIES:
         raise EltqError(
             f"unknown overflow {overflow!r} (expected top_bucket, drop, or error)")
@@ -1211,7 +1346,7 @@ def quantize_reference(
     curve = None
     interpolation_error = None
     if method == "survival":
-        curve = build_survival_curve(beta_rows, atoms, 0.5 * h, npd)
+        curve = build_survival_curve(beta_rows, atoms, 0.5 * h, npd, nps)
         weights, over_rate, over_moment = curve.bucket(h, n, exact_edges=exact_edges)
         secondary += weights
         if over_rate > 0.0:
@@ -1251,6 +1386,8 @@ def quantize_reference(
         nodes_per_decade=npd if method == "survival" else None,
         interpolation_error=interpolation_error,
         narrow_events=curve.narrow_events if curve is not None else None,
+        fine_nodes=curve.fine_nodes if curve is not None else None,
+        requesting_events=curve.requesting_events if curve is not None else None,
         overflow=overflow,
         rate_above_grid={"raw": raw_overflow.rate, "secondary": sec_overflow.rate},
         mean_above_grid={"raw": raw_overflow.moment, "secondary": sec_overflow.moment},

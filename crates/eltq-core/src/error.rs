@@ -45,6 +45,8 @@ pub enum Error {
     BadChunkRows(usize),
     #[error("nodes_per_decade must be >= 1, got {0}")]
     BadNodesPerDecade(usize),
+    #[error("nodes_per_sigma must be >= 1, got {0}")]
+    BadNodesPerSigma(usize),
     #[error("min_loss must be finite and positive, got {0}")]
     BadMinLoss(f64),
     #[error(

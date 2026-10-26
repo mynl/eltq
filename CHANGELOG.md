@@ -3,6 +3,19 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.4.0] - 2026-10-26
+
+### Added
+
+- [mesh] `nodes_per_sigma` (default 12), the survival method's accuracy knob, on `quantize_arrays`, `quantize_csv` and `exceedance_curve`. A bell-shaped event (both beta parameters above 1) narrower than that many base intervals asks for that many nodes per standard deviation around its mean and is carried on a second curve over a fine mesh; the base curve and the small-alpha events never see the fine nodes. The contract (spec test 33): within 1e-4 relative of each such event's survival where it is at least 1e-4, 1e-3 where at least 1e-8, 3e-3 where at least 1e-12, measured over alpha from 1.5 to 1e4 and coefficients of variation from 1e-3 to 0.2 (`benchmarks/report-2.4.0.md`, which also tabulates 8, 16 and 20). Before, the shared cubic was off by 1e-3 to 1e-2 in such an event's tail at the thousand-year band and by 22.8% on the review's Beta(1800, 1e6) case (peer review, finding A3); the review's single case was a sample of a regime, not an edge case.
+- `Meta.fine_nodes` and `Meta.requesting_events` (survival method), and the same on `CurveMeta`; `benchmarks/run_accuracy.py`, the accuracy sweep behind the contract.
+
+### Changed
+
+- The narrow route requires both parameters at least 2 (was above 1): its quadrature was off by up to 5e-4 for a parameter between 1 and 2, where the tail ladder is within 1e-5; such events stay on a curve. The plateau below an event's lower skip is one difference per event, not a visit per node.
+- The survival goldens are regenerated: the medium golden moves by at most 6.9e-7 of the total rate (522 of its 4,909 contributing rows are requesting events) and the small golden by 1.4e-5 (two requesting rows); on the medium fixture's beta rows the tail sums are now within 2.0e-5 of the exact exceedance at every bucket edge (4.9e-5 at 2.3.6).
+- Cost: on the mixture benchmark portfolio (10.6% of events requesting) the survival method takes 1.8 times as long at the default (1.90 s against 1.05 s for a million rows); on the small-alpha and large-exposure portfolios it is 3% to 7% faster. `nodes_per_sigma=1` turns the fine mesh off and restores the 2.3.6 behavior and speed.
+
 ## [2.3.6] - 2026-10-26
 
 ### Fixed

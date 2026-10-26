@@ -46,6 +46,11 @@ pub const TAIL_INTERVALS: usize = 4;
 pub const LN_LOWER_SKIP_PROBABILITY: f64 = -60.0 * std::f64::consts::LN_2;
 /// Interval log-midpoints sampled for the interpolation-error diagnostic.
 pub const SAMPLE_POINTS: usize = 64;
+/// `2^-60`: the upper skip of a bell-shaped event on its mesh. From the
+/// first node where its survival is below this, `lam (S - s)^+` is below
+/// `2^-60 lam` (the truncation value `s` is smaller still) and nothing is
+/// added, so a requesting event costs its window, not the mesh.
+pub const UPPER_SKIP_SURVIVAL: f64 = 8.673617379884035e-19;
 /// The rate cut of a tail walk, as a fraction of the beta events' total
 /// rate: the walk along the bucket edges stops at the first edge where the
 /// event's exceedance rate is at or below it and the remainder is lumped
@@ -282,6 +287,12 @@ pub struct TailEvent {
 /// narrow event's bulk must reach the rate floor; an event wider than that
 /// (its mass piled at an endpoint) takes the regular route.
 pub const NARROW_STEPS: usize = 40;
+/// The narrow route's quadrature needs a density whose derivative is finite
+/// at the endpoints, so both parameters at least 2: between 1 and 2 the
+/// 8-point rule was off by up to 5e-4 relative (measured at alpha = 100,
+/// beta from 1.02 to 1.6), where the shared curve and the tail ladder are
+/// within 1e-5. Below this the event stays on a curve.
+pub const NARROW_MIN_PARAMETER: f64 = 2.0;
 /// From this smaller parameter a narrow event's kernel is the standardized
 /// normal law in closed form instead of the quadrature of its density. The
 /// density's two logarithms are each of size about `40 sqrt(alpha beta /
@@ -469,6 +480,152 @@ fn narrow_bulk(kernel: &NarrowKernel, m: f64, mu: f64, sigma: f64, lam: f64, flo
     Some((lower, stop))
 }
 
+/// Where a beta event is carried (spec section 5A): the base curve, the
+/// fine curve (a bell-shaped event narrower than `nodes_per_sigma` base
+/// intervals, which asked for density around its mean), or the narrow route
+/// (one narrower than a base interval, or beyond the continued fraction's
+/// regime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Regular,
+    Requesting,
+    Narrow,
+}
+
+/// The base mesh refined: base interval `i` split into `splits[i]` equal
+/// pieces in `ln x`, the base nodes kept as they are (so `fine[fine_of_base[i]]
+/// == base[i]` bitwise). Both backends place the interior nodes with the
+/// same arithmetic, `exp(u0 + k (u1 - u0) / s)`.
+pub fn refine_mesh(base: &[f64], splits: &[usize]) -> (Vec<f64>, Vec<usize>) {
+    let mut fine = Vec::with_capacity(splits.iter().sum::<usize>() + 1);
+    let mut fine_of_base = Vec::with_capacity(base.len());
+    for i in 0..base.len() - 1 {
+        fine_of_base.push(fine.len());
+        fine.push(base[i]);
+        let s = splits[i];
+        if s > 1 {
+            let (u0, u1) = (base[i].ln(), base[i + 1].ln());
+            for k in 1..s {
+                fine.push((u0 + k as f64 * (u1 - u0) / s as f64).exp());
+            }
+        }
+    }
+    fine_of_base.push(fine.len());
+    fine.push(base[base.len() - 1]);
+    (fine, fine_of_base)
+}
+
+/// One beta event's truncated survival `lam (S - s)^+` and slope `-x
+/// Lambda'` onto a mesh up to its truncation node `k`, where `S = s`: the
+/// plateau below the lower skip as one difference (`+` at node 0, `-` at the
+/// first evaluated node, prefix-summed at the fold), the nodes from there to
+/// `k` evaluated, the slope at `k` on the incoming side only, and for a
+/// bell-shaped event nothing from the upper skip on.
+#[allow(clippy::too_many_arguments)]
+fn deposit_event<F: Fn(f64) -> Result<f64, Error>>(
+    bf: &BetaFn,
+    m: f64,
+    lam: f64,
+    k: usize,
+    s: f64,
+    mesh: &[f64],
+    curve: &mut [f64],
+    slope_both: &mut [f64],
+    slope_end: &mut [f64],
+    plateau: &mut [f64],
+    bell: bool,
+    checked: &F,
+) -> Result<(), Error> {
+    let alpha = bf.alpha;
+    // Lower skip: below the closed-form lower-tail quantile at 2^-60 the
+    // survival is exactly 1.
+    let ln_plateau = (LN_LOWER_SKIP_PROBABILITY + alpha.ln() + bf.ln_beta()) / alpha;
+    let plateau_y = if ln_plateau > -745.0 { ln_plateau.exp() } else { 0.0 };
+    let first = mesh[..=k].partition_point(|&x| x / m < plateau_y);
+    if first > 0 {
+        plateau[0] += lam * (1.0 - s);
+        plateau[first] -= lam * (1.0 - s);
+    }
+    for i in first..=k {
+        let (sf, density_y) = bf.sf_and_density_times_y(mesh[i] / m);
+        let sf = checked(sf)?;
+        if bell && sf < UPPER_SKIP_SURVIVAL {
+            break;
+        }
+        curve[i] += lam * (sf - s);
+        if i < k {
+            slope_both[i] += lam * density_y;
+        } else {
+            slope_end[k] += lam * density_y;
+        }
+    }
+    Ok(())
+}
+
+/// A monotone cubic Hermite with the limited slopes `m0`, `m1` per interval
+/// of `loss`, at `x`: NaN below the first node, 0 at and beyond the last,
+/// exact at a node.
+fn cubic_at(loss: &[f64], curve: &[f64], m0: &[f64], m1: &[f64], x: f64) -> f64 {
+    let n = loss.len();
+    if x < loss[0] {
+        return f64::NAN;
+    }
+    if x >= loss[n - 1] {
+        return 0.0;
+    }
+    let k = interval_of(loss, x);
+    if loss[k] == x {
+        return curve[k];
+    }
+    let dx = loss[k + 1] - loss[k];
+    hermite((x - loss[k]) / dx, curve[k], curve[k + 1], dx, m0[k], m1[k]).max(0.0)
+}
+
+/// `int_e^{x_m}` of that cubic: the partial interval holding `e` by the
+/// antiderivatives of the four basis functions, then `dx (y0 + y1) / 2 +
+/// dx^2 (m0 - m1) / 12` on each whole interval above it.
+fn cubic_integral_above(loss: &[f64], curve: &[f64], m0: &[f64], m1: &[f64], e: f64) -> f64 {
+    let n = loss.len();
+    if n < 2 || e >= loss[n - 1] {
+        return 0.0;
+    }
+    let e = e.max(loss[0]);
+    let k = interval_of(loss, e);
+    let mut total = Neumaier::default();
+    let dx = loss[k + 1] - loss[k];
+    let t0 = (e - loss[k]) / dx;
+    let (t2, t3, t4) = (t0 * t0, t0 * t0 * t0, t0 * t0 * t0 * t0);
+    let h00 = 0.5 - (0.5 * t4 - t3 + t0);
+    let h10 = 1.0 / 12.0 - (0.25 * t4 - 2.0 * t3 / 3.0 + 0.5 * t2);
+    let h01 = 0.5 - (-0.5 * t4 + t3);
+    let h11 = -1.0 / 12.0 - (0.25 * t4 - t3 / 3.0);
+    total.add(dx * (h00 * curve[k] + h01 * curve[k + 1] + dx * (h10 * m0[k] + h11 * m1[k])));
+    for i in k + 1..n - 1 {
+        let dx = loss[i + 1] - loss[i];
+        total.add(dx * (0.5 * (curve[i] + curve[i + 1]) + dx * (m0[i] - m1[i]) / 12.0));
+    }
+    total.value().max(0.0)
+}
+
+/// Limited one-sided slopes per interval of a mesh from the accumulated
+/// `-x Lambda'` (both sides, and the incoming side alone at truncation
+/// nodes).
+fn limited_slopes(loss: &[f64], curve: &[f64], slope_both: &[f64], slope_end: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let intervals = loss.len().saturating_sub(1);
+    let mut m0 = vec![0.0_f64; intervals];
+    let mut m1 = vec![0.0_f64; intervals];
+    for i in 0..intervals {
+        if curve[i] <= 0.0 {
+            continue;
+        }
+        let d = (curve[i + 1] - curve[i]) / (loss[i + 1] - loss[i]);
+        let (a, b) = limit_slopes(d, -slope_both[i] / loss[i], -(slope_both[i + 1] + slope_end[i + 1]) / loss[i + 1]);
+        m0[i] = a;
+        m1[i] = b;
+    }
+    (m0, m1)
+}
+
 /// The exceedance curve: nodes, the truncated curve with its one-sided
 /// slopes, the tails per event, and the atoms (spec section 5A).
 #[derive(Debug, Clone)]
@@ -482,6 +639,14 @@ pub struct Curve {
     /// Limited end slopes per interval, `dy/dx`.
     m0: Vec<f64>,
     m1: Vec<f64>,
+    /// The fine mesh (the base nodes refined where bell-shaped events asked
+    /// for density) and the requesting events' truncated curve on it with
+    /// its limited slopes; all empty when no event requested.
+    fine_loss: Vec<f64>,
+    fine_curve: Vec<f64>,
+    fine_m0: Vec<f64>,
+    fine_m1: Vec<f64>,
+    requesting_events: usize,
     /// `tail_above[i]`: total tail mass of the events truncated at node `i`
     /// or later (length `nodes + 1`).
     tail_above: Vec<f64>,
@@ -531,6 +696,15 @@ struct BuildPartial {
     slope_end: Vec<f64>,
     tail_at: Vec<f64>,
     node_tail: Vec<f64>,
+    /// The requesting events' curve and slopes on the fine mesh.
+    fine_curve: Vec<f64>,
+    fine_slope_both: Vec<f64>,
+    fine_slope_end: Vec<f64>,
+    /// The plateaus below the events' lower skips as differences, one
+    /// element longer than each mesh.
+    plateau: Vec<f64>,
+    fine_plateau: Vec<f64>,
+    requesting: usize,
     sample_curve: Vec<f64>,
     sample_total: Vec<f64>,
     tails: Vec<TailEvent>,
@@ -624,10 +798,8 @@ pub fn build_curve(
         .map(|&i| (0.5 * (loss[i].ln() + loss[i + 1].ln())).exp())
         .collect();
 
-    // The narrow criterion, one node interval at the mean, and the rate
-    // floor of the bulk search, on the beta rate summed here serially (the
-    // fold below gives the reported value).
-    let narrow_ratio = 10.0_f64.powf(1.0 / config.nodes_per_decade as f64) - 1.0;
+    // The rate floor of the bulk search, on the beta rate summed here
+    // serially (the fold below gives the reported value).
     let mut serial_beta_rate = Neumaier::default();
     for row in 0..n_rows {
         if kinds[row] == RowKind::Beta {
@@ -635,6 +807,57 @@ pub fn build_curve(
         }
     }
     let narrow_floor = TAIL_RATE_FLOOR * serial_beta_rate.value();
+
+    // The routes (spec section 5A), decided once so that the chunks agree
+    // and the fine mesh is known before the pass: a bell-shaped event (both
+    // parameters above 1) narrower than a base interval at its mean, or
+    // beyond the continued fraction's regime, is narrow; one asking more
+    // than the base density, `d_j = T ln(10) mu / sigma` nodes per decade
+    // for `nodes_per_sigma` per standard deviation on [mu - 3 sigma,
+    // mu + 7 sigma], lives on the fine curve; the rest are regular on the
+    // base curve. The fine mesh splits each base interval into the largest
+    // number of equal pieces asked of it, at most `nodes_per_sigma` since
+    // the narrow route takes over at one interval.
+    let t_sigma = config.nodes_per_sigma as f64;
+    let narrow_ratio = 10.0_f64.powf(1.0 / config.nodes_per_decade as f64) - 1.0;
+    let base_density = config.nodes_per_decade as f64;
+    let mut routes = vec![Route::Regular; n_rows];
+    let mut splits = vec![1_usize; intervals];
+    for row in 0..n_rows {
+        if kinds[row] != RowKind::Beta || input.max_loss[row] <= min_loss {
+            continue;
+        }
+        let (m, mu, var) = (input.max_loss[row], classified.mu_eff[row], classified.var_eff[row]);
+        let (alpha, beta) = beta_params(m, mu, var);
+        if !(alpha > 1.0 && beta > 1.0) {
+            continue;
+        }
+        let sigma = var.sqrt();
+        let density = t_sigma * std::f64::consts::LN_10 * mu / sigma;
+        let quadrature_ok = alpha.min(beta) >= NARROW_MIN_PARAMETER;
+        if quadrature_ok && (alpha.min(beta) >= crate::batched::LARGE_PARAMETER_FROM || sigma < mu * narrow_ratio) {
+            routes[row] = Route::Narrow;
+        } else if density > base_density {
+            // At most `nodes_per_sigma` pieces per base interval: an event
+            // narrower than an interval that the quadrature cannot take (a
+            // parameter between 1 and 2, its mass against an endpoint) is
+            // carried by its tail ladder, not by the fine mesh.
+            routes[row] = Route::Requesting;
+            let lo = (mu - 3.0 * sigma).max(min_loss);
+            let hi = (mu + 7.0 * sigma).min(m);
+            if hi > lo {
+                let i_lo = interval_of(&loss, lo);
+                let i_hi = interval_of(&loss, hi).min(intervals - 1);
+                let pieces = ((density / base_density).ceil() as usize).min(config.nodes_per_sigma);
+                for sp in &mut splits[i_lo..=i_hi] {
+                    *sp = (*sp).max(pieces);
+                }
+            }
+        }
+    }
+    let has_fine = routes.iter().any(|&r| r == Route::Requesting);
+    let (fine_loss, fine_of_base) = if has_fine { refine_mesh(&loss, &splits) } else { (Vec::new(), Vec::new()) };
+    let fine_m1 = fine_loss.len();
 
     let process_chunk = |chunk_index: usize| -> Result<BuildPartial, Error> {
         let start = chunk_index * chunk_rows;
@@ -645,6 +868,12 @@ pub fn build_curve(
             slope_end: vec![0.0; m1],
             tail_at: vec![0.0; m1],
             node_tail: vec![0.0; m1],
+            fine_curve: vec![0.0; fine_m1],
+            fine_slope_both: vec![0.0; fine_m1],
+            fine_slope_end: vec![0.0; fine_m1],
+            plateau: vec![0.0; m1 + 1],
+            fine_plateau: vec![0.0; fine_m1 + 1],
+            requesting: 0,
             sample_curve: vec![0.0; sample_x.len()],
             sample_total: vec![0.0; sample_x.len()],
             tails: Vec::new(),
@@ -658,8 +887,6 @@ pub fn build_curve(
         let mut rate_acc = Neumaier::default();
         let mut aal_acc = Neumaier::default();
         let mut beta_acc = Neumaier::default();
-        let mut surv = Vec::with_capacity(m1);
-        let mut g = Vec::with_capacity(m1);
         for row in start..end {
             let kind = kinds[row];
             if kind == RowKind::Drop {
@@ -699,15 +926,15 @@ pub fn build_curve(
                     // A narrow event: its bulk, a few sigma wide, found by
                     // stepping out from the mean; kept out of the curve.
                     // Only bounded, log-concave densities (both parameters
-                    // above 1) qualify. An event narrower than a node
-                    // interval goes here, and so does one whose parameters
-                    // are both large enough that the continued fraction is
-                    // untrustworthy (`is_valid_regime`), whatever the node
-                    // density; from NARROW_NORMAL_FROM the kernel is the
-                    // normal law (a row narrower than the resolution of its
-                    // mean never gets here: `validate` made it an atom).
+                    // above 1) qualify: one narrower than a base interval at
+                    // its mean, or whose parameters are both large enough
+                    // that the continued fraction is untrustworthy
+                    // (`is_valid_regime`), whatever the node density; from
+                    // NARROW_NORMAL_FROM the kernel is the normal law (a row
+                    // narrower than the resolution of its mean never gets
+                    // here: `validate` made it an atom).
                     let sigma = classified.var_eff[row].sqrt();
-                    if (sigma < mu * narrow_ratio || !bf.is_valid_regime()) && alpha > 1.0 && beta > 1.0 {
+                    if routes[row] == Route::Narrow {
                         let kernel = NarrowKernel::new(alpha, beta);
                         let bulk = narrow_bulk(&kernel, m, mu, sigma, lam, narrow_floor)
                             .map(|(lower, stop)| (lower, stop, kernel.integral(lower / m, stop / m)));
@@ -748,32 +975,26 @@ pub fn build_curve(
                         (0_usize, loss[0], checked(bf.sf(loss[0] / m))?)
                     } else {
                         let k = k_signed as usize;
-                        surv.clear();
-                        g.clear();
-                        // Lower skip: below the closed-form lower-tail
-                        // quantile at 2^-60 the survival is exactly 1.
-                        let ln_plateau = (LN_LOWER_SKIP_PROBABILITY + alpha.ln() + bf.ln_beta()) / alpha;
-                        let plateau = if ln_plateau > -745.0 { ln_plateau.exp() } else { 0.0 };
-                        for &x in &loss[..=k] {
-                            let y = x / m;
-                            if y < plateau {
-                                surv.push(1.0);
-                                g.push(0.0);
-                            } else {
-                                let (sf, density_y) = bf.sf_and_density_times_y(y);
-                                surv.push(checked(sf)?);
-                                g.push(lam * density_y);
-                            }
+                        let xk = loss[k];
+                        let s = checked(bf.sf(xk / m))?;
+                        let bell = alpha > 1.0 && beta > 1.0;
+                        if routes[row] == Route::Requesting {
+                            // On the fine mesh, whose node for x_k is the
+                            // base node itself.
+                            p.requesting += 1;
+                            deposit_event(
+                                &bf, m, lam, fine_of_base[k], s, &fine_loss,
+                                &mut p.fine_curve, &mut p.fine_slope_both, &mut p.fine_slope_end, &mut p.fine_plateau,
+                                bell, &checked,
+                            )?;
+                        } else {
+                            deposit_event(
+                                &bf, m, lam, k, s, &loss,
+                                &mut p.curve, &mut p.slope_both, &mut p.slope_end, &mut p.plateau,
+                                bell, &checked,
+                            )?;
                         }
-                        let s = surv[k];
-                        for i in 0..=k {
-                            p.curve[i] += lam * (surv[i] - s);
-                        }
-                        for i in 0..k {
-                            p.slope_both[i] += g[i];
-                        }
-                        p.slope_end[k] += g[k];
-                        (k, loss[k], s)
+                        (k, xk, s)
                     };
                     p.tail_at[k] += lam * s;
                     // Its exact survival at the nodes its tail covers.
@@ -817,6 +1038,12 @@ pub fn build_curve(
     let mut slope_end = vec![0.0_f64; m1];
     let mut tail_at = vec![0.0_f64; m1];
     let mut node_tail = vec![0.0_f64; m1];
+    let mut fine_curve = vec![0.0_f64; fine_m1];
+    let mut fine_slope_both = vec![0.0_f64; fine_m1];
+    let mut fine_slope_end = vec![0.0_f64; fine_m1];
+    let mut plateau = vec![0.0_f64; m1 + 1];
+    let mut fine_plateau = vec![0.0_f64; fine_m1 + 1];
+    let mut requesting_events = 0_usize;
     let mut sample_curve = vec![0.0_f64; sample_x.len()];
     let mut sample_total = vec![0.0_f64; sample_x.len()];
     let mut tails: Vec<TailEvent> = Vec::new();
@@ -842,6 +1069,22 @@ pub fn build_curve(
         for (dst, src) in node_tail.iter_mut().zip(&p.node_tail) {
             *dst += src;
         }
+        for (dst, src) in fine_curve.iter_mut().zip(&p.fine_curve) {
+            *dst += src;
+        }
+        for (dst, src) in fine_slope_both.iter_mut().zip(&p.fine_slope_both) {
+            *dst += src;
+        }
+        for (dst, src) in fine_slope_end.iter_mut().zip(&p.fine_slope_end) {
+            *dst += src;
+        }
+        for (dst, src) in plateau.iter_mut().zip(&p.plateau) {
+            *dst += src;
+        }
+        for (dst, src) in fine_plateau.iter_mut().zip(&p.fine_plateau) {
+            *dst += src;
+        }
+        requesting_events += p.requesting;
         for (dst, src) in sample_curve.iter_mut().zip(&p.sample_curve) {
             *dst += src;
         }
@@ -858,34 +1101,33 @@ pub fn build_curve(
         Ok(())
     })?;
     let beta_rate = beta_rate.value();
-    for v in curve.iter_mut() {
-        if *v < 0.0 {
-            *v = 0.0;
+    // The plateaus, prefix-summed into the curves (the events' rate less
+    // their truncation value below their lower skips), then no negatives.
+    let settle = |curve: &mut [f64], plateau: &[f64]| {
+        let mut running = 0.0_f64;
+        for (v, d) in curve.iter_mut().zip(plateau) {
+            running += d;
+            *v += running;
+            if *v < 0.0 {
+                *v = 0.0;
+            }
         }
-    }
+    };
+    settle(&mut curve, &plateau);
+    settle(&mut fine_curve, &fine_plateau);
 
-    // The interpolant: limited one-sided slopes per interval.
-    let mut m0 = vec![0.0_f64; intervals];
-    let mut m1v = vec![0.0_f64; intervals];
-    for i in 0..intervals {
-        if curve[i] <= 0.0 {
-            continue;
-        }
-        let d = (curve[i + 1] - curve[i]) / (loss[i + 1] - loss[i]);
-        let (a, b) = limit_slopes(
-            d,
-            -slope_both[i] / loss[i],
-            -(slope_both[i + 1] + slope_end[i + 1]) / loss[i + 1],
-        );
-        m0[i] = a;
-        m1v[i] = b;
-    }
+    // The interpolants: limited one-sided slopes per interval of each mesh.
+    let (m0, m1v) = limited_slopes(&loss, &curve, &slope_both, &slope_end);
+    let (fine_m0, fine_m1v) = limited_slopes(&fine_loss, &fine_curve, &fine_slope_both, &fine_slope_end);
     let mut tail_above = vec![0.0_f64; m1 + 1];
     for i in (0..m1).rev() {
         tail_above[i] = tail_above[i + 1] + tail_at[i];
     }
     let exceedance_rate: Vec<f64> = (0..m1)
-        .map(|i| curve[i] + tail_above[i] + node_tail[i])
+        .map(|i| {
+            let fine = if has_fine { fine_curve[fine_of_base[i]] } else { 0.0 };
+            curve[i] + fine + tail_above[i] + node_tail[i]
+        })
         .collect();
 
     // Group the tails by node and sort the atoms by loss, both stably.
@@ -924,6 +1166,11 @@ pub fn build_curve(
         exceedance_rate,
         m0,
         m1: m1v,
+        fine_loss,
+        fine_curve,
+        fine_m0,
+        fine_m1: fine_m1v,
+        requesting_events,
         tail_above,
         tails,
         group_start,
@@ -971,20 +1218,22 @@ impl Curve {
     /// The truncated curve by the interpolant; 0 above the highest node.
     /// Below the lowest node the curve is undefined (NaN).
     pub fn interpolate(&self, x: f64) -> f64 {
-        let loss = &self.loss;
-        let m1 = loss.len();
-        if x < loss[0] {
-            return f64::NAN;
+        let base = cubic_at(&self.loss, &self.curve, &self.m0, &self.m1, x);
+        if self.fine_loss.is_empty() {
+            base
+        } else {
+            base + cubic_at(&self.fine_loss, &self.fine_curve, &self.fine_m0, &self.fine_m1, x)
         }
-        if x >= loss[m1 - 1] {
-            return 0.0;
-        }
-        let k = interval_of(loss, x);
-        if loss[k] == x {
-            return self.curve[k];
-        }
-        let dx = loss[k + 1] - loss[k];
-        hermite((x - loss[k]) / dx, self.curve[k], self.curve[k + 1], dx, self.m0[k], self.m1[k]).max(0.0)
+    }
+
+    /// The fine mesh's node count (0 when no event requested density).
+    pub fn fine_nodes(&self) -> usize {
+        self.fine_loss.len()
+    }
+
+    /// The bell-shaped events carried on the fine curve.
+    pub fn requesting_events(&self) -> usize {
+        self.requesting_events
     }
 
     /// `int_e^{x_m} Lambda~(x) dx`, the integral of the interpolated curve
@@ -992,29 +1241,12 @@ impl Curve {
     /// `e`, then the closed form `dx (y0 + y1) / 2 + dx^2 (m0 - m1) / 12` on
     /// each whole interval above it. Zero at and beyond the last node.
     pub fn integral_above(&self, e: f64) -> f64 {
-        let loss = &self.loss;
-        let m1 = loss.len();
-        if m1 < 2 || e >= loss[m1 - 1] {
-            return 0.0;
+        let base = cubic_integral_above(&self.loss, &self.curve, &self.m0, &self.m1, e);
+        if self.fine_loss.is_empty() {
+            base
+        } else {
+            base + cubic_integral_above(&self.fine_loss, &self.fine_curve, &self.fine_m0, &self.fine_m1, e)
         }
-        let e = e.max(loss[0]);
-        let k = interval_of(loss, e);
-        let mut total = Neumaier::default();
-        // The partial interval from t0 to 1, by the antiderivatives of the
-        // four Hermite basis functions.
-        let dx = loss[k + 1] - loss[k];
-        let t0 = (e - loss[k]) / dx;
-        let (t2, t3, t4) = (t0 * t0, t0 * t0 * t0, t0 * t0 * t0 * t0);
-        let h00 = 0.5 - (0.5 * t4 - t3 + t0);
-        let h10 = 1.0 / 12.0 - (0.25 * t4 - 2.0 * t3 / 3.0 + 0.5 * t2);
-        let h01 = 0.5 - (-0.5 * t4 + t3);
-        let h11 = -1.0 / 12.0 - (0.25 * t4 - t3 / 3.0);
-        total.add(dx * (h00 * self.curve[k] + h01 * self.curve[k + 1] + dx * (h10 * self.m0[k] + h11 * self.m1[k])));
-        for i in k + 1..m1 - 1 {
-            let dx = loss[i + 1] - loss[i];
-            total.add(dx * (0.5 * (self.curve[i] + self.curve[i + 1]) + dx * (self.m0[i] - self.m1[i]) / 12.0));
-        }
-        total.value().max(0.0)
     }
 
     /// `Lambda(x)` of the beta events: the interpolated curve, the tails of
@@ -1096,7 +1328,10 @@ impl Curve {
         // The curve, differenced at the edges and made monotone against
         // rounding so the telescoping sum stays exact.
         if self.loss.len() > 1 {
-            let mut prev = self.curve[0];
+            // The curve's value at its lowest node, base and fine together
+            // (clipping from the base alone dropped a requesting event's
+            // plateau into bucket 0).
+            let mut prev = self.interpolate(self.loss[0]);
             let mut values = Vec::with_capacity(n);
             for i in 0..n {
                 let e = (i as f64 + 0.5) * h;
@@ -1557,6 +1792,65 @@ mod tests {
                 assert!((got - want).abs() <= 5e-5 * want, "a={a} b={b} d={d}: {got} vs {want}");
                 k += 2;
             }
+        }
+    }
+
+    // [mesh] The refined mesh keeps every base node bitwise and splits the
+    // asked intervals evenly in ln x.
+    #[test]
+    fn refined_mesh_keeps_the_base_nodes() {
+        let base = geometric_nodes(1.0, 1e3, 10);
+        let mut splits = vec![1_usize; base.len() - 1];
+        splits[3] = 4;
+        splits[7] = 2;
+        let (fine, of_base) = refine_mesh(&base, &splits);
+        assert_eq!(fine.len(), base.len() + 3 + 1);
+        for (i, &b) in base.iter().enumerate() {
+            assert_eq!(fine[of_base[i]], b);
+        }
+        assert!(fine.windows(2).all(|w| w[1] > w[0]));
+        let (u0, u1) = (base[3].ln(), base[4].ln());
+        assert_eq!(fine[of_base[3] + 1], (u0 + (u1 - u0) / 4.0).exp());
+    }
+
+    // [mesh] The review's A3 case, Beta(1800, 1e6): a bell-shaped event
+    // with a coefficient of variation of 2.4%, one base interval wide, was
+    // 22.8% off in its upper tail on the shared cubic. On the fine curve it
+    // meets the contract: within 1e-4 where S >= 1e-4 and within 1e-3 where
+    // S >= 1e-8, at every fine-interval midpoint, against the engine's own
+    // incomplete beta (good to 1e-9 here).
+    #[test]
+    fn requesting_event_meets_the_contract() {
+        use crate::quantize::classify_rows;
+        let (a, b) = (1800.0_f64, 1e6_f64);
+        let p = a / (a + b);
+        let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
+        let rate = [1.0];
+        let max_loss = [1.0];
+        let mean = [p];
+        let sd_i = [sd];
+        let sd_c = [0.0];
+        let input = EltInput { rate: &rate, max_loss: &max_loss, mean_loss: &mean, sd_indep: &sd_i, sd_corr: &sd_c };
+        let config = Config::new(2.0 * p * 1e-4);
+        let classified = classify_rows(&input, &config).unwrap();
+        let curve = build_curve(&input, &config, &classified, p * 1e-4).unwrap();
+        assert_eq!(curve.requesting_events(), 1);
+        assert!(curve.fine_nodes() > curve.nodes(), "{} vs {}", curve.fine_nodes(), curve.nodes());
+        let bf = BetaFn::new(a, b);
+        let x = 0.001944568270403778;
+        let exact = bf.sf(x);
+        assert!((exact - 3.252159380340672e-4).abs() < 1e-12);
+        let got = curve.exceedance(x);
+        assert!((got - exact).abs() <= 1e-4 * exact, "{got} vs {exact}");
+        for w in curve.fine_loss.windows(2) {
+            let mid = (0.5 * (w[0].ln() + w[1].ln())).exp();
+            let want = bf.sf(mid);
+            if want < 1e-8 {
+                continue;
+            }
+            let got = curve.exceedance(mid);
+            let tol = if want >= 1e-4 { 1e-4 } else { 1e-3 };
+            assert!((got - want).abs() <= tol * want, "x={mid}: {got} vs {want}");
         }
     }
 

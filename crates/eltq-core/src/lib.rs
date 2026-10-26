@@ -36,11 +36,11 @@ pub mod validate;
 pub mod views;
 
 pub use curve::{
-    Curve, GridOutcome, NARROW_NORMAL_FROM, NARROW_STEPS, NarrowEvent, NarrowKernel, TAIL_INTERVALS,
+    Curve, GridOutcome, NARROW_MIN_PARAMETER, NARROW_NORMAL_FROM, NARROW_STEPS, NarrowEvent, NarrowKernel, TAIL_INTERVALS,
     TAIL_RATE_FLOOR, build_curve,
 };
 pub use config::{
-    Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_NODES_PER_DECADE,
+    Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA,
     DEFAULT_QUADRATURE_POINTS, DEFAULT_SURVIVAL_CHUNK_ROWS, Method, Overflow, VariancePolicy,
 };
 pub use diagnostics::{Category, Diagnostics, MAX_EXAMPLES, Meta, QuantizeResult, RowIssues};

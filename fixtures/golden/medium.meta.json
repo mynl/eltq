@@ -65,6 +65,8 @@
   "nodes_per_decade": null,
   "interpolation_error": null,
   "narrow_events": null,
+  "fine_nodes": null,
+  "requesting_events": null,
   "overflow": "top_bucket",
   "rate_above_grid": {
     "raw": 0.0,

@@ -486,3 +486,27 @@ Also found: at distances below $10^{-12}M_j$ the formulation's rounding of $1-y$
 The survival goldens moved: the medium golden by up to $3\times10^{-6}$ of the total rate in the top bucket below the exposed value of its bell-shaped events (the power law was extrapolated from a quarter bucket away, $c_jt_L$ up to a few percent for $\alpha_j$ in the thousands and $M_j$ in the tens of thousands at $h=5{,}000$), the small golden by $4\times10^{-8}$. Checked on the medium fixture's 4,347 beta rows alone (atoms deposit linearly and cannot be compared to a step): the new tail sums are within $4.9\times10^{-5}$ of the exact exceedance at every one of the 999 bucket edges, mean $1.1\times10^{-6}$. Regenerated with `fixtures/generate_fixtures.py`; the quantiles goldens' metadata gained the `narrow_events` key they lacked since 2.3.0 and the multi-unit golden moved by $4\times10^{-16}$ relative, rounding of the regeneration, both committed with the step.
 
 Gates: `cargo test -p eltq-core --release` (86 lib tests, goldens regenerated); `uv run pytest` after the rebuild (184 passed, 1 skipped).
+
+### [mesh] 2.4.0 (2026-10-26): built, tested, held at the gate
+
+The two-curve design landed as planned: `Route` per row decided in a pre-pass, `refine_mesh` splitting each base interval into equal pieces in $\ln x$, `deposit_event` shared by both meshes with the plateau as a difference and the upper skip at $2^{-60}$, a second set of partial vectors folded alongside the first, `cubic_at` and `cubic_integral_above` summing the two curves. Divergences:
+
+- **No `max_nodes_per_decade`.** The knob failed validation whenever a caller raised `nodes_per_decade` above it (test 30 at 200,000) and was redundant: the narrow route takes over at one base interval, where a requesting event's density would reach $T$ times the base, so the pieces per base interval are capped at $T$ instead. The ruling's cap of 5,000 was moot at the defaults ($12\times100=1{,}200$).
+- **The narrow route keeps its one-base-interval criterion** beside the kernel-validity one, rather than handing the band from $0.55\%$ to $2.3\%$ to the fine curve as drafted: there the quadrature is exact ($10^{-12}$) where the fine curve would be $10^{-5}$, and test 22 asks $10^{-8}$ of it.
+- **The narrow route requires both parameters at least 2** (`NARROW_MIN_PARAMETER`). Measured: its 8-point rule is off by $1.2\times10^{-4}$ to $4.8\times10^{-4}$ relative for $\beta$ from $1.02$ to $1.6$ at $\alpha=100$, $10^{-13}$ from $\beta=2$ (the density's derivative is infinite at the endpoint below 2). Such an event stays on a curve: its mass sits against the endpoint, inside the tail interval, and the ladder carries it to $10^{-5}$. Found by test 33's sweep.
+- **A grid bug of the two-curve design, caught by the sweep.** `Curve::grid` clipped the edge values from `self.curve[0]`, the base curve's first value, so a requesting event's plateau at the lowest node was clipped to zero and its mass landed in bucket 0 ($10^{-3}$ of the rate on $\operatorname{Beta}(100,2)$). The clip now starts from the full curve's value at the lowest node, on both backends.
+- **The contract at $T=12$ has one exception**, $\operatorname{Beta}(10,7.3)$ at a coefficient of variation of $0.2$: $1.5\times10^{-4}$ in the band $[10^{-4},10^{-2})$, a skewed small-parameter bell whose upper tail is steeper than a normal's; recorded in the spec and the report rather than special-cased.
+
+Calibration (`benchmarks/run_accuracy.py`, in `benchmarks/report-2.4.0.md`): at $T=12$ the bands are $8.6\times10^{-6}$, $1.5\times10^{-4}$, $3.9\times10^{-5}$, $1.0\times10^{-4}$, $2.1\times10^{-4}$ against the base mesh alone at $1.1\times10^{-2}$, $0.13$, $0.23$, $0.31$, $1.4$. On the medium fixture's beta rows the tail sums are within $2.0\times10^{-5}$ of the exact exceedance at every edge ($4.9\times10^{-5}$ at 2.3.6); the medium golden moved by at most $6.9\times10^{-7}$ of the total rate.
+
+**The speed gate (decision 2, 15%) fails on one of the three portfolios.** Survival method, same machine, medians of three:
+
+| portfolio | 2.3.6 | 2.4.0 | change |
+|:---|---:|---:|---:|
+| mixture, $10^6$ rows, $h=5{,}000$ | 1.049 s | 1.897 s | $+81\%$ |
+| small-alpha, $10^6$ rows, $h=100$ | 2.779 s | 2.684 s | $-3\%$ |
+| large exposure, $10^5$ rows, $h=25$, $2^{22}$ buckets | 1.415 s | 1.310 s | $-7\%$ |
+
+The mixture's cost is the fine evaluations: 105,779 of its events are requesting (10.6%), about 7 microseconds each, which is roughly 130 incomplete-beta evaluations; with the fine mesh off (`nodes_per_sigma=1`) the build takes 1.00 s. Half of those events have coefficients of variation between 0.14 and 0.28 and ask for two pieces per base interval (about 40 extra nodes each); the quarter below 0.07 ask for five to twelve (about 100 each). The cost is intrinsic to the contract: it buys the accuracy exactly where the shared cubic was wrong, in proportion to how wrong it was, and nowhere else. Steve's ruling, 2026-10-26: accept the cost ("unlikely to feel it in reality"); the 15% ceiling of decision 2 is replaced for this step by the measured table above, and `nodes_per_sigma=1` remains the route back to the 2.3.6 speed. Committed as 2.4.0.
+
+Gates: `cargo test -p eltq-core --release` (88 lib tests, goldens regenerated); `uv run pytest` after the rebuild (186 passed, 1 skipped).

@@ -112,6 +112,7 @@ struct Options<'a> {
     method: &'a str,
     quadrature_points: usize,
     nodes_per_decade: usize,
+    nodes_per_sigma: usize,
     overflow: &'a str,
     normalize: bool,
     mean_is_loss_rate: bool,
@@ -126,6 +127,7 @@ fn build_config(py: Python<'_>, o: &Options<'_>) -> PyResult<Config> {
     config.method = Method::parse(o.method).map_err(|e| to_py_err(py, e))?;
     config.quadrature_points = o.quadrature_points;
     config.nodes_per_decade = o.nodes_per_decade;
+    config.nodes_per_sigma = o.nodes_per_sigma;
     config.overflow = Overflow::parse(o.overflow).map_err(|e| to_py_err(py, e))?;
     config.normalize = o.normalize;
     config.mean_is_loss_rate = o.mean_is_loss_rate;
@@ -151,6 +153,8 @@ fn meta_to_dict<'py>(
     dict.set_item("nodes_per_decade", meta.nodes_per_decade)?;
     dict.set_item("interpolation_error", meta.interpolation_error)?;
     dict.set_item("narrow_events", meta.narrow_events)?;
+    dict.set_item("fine_nodes", meta.fine_nodes)?;
+    dict.set_item("requesting_events", meta.requesting_events)?;
     dict.set_item("overflow", meta.overflow.as_str())?;
     let per_output = |values: [f64; 2]| -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -191,7 +195,8 @@ fn contiguous<'a>(name: &str, array: &'a PyReadonlyArray1<'_, f64>) -> PyResult<
 #[pyfunction]
 #[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *,
     bucket_size, grid_length=None, method="survival", quadrature_points=32,
-    nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE, overflow="top_bucket",
+    nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE,
+    nodes_per_sigma=eltq_core::DEFAULT_NODES_PER_SIGMA, overflow="top_bucket",
     normalize=false, mean_is_loss_rate=false, variance_policy="bernoulli",
     threads=None, chunk_rows=None))]
 #[allow(clippy::too_many_arguments)]
@@ -207,6 +212,7 @@ fn quantize_arrays<'py>(
     method: &str,
     quadrature_points: usize,
     nodes_per_decade: usize,
+    nodes_per_sigma: usize,
     overflow: &str,
     normalize: bool,
     mean_is_loss_rate: bool,
@@ -220,6 +226,7 @@ fn quantize_arrays<'py>(
         method,
         quadrature_points,
         nodes_per_decade,
+        nodes_per_sigma,
         overflow,
         normalize,
         mean_is_loss_rate,
@@ -248,6 +255,7 @@ fn quantize_arrays<'py>(
 #[pyfunction]
 #[pyo3(signature = (path, *, bucket_size, grid_length=None, method="survival",
     quadrature_points=32, nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE,
+    nodes_per_sigma=eltq_core::DEFAULT_NODES_PER_SIGMA,
     overflow="top_bucket", normalize=false, mean_is_loss_rate=false,
     variance_policy="bernoulli", threads=None, chunk_rows=None, columns=None))]
 #[allow(clippy::too_many_arguments)]
@@ -259,6 +267,7 @@ fn quantize_csv<'py>(
     method: &str,
     quadrature_points: usize,
     nodes_per_decade: usize,
+    nodes_per_sigma: usize,
     overflow: &str,
     normalize: bool,
     mean_is_loss_rate: bool,
@@ -273,6 +282,7 @@ fn quantize_csv<'py>(
         method,
         quadrature_points,
         nodes_per_decade,
+        nodes_per_sigma,
         overflow,
         normalize,
         mean_is_loss_rate,
@@ -378,6 +388,8 @@ impl PyCurve {
         dict.set_item("nodes_per_decade", c.nodes_per_decade)?;
         dict.set_item("interpolation_error", c.interpolation_error)?;
         dict.set_item("narrow_events", c.narrow_events())?;
+        dict.set_item("fine_nodes", c.fine_nodes())?;
+        dict.set_item("requesting_events", c.requesting_events())?;
         dict.set_item("total_rate", c.total_rate)?;
         dict.set_item("analytic_aal", c.analytic_aal)?;
         dict.set_item("input_rows", c.input_rows)?;
@@ -440,7 +452,8 @@ impl PyCurve {
 /// Build the exceedance curve from `min_loss` up (spec section 5A).
 #[pyfunction]
 #[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *, min_loss,
-    nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE, mean_is_loss_rate=false,
+    nodes_per_decade=eltq_core::DEFAULT_NODES_PER_DECADE,
+    nodes_per_sigma=eltq_core::DEFAULT_NODES_PER_SIGMA, mean_is_loss_rate=false,
     variance_policy="bernoulli", threads=None, chunk_rows=None))]
 #[allow(clippy::too_many_arguments)]
 fn exceedance_curve<'py>(
@@ -452,6 +465,7 @@ fn exceedance_curve<'py>(
     sd_corr: PyReadonlyArray1<'py, f64>,
     min_loss: f64,
     nodes_per_decade: usize,
+    nodes_per_sigma: usize,
     mean_is_loss_rate: bool,
     variance_policy: &str,
     threads: Option<usize>,
@@ -464,6 +478,7 @@ fn exceedance_curve<'py>(
         method: "survival",
         quadrature_points: 32,
         nodes_per_decade,
+        nodes_per_sigma,
         overflow: "top_bucket",
         normalize: false,
         mean_is_loss_rate,

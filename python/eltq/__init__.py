@@ -32,11 +32,11 @@ from os import PathLike
 import numpy as np
 
 from eltq._meta import (
-    DEFAULT_NODES_PER_DECADE, CurveMeta, GridMeta, JointMeta, Meta, MultiMeta, RowIssues,
+    DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA, CurveMeta, GridMeta, JointMeta, Meta, MultiMeta, RowIssues,
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.3.6"
+__version__ = "2.4.0"
 
 try:
     from eltq._eltq import (
@@ -142,17 +142,26 @@ def _build_meta(meta_dict: dict, event_ids=None) -> Meta:
     return Meta(diagnostics=diagnostics, **meta_dict)
 
 
-def _check_method_options(method, nodes_per_decade, overflow) -> int:
-    """Validate the method keywords; return the resolved node density."""
+def _resolve_mesh(nodes_per_decade, nodes_per_sigma) -> dict:
+    """Validate the survival method's mesh keywords; return them resolved
+    to the package defaults where None."""
+    density = DEFAULT_NODES_PER_DECADE if nodes_per_decade is None else int(nodes_per_decade)
+    if density < 1:
+        raise EltqError(f"nodes_per_decade must be >= 1, got {nodes_per_decade}")
+    sigma = DEFAULT_NODES_PER_SIGMA if nodes_per_sigma is None else int(nodes_per_sigma)
+    if sigma < 1:
+        raise EltqError(f"nodes_per_sigma must be >= 1, got {nodes_per_sigma}")
+    return {"nodes_per_decade": density, "nodes_per_sigma": sigma}
+
+
+def _check_method_options(method, nodes_per_decade, overflow, nodes_per_sigma=None) -> dict:
+    """Validate the method keywords; return the resolved mesh keywords."""
     if method not in _METHODS:
         raise EltqError(f"unknown method {method!r} (expected quantiles or survival)")
     if overflow not in _OVERFLOW_POLICIES:
         raise EltqError(
             f"unknown overflow {overflow!r} (expected top_bucket, drop, or error)")
-    density = DEFAULT_NODES_PER_DECADE if nodes_per_decade is None else int(nodes_per_decade)
-    if density < 1:
-        raise EltqError(f"nodes_per_decade must be >= 1, got {nodes_per_decade}")
-    return density
+    return _resolve_mesh(nodes_per_decade, nodes_per_sigma)
 
 
 def _column(name: str, values) -> np.ndarray:
@@ -216,6 +225,7 @@ def quantize_arrays(
     method="survival",
     quadrature_points=32,
     nodes_per_decade=None,
+    nodes_per_sigma=None,
     overflow="top_bucket",
     normalize=False,
     mean_is_loss_rate=False,
@@ -249,8 +259,17 @@ def quantize_arrays(
         Number K of midpoint beta quantiles per nondegenerate event
         (``quantiles`` method).
     nodes_per_decade : int, optional
-        Node density of the ``survival`` method; the package default when
-        None.
+        Base node density of the ``survival`` method; the package default
+        (100) when None.
+    nodes_per_sigma : int, optional
+        The ``survival`` method's accuracy knob: nodes per standard deviation
+        a bell-shaped event (both beta parameters above 1) asks of the fine
+        mesh around its mean. The default, 12, holds the curve within 1e-4
+        relative of each event's survival where that is at least 1e-4 and
+        within 1e-3 where it is at least 1e-8; cost grows linearly with it,
+        and only in such events' ranges. An event narrower than a base
+        interval takes the narrow route instead, so the fine density is at
+        most this times ``nodes_per_decade``.
     overflow : {"top_bucket", "drop", "error"}, default "top_bucket"
         What happens to mass above the top bucket's upper edge, (n - 1/2) h,
         when ``grid_length`` is a window: added to the top node (rate exact,
@@ -290,7 +309,7 @@ def quantize_arrays(
         )
     )
     ids = list(event_ids) if event_ids is not None else None
-    density = _check_method_options(method, nodes_per_decade, overflow)
+    mesh = _check_method_options(method, nodes_per_decade, overflow, nodes_per_sigma)
     common = {
         "bucket_size": bucket_size,
         "grid_length": grid_length,
@@ -299,7 +318,7 @@ def quantize_arrays(
         "mean_is_loss_rate": mean_is_loss_rate,
         "variance_policy": variance_policy,
     }
-    survival = {"method": method, "nodes_per_decade": density, "overflow": overflow}
+    survival = {"method": method, "overflow": overflow, **mesh}
     if BACKEND == "rust":
         raw, secondary, meta_dict = _rust_quantize_arrays(
             *cols, **common, **survival, threads=threads, chunk_rows=chunk_rows
@@ -316,6 +335,7 @@ def quantize_csv(
     method="survival",
     quadrature_points=32,
     nodes_per_decade=None,
+    nodes_per_sigma=None,
     overflow="top_bucket",
     normalize=False,
     mean_is_loss_rate=False,
@@ -334,7 +354,7 @@ def quantize_csv(
     parsing and computation both run in Rust. Keywords are those of
     ``quantize_arrays``.
     """
-    density = _check_method_options(method, nodes_per_decade, overflow)
+    mesh = _check_method_options(method, nodes_per_decade, overflow, nodes_per_sigma)
     common = {
         "bucket_size": bucket_size,
         "grid_length": grid_length,
@@ -343,7 +363,7 @@ def quantize_csv(
         "mean_is_loss_rate": mean_is_loss_rate,
         "variance_policy": variance_policy,
     }
-    survival = {"method": method, "nodes_per_decade": density, "overflow": overflow}
+    survival = {"method": method, "overflow": overflow, **mesh}
     if BACKEND == "rust":
         raw, secondary, meta_dict = _rust_quantize_csv(
             path, **common, **survival, threads=threads, chunk_rows=chunk_rows,
@@ -572,6 +592,7 @@ def exceedance_curve(
     *,
     min_loss,
     nodes_per_decade=None,
+    nodes_per_sigma=None,
     mean_is_loss_rate=False,
     variance_policy="bernoulli",
     threads=None,
@@ -588,8 +609,9 @@ def exceedance_curve(
         The curve's lowest node, the smallest loss it answers for; a grid
         made from it needs ``bucket_size >= 2 * min_loss``. Required: there
         is no natural default.
-    nodes_per_decade : int, optional
-        Node density; the package default when None.
+    nodes_per_decade, nodes_per_sigma : int, optional
+        The base density and the accuracy knob, as for ``quantize_arrays``;
+        the package defaults when None.
     mean_is_loss_rate, variance_policy, threads, chunk_rows, event_ids
         As for ``quantize_arrays``.
 
@@ -604,12 +626,10 @@ def exceedance_curve(
         )
     )
     ids = list(event_ids) if event_ids is not None else None
-    density = DEFAULT_NODES_PER_DECADE if nodes_per_decade is None else int(nodes_per_decade)
-    if density < 1:
-        raise EltqError(f"nodes_per_decade must be >= 1, got {nodes_per_decade}")
+    mesh = _resolve_mesh(nodes_per_decade, nodes_per_sigma)
     if _rust_exceedance_curve is not None:
         backend = _rust_exceedance_curve(
-            *cols, min_loss=float(min_loss), nodes_per_decade=density,
+            *cols, min_loss=float(min_loss), **mesh,
             mean_is_loss_rate=mean_is_loss_rate, variance_policy=variance_policy,
             threads=threads, chunk_rows=chunk_rows,
         )
@@ -624,7 +644,7 @@ def exceedance_curve(
     from eltq import reference as _ref
 
     backend, meta = _ref.exceedance_curve_reference(
-        *cols, min_loss=float(min_loss), nodes_per_decade=density,
+        *cols, min_loss=float(min_loss), **mesh,
         mean_is_loss_rate=mean_is_loss_rate, variance_policy=variance_policy,
         event_ids=ids,
     )

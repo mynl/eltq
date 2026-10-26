@@ -9,6 +9,20 @@ from dataclasses import dataclass, field
 #: within 1e-4 on every benchmark portfolio (`benchmarks/report-1.16.0.md`).
 DEFAULT_NODES_PER_DECADE = 100
 
+#: Survival method: nodes per standard deviation a bell-shaped event asks of
+#: the fine mesh around its mean, the method's accuracy knob (spec section
+#: 5A): twelve holds the shared cubic within 1e-4 relative where the event's
+#: survival is at least 1e-4 and within 1e-3 where it is at least 1e-8.
+#: Shared by both backends; mirrors ``DEFAULT_NODES_PER_SIGMA`` in
+#: ``crates/eltq-core/src/config.rs``.
+DEFAULT_NODES_PER_SIGMA = 12
+
+#: Survival method: a bell-shaped event's upper skip, ``2**-60``; from the
+#: first mesh node where its survival is below this it contributes nothing.
+#: Shared by both backends; mirrors ``UPPER_SKIP_SURVIVAL`` in
+#: ``crates/eltq-core/src/curve.rs``.
+UPPER_SKIP_SURVIVAL = 2.0 ** -60
+
 #: Survival method: the number of node intervals before an event's endpoint
 #: that are left to its exact tail rather than to the interpolated curve
 #: (spec section 5A). Shared by both backends.
@@ -32,6 +46,13 @@ TAIL_FINE_ZONE = (1e-2, 1e2)
 #: point is evaluated exactly (spec section 5A). Shared by both backends;
 #: mirrors ``TAIL_POWER_LAW_LIMIT`` in ``crates/eltq-core/src/curve.rs``.
 TAIL_POWER_LAW_LIMIT = 1e-6
+
+#: Survival method: the narrow route's quadrature needs a density whose
+#: derivative is finite at the endpoints, so both parameters at least this;
+#: between 1 and 2 the 8-point rule was off by up to 5e-4 (spec section 5A).
+#: Shared by both backends; mirrors ``NARROW_MIN_PARAMETER`` in
+#: ``crates/eltq-core/src/curve.rs``.
+NARROW_MIN_PARAMETER = 2.0
 
 #: Survival method: steps of one standard deviation each side of the mean
 #: within which a narrow event's bulk must reach the rate floor; wider
@@ -112,6 +133,8 @@ class Meta:
     nodes_per_decade: int | None = None
     interpolation_error: float | None = None
     narrow_events: int | None = None
+    fine_nodes: int | None = None
+    requesting_events: int | None = None
     overflow: str = "top_bucket"
     rate_above_grid: dict = field(default_factory=_zero_per_output)
     mean_above_grid: dict = field(default_factory=_zero_per_output)
@@ -135,6 +158,8 @@ class CurveMeta:
     valid_rows: int
     diagnostics: dict[str, RowIssues]
     narrow_events: int = 0
+    fine_nodes: int = 0
+    requesting_events: int = 0
 
 
 @dataclass

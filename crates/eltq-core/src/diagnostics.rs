@@ -135,6 +135,10 @@ pub struct Meta {
     pub interpolation_error: Option<f64>,
     /// Beta events kept out of the curve as narrow (survival method).
     pub narrow_events: Option<usize>,
+    /// Survival method: the fine mesh's node count and the bell-shaped
+    /// events carried on it.
+    pub fine_nodes: Option<usize>,
+    pub requesting_events: Option<usize>,
     pub overflow: Overflow,
     pub rate_above_grid: [f64; 2],
     pub mean_above_grid: [f64; 2],

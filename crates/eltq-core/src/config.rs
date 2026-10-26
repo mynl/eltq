@@ -12,6 +12,12 @@ pub const DEFAULT_SURVIVAL_CHUNK_ROWS: usize = 256;
 /// Node density of the survival method; matches
 /// `eltq._meta.DEFAULT_NODES_PER_DECADE` (`benchmarks/report-1.16.0.md`).
 pub const DEFAULT_NODES_PER_DECADE: usize = 100;
+/// Nodes per standard deviation a bell-shaped event asks of the fine mesh
+/// around its mean (spec section 5A); matches
+/// `eltq._meta.DEFAULT_NODES_PER_SIGMA`. Twelve holds the shared cubic
+/// within 1e-4 relative where an event's survival is at least 1e-4 and
+/// within 1e-3 where it is at least 1e-8 (`dev/done/plan-peer-review-response.md`).
+pub const DEFAULT_NODES_PER_SIGMA: usize = 12;
 
 /// How the secondary grid is built (spec sections 5 and 5A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,8 +124,11 @@ pub struct Config {
     pub method: Method,
     /// Number K of midpoint beta quantiles per nondegenerate event.
     pub quadrature_points: usize,
-    /// Node density of the survival method.
+    /// Node density of the survival method's base mesh.
     pub nodes_per_decade: usize,
+    /// Nodes per standard deviation a bell-shaped event asks of the fine
+    /// mesh (the accuracy knob of the survival method).
+    pub nodes_per_sigma: usize,
     pub overflow: Overflow,
     /// Divide both outputs by the total contributing rate.
     pub normalize: bool,
@@ -143,6 +152,7 @@ impl Config {
             method: Method::Survival,
             quadrature_points: DEFAULT_QUADRATURE_POINTS,
             nodes_per_decade: DEFAULT_NODES_PER_DECADE,
+            nodes_per_sigma: DEFAULT_NODES_PER_SIGMA,
             overflow: Overflow::TopBucket,
             normalize: false,
             mean_is_loss_rate: false,
@@ -182,6 +192,9 @@ impl Config {
         }
         if self.nodes_per_decade < 1 {
             return Err(Error::BadNodesPerDecade(self.nodes_per_decade));
+        }
+        if self.nodes_per_sigma < 1 {
+            return Err(Error::BadNodesPerSigma(self.nodes_per_sigma));
         }
         if self.threads == Some(0) {
             return Err(Error::BadThreads(0));
