@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.4.2] - 2026-10-26
+
+### Changed
+
+- [schedule] The quantiles method's default chunk is a rule of the input and the grid, `clamp(max(ceil(rows / 64), ceil(n / 64)), 4096, 65536)` rows, in place of the fixed 65,536, which gave 262,144 rows four chunks and left most of a 32-thread machine idle (peer review, finding P1). On that input at 65,536 buckets the quantiles method takes 0.14 s against 0.65 s before; on a million rows 0.48 s against 0.76 s; from 2^22 buckets the chunk is the old one and nothing changes (`benchmarks/report-2.4.2.md`). The rule depends on the input and the configuration, never on the thread count, so results stay bitwise reproducible across threads; against the fixed chunk a grid differs by summation order only, within 1e-14 of the total rate.
+- A pass runs its chunks in waves of `min(2 * threads, 1 GiB / partial size)` (`Config::wave_memory_bytes`), so the partials in flight are bounded by memory as well as by threads: at 2^24 buckets a quantiles partial is 256 MiB and 64 in flight were 16 GiB. The grid-length vectors of a wave's partials are folded in parallel over disjoint blocks, each element in chunk order, so the fold no longer serializes behind the kernel; the result is bitwise the serial fold's. One thread pool serves a call (three were built, one per pass), and an empty pass returns before any work is scheduled.
+- `benchmarks/run_schedule.py`, the scheduling sweep (time and peak memory by row count, thread count, chunk rule and grid length); the README's claim that grid length is irrelevant to throughput is qualified: deposits are local, but each chunk's two partial grids are initialized and folded at the grid's length.
+
 ## [2.4.1] - 2026-10-26
 
 ### Fixed

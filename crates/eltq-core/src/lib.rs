@@ -41,7 +41,8 @@ pub use curve::{
 };
 pub use config::{
     Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA,
-    DEFAULT_QUADRATURE_POINTS, DEFAULT_SURVIVAL_CHUNK_ROWS, Method, Overflow, VariancePolicy,
+    DEFAULT_QUADRATURE_POINTS, DEFAULT_SURVIVAL_CHUNK_ROWS, DEFAULT_WAVE_MEMORY_BYTES, MIN_QUANTILES_CHUNK_ROWS,
+    Method, Overflow, QUANTILES_CHUNK_DIVISOR, QUANTILES_CHUNK_GRID_DIVISOR, VariancePolicy,
 };
 pub use diagnostics::{Category, Diagnostics, MAX_EXAMPLES, Meta, QuantizeResult, RowIssues};
 pub use error::Error;

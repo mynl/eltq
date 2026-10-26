@@ -522,3 +522,18 @@ Landed as planned, with these notes:
 - The cumulants' sd and the two documentation items (top half-bucket, tiny-$\alpha$ complement) as planned.
 
 Gates: `cargo test -p eltq-core --release` (91 lib tests); `uv run pytest` after the rebuild (186 passed, 1 skipped).
+
+### [schedule] 2.4.2 (2026-10-26)
+
+Landed with two divergences from the plan's rule, both forced by the measurement the plan asked for (`benchmarks/run_schedule.py`, `benchmarks/report-2.4.2.md`):
+
+- **The chunk rule has a grid-length term**, $\min(\max(\lceil N/64\rceil,\lceil n/64\rceil,4096),65536)$, not $\lceil N/64\rceil$ alone. With the row term alone, 262,144 rows at $2^{24}$ buckets took 6.4 s against 3.0 s at the fixed chunk on one thread and 4.4 s against 1.6 s on 32: 64 chunks each allocate, zero and fold two 128 MiB vectors. The review's recommendation was a rule joint in row count and grid length; the plan's draft dropped the grid. A divisor of 256 (chunk at least $n/256$) still lost 23% at $2^{22}$ on a million rows; 64 gives the old chunk from $2^{22}$ and 16 chunks at $2^{20}$, where the gain survives (0.67 s to 0.24 s at 262,144 rows on 32 threads).
+- **The quantiles fold is parallel across the grid.** The fold of a wave's partials was serial, and with 32 threads on the kernel it dominated at $2^{20}$ and above (61 chunks of 16 MiB vectors). `run_waves` hands each wave to the caller; the quantiles pass adds the partials' two vectors over disjoint blocks of the grid in parallel, each element in chunk order, so the result is bitwise the serial fold's (the determinism tests hold). The scalar totals fold serially as before.
+
+Other notes:
+
+- The memory budget is a `Config` field (`wave_memory_bytes`, 1 GiB), not a Python keyword: the Python API's scheduling knobs stay `threads` and `chunk_rows`; a caller who needs the budget can ask. At the budget, the peak working set on 32 threads at $2^{20}$ buckets is about 1.1 GiB (the wave of 64 partials of 16 MiB), where the fixed chunk's four partials used 140 MiB; at $2^{24}$ the wave is four partials and the peak is the same as before.
+- The survival method's column of the sweep is slow at large grids for a reason outside this step: at 65,536 buckets and above every tail is walked across its edges (the review's 4.2 s single-threaded on 262,144 rows was at about 1,000 buckets; this sweep's 12.5 s at the same rows is at 65,536, 8.6 s with the fine mesh off). The survival cells at $2^{24}$ below 16 threads were skipped, one run taking minutes; `dev/done/plan-survival-tail-cost.md` is where that cost is treated.
+- The two measured constants behind the grid term, for the record: about 3.4 ns per grid element per chunk for the partial's allocation, zeroing and fold against about 9.7 microseconds per row for the kernel at $K=32$, single-threaded on this machine.
+
+Gates: `cargo test -p eltq-core --release` (94 lib tests); `uv run pytest` after the rebuild (187 passed, 1 skipped).

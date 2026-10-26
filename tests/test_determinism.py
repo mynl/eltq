@@ -47,6 +47,29 @@ def test_thread_count_sweep_is_bitwise_identical():
         assert base_meta.secondary_mean == meta.secondary_mean
 
 
+def test_default_quantiles_chunk_is_a_rule_of_the_input():
+    """The quantiles default chunk, clamp(max(ceil(rows / 64), ceil(n / 64)),
+    4096, 65536), is a function of the input and the configuration, so the
+    results at the default are bitwise identical across thread counts too;
+    against the fixed 65,536-row chunk of versions before 2.4.2 the grid
+    differs by summation order only (peer review, P1)."""
+    if eltq.BACKEND != "rust":
+        pytest.skip("determinism contract is a property of the Rust engine")
+    rng = np.random.default_rng(20260814)
+    n = 100_000
+    m = np.exp(rng.uniform(np.log(1e4), np.log(5e6), n))
+    p = rng.uniform(0.05, 0.95, n)
+    f = rng.uniform(0.05, 0.6, n)
+    cols = (np.full(n, 1e-4), m, p * m, np.sqrt(f * p * (1.0 - p)) * m, np.zeros(n))
+    params = {"bucket_size": 5000.0, "method": "quantiles", "quadrature_points": 8}
+    base_raw, base_sec, meta = eltq.quantize_arrays(*cols, **params, threads=1)
+    for threads in (4, None):
+        raw, sec, _ = eltq.quantize_arrays(*cols, **params, threads=threads)
+        assert np.array_equal(base_raw, raw) and np.array_equal(base_sec, sec), threads
+    _, fixed, _ = eltq.quantize_arrays(*cols, **params, chunk_rows=65_536)
+    assert np.max(np.abs(base_sec - fixed)) <= 1e-14 * meta.total_rate
+
+
 def test_multiunit_views_bitwise_invariant_across_threads_and_paths():
     """Multi-unit route (1.10.0): same input twice, a thread sweep, and both
     chunk sizes give bitwise-identical views on the Rust backend."""

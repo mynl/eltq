@@ -36,7 +36,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.4.1"
+__version__ = "2.4.2"
 
 try:
     from eltq._eltq import (
@@ -291,8 +291,11 @@ def quantize_arrays(
         Worker threads; None uses all cores. Results are bitwise identical
         for any thread count. Ignored by the reference backend.
     chunk_rows : int, optional
-        Rows per parallel chunk (default 65536); part of the deterministic
-        contract. Ignored by the reference backend.
+        Rows per parallel chunk; part of the deterministic contract. The
+        default is a rule of the row count and the grid length under the
+        quantiles method, ``clamp(max(ceil(rows / 64), ceil(n / 64)), 4096,
+        65536)``, and 256 under the survival method. Ignored by the reference
+        backend.
     event_ids : sequence, optional
         Per-row identifiers used in diagnostic examples (audit only).
 

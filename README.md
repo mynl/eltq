@@ -89,6 +89,7 @@ identical.
 | [tails] the endpoint ladder's power law gated on its asymptotic criterion, the one edge below it evaluated exactly, quarter-octave steps across the transition | 2.3.6 | done |
 | [mesh] bell-shaped events on a fine curve of `nodes_per_sigma` nodes per standard deviation; the accuracy contract of spec test 33 | 2.4.0 | done |
 | [ratios] the admissibility test, the shape parameters and the cumulants' sd formed in ratios, so a row classifies the same at every monetary scale; the top half-bucket and the tiny-alpha complement documented | 2.4.1 | done |
+| [schedule] the quantiles default chunk a rule of the row count, waves bounded by a 1 GiB memory budget, one thread pool per call | 2.4.2 | done |
 
 ## Layout
 
@@ -147,15 +148,21 @@ Headline (i7-7820HQ 4C/8T, Windows 11, see `benchmarks/report-1.4.0.md`):
 one million mixed-regime rows at K = 32 quantized in ~4.3 s — ~230k rows/s,
 ~6.6M beta quantiles/s, ~44x the SciPy reference — with bitwise-identical
 results for any thread count. Non-kernel overhead (validation + deposits +
-reduction) is ~0.02 s; the inverse-beta kernel is everything. Grid length is
-irrelevant to throughput (each deposit touches two nodes whatever n is):
-n = 1,001, n = 65,536 (2^16) and n = 100,000 all run at the same speed.
+reduction) is ~0.02 s; the inverse-beta kernel is everything. Grid length
+barely matters to the deposits (each touches two nodes whatever n is: n =
+1,001, n = 65,536 (2^16) and n = 100,000 run at the same speed), but each
+chunk's two partial grids are initialized and folded at the grid's length, so
+at 2^24 buckets the chunk count is a memory and time term. A pass runs its
+chunks in waves of min(2 x threads, 1 GiB / partial size), so the partials in
+flight never exceed 1 GiB whatever the grid (`benchmarks/report-2.4.2.md`).
 
-Determinism contract: for a fixed input, config (including `chunk_rows`,
-default 65536 for the quantiles method and 256 for the survival method) and
-build, output arrays are bitwise reproducible regardless of `threads` and
-work stealing. Reordering input rows changes results only within
-floating-point summation tolerance.
+Determinism contract: for a fixed input, config (including `chunk_rows`, by
+default clamp(max(ceil(rows / 64), ceil(n / 64)), 4096, 65536) for the
+quantiles method and 256 for the survival method, both functions of the input
+and the configuration alone) and build, output arrays are bitwise
+reproducible regardless of `threads` and work stealing.
+Reordering input rows changes results only within floating-point summation
+tolerance.
 
 Survival method (`benchmarks/report-1.16.0.md`, Zen 5 desktop): the
 million-row mixture portfolio at the default 100 nodes per decade in 0.96 s

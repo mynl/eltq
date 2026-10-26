@@ -2,22 +2,25 @@
 //! bitwise-deterministic in-order fold.
 //!
 //! Rows are classified once, then processed in fixed chunks of
-//! `config.resolved_chunk_rows()`. Under the quantiles method each chunk
-//! produces private raw and secondary partial histograms plus compensated
-//! partial totals (no locks, no atomics in the hot loop); under the survival
-//! method the chunk pass lives in `curve::survival_pass` and adds the
-//! node-length curve partials. Partials are folded sequentially in
-//! chunk-index order, so the result is bitwise identical for any thread
-//! count and any work-stealing schedule. Chunks run in bounded waves (2x
-//! the worker count), keeping peak memory at `waves * 2 * grid_length * 8`
-//! bytes regardless of input size.
+//! `config.resolved_chunk_rows(n_rows, n)` (a rule of the row count and the
+//! grid length under the quantiles method, 256 rows under the survival
+//! method). Under the
+//! quantiles method each chunk produces private raw and secondary partial
+//! histograms plus compensated partial totals (no locks, no atomics in the
+//! hot loop); under the survival method the chunk pass is `curve::build_curve`
+//! and adds the node-length curve partials. Partials are folded sequentially
+//! in chunk-index order, so the result is bitwise identical for any thread
+//! count and any work-stealing schedule. Chunks run in bounded waves of
+//! `min(2 * threads, wave_memory_bytes / partial_bytes)` (`curve::run_chunks`),
+//! so the partials in flight hold at most `config.wave_memory_bytes`, 1 GiB
+//! by default, whatever the grid length; one thread pool serves a call.
 
 use rayon::prelude::*;
 
 use crate::batched::beta_midpoint_quantiles;
 use crate::beta::beta_params;
 use crate::config::{Config, Method, Overflow};
-use crate::curve::build_curve;
+use crate::curve::{Workers, build_curve_with, run_waves};
 use crate::deposit::{OverflowAccumulator, place};
 use crate::diagnostics::{Diagnostics, Meta, QuantizeResult};
 use crate::error::Error;
@@ -178,13 +181,14 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
         }
     };
 
-    let chunk_rows = config.resolved_chunk_rows();
+    let workers = Workers::new(config)?;
+    let chunk_rows = config.resolved_chunk_rows(n_rows, n);
     let outcome = match config.method {
-        Method::Quantiles => quantiles_pass(input, config, kinds, mu_eff, sd_eff, n, h, chunk_rows)?,
+        Method::Quantiles => quantiles_pass(&workers, input, config, kinds, mu_eff, sd_eff, n, h, chunk_rows)?,
         Method::Survival => {
             // The curve from e_0 = h / 2, its grid, and the raw grid.
-            let curve = build_curve(input, config, &classified, 0.5 * h)?;
-            let grid = curve.grid(h, Some(n), config.overflow, config)?;
+            let curve = build_curve_with(&workers, input, config, &classified, 0.5 * h)?;
+            let grid = curve.grid_with(&workers, h, Some(n), config.overflow, config)?;
             let mut raw = vec![0.0_f64; n];
             let mut raw_over = OverflowAccumulator::default();
             let top_node = (n - 1) as f64 * h;
@@ -281,6 +285,7 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
 /// histograms and a reused K-quantile buffer (no N x K array ever exists).
 #[allow(clippy::too_many_arguments)]
 fn quantiles_pass(
+    workers: &Workers,
     input: &EltInput<'_>,
     config: &Config,
     kinds: &[RowKind],
@@ -354,7 +359,7 @@ fn quantiles_pass(
         Ok(partial)
     };
 
-    let n_chunks = n_rows.div_ceil(chunk_rows).max(1);
+    let n_chunks = n_rows.div_ceil(chunk_rows);
     let mut raw = vec![0.0_f64; n];
     let mut secondary = vec![0.0_f64; n];
     let mut total_rate = Neumaier::default();
@@ -363,17 +368,30 @@ fn quantiles_pass(
     let mut valid_rows = 0_usize;
     let mut raw_over = OverflowAccumulator::default();
     let mut sec_over = OverflowAccumulator::default();
-    let mut fold = |partials: Vec<Result<ChunkPartial, Error>>| -> Result<(), Error> {
-        // Sequential fold in chunk-index order: bitwise-deterministic
-        // regardless of which thread produced which partial.
-        for partial in partials {
-            let partial = partial?;
-            for (dst, src) in raw.iter_mut().zip(&partial.raw) {
-                *dst += src;
-            }
-            for (dst, src) in secondary.iter_mut().zip(&partial.secondary) {
-                *dst += src;
-            }
+    // The fold, in chunk-index order per element so that it is bitwise
+    // deterministic regardless of which thread produced which partial: the
+    // two grid-length histograms of a wave's partials are added in parallel
+    // over disjoint blocks of the grid (the serial fold of 61 chunks at 2^22
+    // buckets cost more than the kernel on 32 threads), the scalar totals
+    // serially. A partial is the two grid-length histograms.
+    const FOLD_BLOCK: usize = 1 << 15;
+    run_waves(workers, config, n_chunks, 16 * n + 128, process_chunk, |partials: Vec<ChunkPartial>| {
+        raw.par_chunks_mut(FOLD_BLOCK)
+            .zip(secondary.par_chunks_mut(FOLD_BLOCK))
+            .enumerate()
+            .for_each(|(block, (raw_block, sec_block))| {
+                let lo = block * FOLD_BLOCK;
+                let hi = lo + raw_block.len();
+                for partial in &partials {
+                    for (dst, src) in raw_block.iter_mut().zip(&partial.raw[lo..hi]) {
+                        *dst += src;
+                    }
+                    for (dst, src) in sec_block.iter_mut().zip(&partial.secondary[lo..hi]) {
+                        *dst += src;
+                    }
+                }
+            });
+        for partial in &partials {
             total_rate.add(partial.rate);
             analytic_aal.add(partial.aal);
             quadrature_mean.add(partial.quadrature);
@@ -382,30 +400,7 @@ fn quantiles_pass(
             sec_over.merge(&partial.sec_over);
         }
         Ok(())
-    };
-    let run_waves = |fold: &mut dyn FnMut(Vec<Result<ChunkPartial, Error>>) -> Result<(), Error>|
-     -> Result<(), Error> {
-        let wave = rayon::current_num_threads().max(1) * 2;
-        let mut next = 0_usize;
-        while next < n_chunks {
-            let end = (next + wave).min(n_chunks);
-            let partials: Vec<Result<ChunkPartial, Error>> =
-                (next..end).into_par_iter().map(process_chunk).collect();
-            fold(partials)?;
-            next = end;
-        }
-        Ok(())
-    };
-    match config.threads {
-        Some(threads) => {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .map_err(|e| Error::ThreadPool(e.to_string()))?;
-            pool.install(|| run_waves(&mut fold))?;
-        }
-        None => run_waves(&mut fold)?,
-    }
+    })?;
     Ok(Outcome {
         raw,
         secondary,
@@ -616,6 +611,41 @@ mod tests {
             assert_eq!(result.raw, vec![0.0]);
             assert_eq!(result.secondary, vec![0.0]);
         }
+    }
+
+    // [schedule] At the default chunk, which is a rule of the row count,
+    // the quantiles grid is bitwise invariant across thread counts and
+    // within summation rounding of the fixed 65,536-row chunk's.
+    #[test]
+    fn default_chunk_is_a_rule_of_the_input() {
+        let rows: Vec<[f64; 5]> = (0..20_000)
+            .map(|i| {
+                let m = 1e4 + (i % 977) as f64 * 1e3;
+                let mu = (0.05 + 0.9 * ((i * 7919) % 1000) as f64 / 1000.0) * m;
+                [1e-4, m, mu, 0.3 * mu.min(m - mu), 0.0]
+            })
+            .collect();
+        let cols = columns(&rows);
+        let mut config = Config::new(5000.0);
+        config.method = Method::Quantiles;
+        config.quadrature_points = 8;
+        assert_eq!(config.resolved_chunk_rows(rows.len(), 1 << 16), 4096);
+        config.threads = Some(1);
+        let base = quantize(&input(&cols), &config).unwrap();
+        for threads in [3, 8] {
+            config.threads = Some(threads);
+            let other = quantize(&input(&cols), &config).unwrap();
+            assert_eq!(base.secondary, other.secondary, "threads={threads}");
+        }
+        config.chunk_rows = Some(65_536);
+        let fixed = quantize(&input(&cols), &config).unwrap();
+        let worst = base
+            .secondary
+            .iter()
+            .zip(&fixed.secondary)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(worst <= 1e-14 * base.meta.total_rate, "{worst}");
     }
 
     #[test]

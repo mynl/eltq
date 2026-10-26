@@ -733,36 +733,91 @@ fn sample_intervals(intervals: usize) -> Vec<usize> {
     picks
 }
 
-/// Run a chunked pass in bounded waves, folding partials in chunk order.
-pub(crate) fn run_chunks<P: Send>(
+/// The workers of one top-level call: a pool built once when `threads` is
+/// given and shared by every chunked pass of the call (the curve build and
+/// the grid's two passes, or the quantiles pass), or rayon's global pool.
+pub(crate) struct Workers {
+    pool: Option<rayon::ThreadPool>,
+}
+
+impl Workers {
+    pub(crate) fn new(config: &Config) -> Result<Self, Error> {
+        let pool = match config.threads {
+            Some(threads) => Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .map_err(|e| Error::ThreadPool(e.to_string()))?,
+            ),
+            None => None,
+        };
+        Ok(Workers { pool })
+    }
+
+    fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        match &self.pool {
+            Some(pool) => pool.install(f),
+            None => f(),
+        }
+    }
+}
+
+/// Chunks per wave: twice the workers, and no more than hold `budget` bytes
+/// of partials at `partial_bytes` each (peer review, finding P1: at 2^24
+/// buckets a quantiles partial is 256 MiB, and 64 in flight were 16 GiB).
+pub(crate) fn wave_size(threads: usize, budget: usize, partial_bytes: usize) -> usize {
+    (2 * threads.max(1)).min((budget / partial_bytes.max(1)).max(1))
+}
+
+/// Run a chunked pass in bounded waves on the call's workers, handing each
+/// wave's partials to `fold_wave` in chunk order (so a fold that keeps that
+/// order per element is bitwise identical for any thread count at a fixed
+/// chunk size). `partial_bytes` is the caller's bound on one chunk's
+/// partial, which sizes the wave against `config.wave_memory_bytes`. The
+/// fold runs on the workers too, so it may use rayon. An empty pass returns
+/// before any work is scheduled.
+pub(crate) fn run_waves<P: Send>(
+    workers: &Workers,
     config: &Config,
     n_chunks: usize,
+    partial_bytes: usize,
     process: impl Fn(usize) -> Result<P, Error> + Sync,
-    mut fold: impl FnMut(P) -> Result<(), Error> + Send,
+    mut fold_wave: impl FnMut(Vec<P>) -> Result<(), Error> + Send,
 ) -> Result<(), Error> {
-    let run_waves = |fold: &mut dyn FnMut(P) -> Result<(), Error>| -> Result<(), Error> {
-        let wave = rayon::current_num_threads().max(1) * 2;
+    if n_chunks == 0 {
+        return Ok(());
+    }
+    workers.install(|| {
+        let wave = wave_size(rayon::current_num_threads(), config.wave_memory_bytes, partial_bytes);
         let mut next = 0_usize;
         while next < n_chunks {
             let end = (next + wave).min(n_chunks);
-            let partials: Vec<Result<P, Error>> = (next..end).into_par_iter().map(&process).collect();
-            for partial in partials {
-                fold(partial?)?;
-            }
+            let partials: Vec<P> = (next..end)
+                .into_par_iter()
+                .map(&process)
+                .collect::<Result<Vec<P>, Error>>()?;
+            fold_wave(partials)?;
             next = end;
         }
         Ok(())
-    };
-    match config.threads {
-        Some(threads) => {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .map_err(|e| Error::ThreadPool(e.to_string()))?;
-            pool.install(|| run_waves(&mut fold))
+    })
+}
+
+/// `run_waves` with the partials folded one at a time, in chunk order.
+pub(crate) fn run_chunks<P: Send>(
+    workers: &Workers,
+    config: &Config,
+    n_chunks: usize,
+    partial_bytes: usize,
+    process: impl Fn(usize) -> Result<P, Error> + Sync,
+    mut fold: impl FnMut(P) -> Result<(), Error> + Send,
+) -> Result<(), Error> {
+    run_waves(workers, config, n_chunks, partial_bytes, process, |partials: Vec<P>| {
+        for partial in partials {
+            fold(partial)?;
         }
-        None => run_waves(&mut fold),
-    }
+        Ok(())
+    })
 }
 
 /// Build the exceedance curve of the classified rows from `min_loss` up.
@@ -779,12 +834,26 @@ pub fn build_curve(
     classified: &Classified,
     min_loss: f64,
 ) -> Result<Curve, Error> {
+    let workers = Workers::new(config)?;
+    build_curve_with(&workers, input, config, classified, min_loss)
+}
+
+/// `build_curve` on the workers of an enclosing call (`quantize` builds
+/// the pool once for the curve and its grid).
+pub(crate) fn build_curve_with(
+    workers: &Workers,
+    input: &EltInput<'_>,
+    config: &Config,
+    classified: &Classified,
+    min_loss: f64,
+) -> Result<Curve, Error> {
     if !(min_loss.is_finite() && min_loss > 0.0) {
         return Err(Error::BadMinLoss(min_loss));
     }
     let kinds = &classified.kinds;
     let n_rows = kinds.len();
-    let chunk_rows = config.resolved_chunk_rows();
+    // The survival chunk depends on neither the row count nor the grid.
+    let chunk_rows = config.resolved_chunk_rows(n_rows, 0);
     let max_beta_m = (0..n_rows)
         .filter(|&row| kinds[row] == RowKind::Beta)
         .map(|row| input.max_loss[row])
@@ -1031,7 +1100,10 @@ pub fn build_curve(
         Ok(p)
     };
 
-    let n_chunks = n_rows.div_ceil(chunk_rows).max(1);
+    let n_chunks = n_rows.div_ceil(chunk_rows);
+    // A partial's bound: its node-length vectors on both meshes, the
+    // samples, and the chunk's per-event records.
+    let partial_bytes = 8 * (6 * m1 + 4 * fine_m1 + 2 * sample_x.len() + 2) + 64 * chunk_rows;
     let mut curve = vec![0.0_f64; m1];
     let mut slope_both = vec![0.0_f64; m1];
     let mut slope_end = vec![0.0_f64; m1];
@@ -1052,7 +1124,7 @@ pub fn build_curve(
     let mut analytic_aal = Neumaier::default();
     let mut beta_rate = Neumaier::default();
     let mut valid_rows = 0_usize;
-    run_chunks(config, n_chunks, process_chunk, |p: BuildPartial| {
+    run_chunks(workers, config, n_chunks, partial_bytes, process_chunk, |p: BuildPartial| {
         for (dst, src) in curve.iter_mut().zip(&p.curve) {
             *dst += src;
         }
@@ -1296,6 +1368,19 @@ impl Curve {
     /// events walked per event to the rate floor in chunk passes folded in
     /// order, and the atoms by the linear rule. Requires `h >= 2 min_loss`.
     pub fn grid(&self, h: f64, grid_length: Option<usize>, policy: Overflow, config: &Config) -> Result<GridOutcome, Error> {
+        let workers = Workers::new(config)?;
+        self.grid_with(&workers, h, grid_length, policy, config)
+    }
+
+    /// `grid` on the workers of an enclosing call.
+    pub(crate) fn grid_with(
+        &self,
+        workers: &Workers,
+        h: f64,
+        grid_length: Option<usize>,
+        policy: Overflow,
+        config: &Config,
+    ) -> Result<GridOutcome, Error> {
         if !(h.is_finite() && h > 0.0) {
             return Err(Error::BadBucketSize(h));
         }
@@ -1366,7 +1451,7 @@ impl Curve {
         // folded in order: each chunk's histogram covers only the bucket
         // span its events can touch (the top node stands in for anything
         // beyond the grid), so a chunk costs its span, not the grid length.
-        let chunk = config.resolved_chunk_rows();
+        let chunk = config.resolved_chunk_rows(self.tails.len(), n);
         let min_distance = 0.5 * self.loss[0];
         let threshold = TAIL_RATE_FLOOR * self.beta_rate;
         let top = n - 1;
@@ -1429,7 +1514,9 @@ impl Curve {
             }
             Ok((lo, hist, over))
         };
-        run_chunks(config, n_chunks, process, |part| {
+        // The span bound is the grid itself: a chunk's tails can reach any
+        // bucket from the lowest truncation node to the top.
+        run_chunks(workers, config, n_chunks, 8 * n, process, |part| {
             fold(&mut secondary, &mut over, part);
             Ok(())
         })?;
@@ -1469,7 +1556,9 @@ impl Curve {
             }
             Ok((lo, hist, over))
         };
-        run_chunks(config, n_chunks, process, |part| {
+        // The span bound is the grid itself: a chunk's tails can reach any
+        // bucket from the lowest truncation node to the top.
+        run_chunks(workers, config, n_chunks, 8 * n, process, |part| {
             fold(&mut secondary, &mut over, part);
             Ok(())
         })?;
@@ -1920,5 +2009,18 @@ mod tests {
         assert!((mass(&g1.secondary) - 0.071).abs() < 1e-14);
         assert!((mass(&g2.secondary) - 0.071).abs() < 1e-14);
         assert!(matches!(curve.grid(0.25, None, Overflow::TopBucket, &config), Err(Error::BucketBelowCurve { .. })));
+    }
+
+    // [schedule] The wave is twice the workers unless the memory budget
+    // holds fewer partials; never below one chunk.
+    #[test]
+    fn wave_is_bounded_by_threads_and_memory() {
+        let gib = 1_usize << 30;
+        assert_eq!(wave_size(32, gib, 8 * (1 << 16)), 64);
+        assert_eq!(wave_size(32, gib, 16 * (1 << 20)), 64);
+        assert_eq!(wave_size(32, gib, 16 * (1 << 24)), 4);
+        assert_eq!(wave_size(1, gib, 16 * (1 << 24)), 2);
+        assert_eq!(wave_size(32, gib, 16 * (1 << 28)), 1);
+        assert_eq!(wave_size(0, 0, 0), 1);
     }
 }
