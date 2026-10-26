@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.7.0] - 2026-10-26
+
+### Changed
+
+- [one-unit] An event with one contributing unit never enters the mixture over the factor: its ground-up row is the unit's marginal bucketed by cdf differences at the half-bucket edges (two atoms for a two-point row, the deposit for an atom), its views the compiled maps of that row, no loop over nodes or strata (spec section 4A, requirement (i)). Under the stratified default this is only a saving, since the mixture already returned the marginal to rounding; under the node rules it also removes their marginal error on such events. `meta.one_unit_events` counts them; both backends.
+- The `multiunit_small` golden is regenerated: its one-unit events, e3 and e6 (one live unit after its dropped row), move by the rounding of the stratified mixture (below 1e-14 of the rate). Spec test 27 on both backends: the direct bucketing within 1e-12 of the rate for a beta, a two-point, an atom and a comonotone row under every rule, the one-row survival grid of `quantize_arrays` on the same row within 6e-8 of the rate, and a mixed portfolio equal to the sum of its one-unit and multi-unit parts.
+
 ## [2.6.0] - 2026-10-26
 
 ### Added

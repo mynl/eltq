@@ -553,3 +553,21 @@ parked, had already been closed as superseded in `dev/done/` on 2026-10-25; noth
 - `dev/plan-chebyshev-z.md`, closed before this plan started, stays closed: the rule's cost is
   the strata count times the bivariate normal construction, and neither a hybrid node rule nor a
   Chebyshev interpolant in $z$ addresses the within-stratum independence that the ladder fixes.
+
+### [one-unit] 2.7.0, 2026-10-26
+
+- Engine: the event's live rows are collected first; with one of them the base row is
+  `marginal_pmf` with a single row set, and the existing convolution machinery (a unit with one
+  row is "independent") carries it through the views with no loop. Reference: the same branch
+  with unit weights. `one_unit_events` on `ChunkPartial`, `MultiMeta` (both backends) and the
+  bindings.
+- Divergence, recorded: the plan says the goldens regenerate only if the default rule changes;
+  the multi-unit golden regenerates here too, since e3 is a one-unit event and e6 has one live
+  unit after its dropped row. Under the stratified
+  default it moves only by rounding (the mixture already returned the marginal), so the
+  regeneration is a formality; the generator's comment says why.
+- The survival-grid comparison the step asks to measure: on e3 at $h = 10$ the one-row survival
+  grid of `quantize_arrays` differs from the direct bucketing by $5.6\times10^{-8}$ of the rate;
+  test 27 fixes $10^{-6}$. Test 27 also covers a two-point, an atom and a comonotone row under all
+  three rules, and the termed unit's gross view against the direct bucketing pushed through its
+  tower.

@@ -633,6 +633,67 @@ def test_two_point_event_matches_the_article(multi):
 
 
 # ---------------------------------------------------------------------------
+# [one-unit] spec test 27: one-unit events leave the mixture (2.7.0).
+
+ONE_UNIT_ROWS = {
+    "beta": ("e3", "b", 0.005, 400.0, 80.0, 60.0, 1200.0),   # the fixture's e3
+    "two_point": ("t", "a", 0.01, 30.0, 50.0, 30.0, 100.0),
+    "atom": ("a", "c", 0.02, 333.0, 0.0, 0.0, 1000.0),
+    "comonotone": ("k", "d", 0.01, 200.0, 0.0, 250.0, 1000.0),
+}
+
+
+@pytest.mark.parametrize("rule", ["stratified", "midpoint", "gauss_hermite"])
+def test_one_unit_event_is_the_direct_bucketing(multi, rule):
+    for kind, row in ONE_UNIT_ROWS.items():
+        views, meta = run_multi(multi, [row], terms=TOWER if row[1] == "a" else None,
+                                bucket_size=10.0, z_nodes=8, z_rule=rule)
+        lam, unit = row[2], rm.Unit(*row[3:])
+        n = rm.grid_length_for(rm.prepare_unit(unit, "u").support, 10.0)
+        direct = lam * direct_marginal(unit, n)
+        assert meta.one_unit_events == 1 and meta.valid_events == 1, (kind, rule)
+        assert np.abs(views["ground_up"][:n] - direct).max() < 1e-12 * lam, (kind, rule)
+        assert math.isclose(meta.view_mass["ground_up"], lam, rel_tol=1e-12)
+        if row[1] == "a":
+            # The compiled view maps of that row, no z loop: the gross view is
+            # the direct bucketing pushed through the tower.
+            gross = np.zeros(meta.grid_length)
+            for k, p in enumerate(direct):
+                rm._deposit(gross, parse_terms_line(TOWER).view("gross", 10.0 * k), p, 0.1)
+            assert np.abs(views["gross"] - gross).max() < 1e-12 * lam, (kind, rule)
+
+
+def test_one_unit_event_against_the_survival_grid(multi):
+    # The one-row survival grid of section 5A on the same row, built on its
+    # own nodes, agrees to its interpolation tolerance (6e-8 of the rate
+    # measured on the fixture's e3 at h = 10, spec test 27).
+    import eltq
+
+    row = ONE_UNIT_ROWS["beta"]
+    views, meta = run_multi(multi, [row], bucket_size=10.0)
+    raw, secondary, q_meta = eltq.quantize_arrays(
+        np.array([row[2]]), np.array([row[6]]), np.array([row[3]]), np.array([row[4]]),
+        np.array([row[5]]), bucket_size=10.0, grid_length=meta.grid_length)
+    assert np.abs(views["ground_up"] - secondary).max() < 1e-6 * row[2]
+    assert math.isclose(secondary.sum(), views["ground_up"].sum(), rel_tol=1e-12)
+
+
+def test_mixed_portfolio_is_the_sum_of_its_parts(multi):
+    df, terms = load_multi_fixture()
+    one = df[df.event_id == "e3"]
+    rest = df[df.event_id != "e3"]
+    whole, m_whole = run_multi(multi, df, terms=terms, bucket_size=10.0)
+    part_one, m_one = run_multi(multi, one, terms=terms, bucket_size=10.0,
+                                grid_length=m_whole.grid_length)
+    part_rest, m_rest = run_multi(multi, rest, terms=terms, bucket_size=10.0,
+                                  grid_length=m_whole.grid_length)
+    # e3 has one unit; e6 keeps one after its dropped row (mean above max).
+    assert (m_whole.one_unit_events, m_one.one_unit_events, m_rest.one_unit_events) == (2, 1, 1)
+    for view in m_whole.views:
+        assert np.abs(whole[view] - part_one[view] - part_rest[view]).max() < 1e-12 * m_whole.total_rate
+
+
+# ---------------------------------------------------------------------------
 # [tail-support] the grid covers each unit's support rounded up to the grid.
 
 TWO_ATOMS = [("e", "a", 1.0, 13.0, 0.0, 0.0, 20.0), ("e", "b", 1.0, 13.0, 0.0, 0.0, 20.0)]

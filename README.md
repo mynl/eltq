@@ -94,6 +94,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [tidy] the survival grid walked with an interval cursor, the normal scores shared on the Cornish-Fisher route, the output scans combined; bitwise neutral | 2.4.3 | done |
 | [bernoulli] inadmissible unit rows are two-point units given the shared factor on the multi-unit route; the clamp deprecated there | 2.5.0 | done |
 | [z-rule] the stratified factor rule with a tail ladder is the default: exact marginals, the event total's tail within 7e-3; the bivariate normal in the engine; the convergence study with tail metrics | 2.6.0 | done |
+| [one-unit] events with one contributing unit bucketed directly, outside the mixture; `one_unit_events` | 2.7.0 | done |
 
 ## Layout
 

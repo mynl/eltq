@@ -935,6 +935,7 @@ def multiunit_views_reference(
     analytic_terms = {view: [] for view in views}
     roll_up = [] if roll_up_diagnostic else None
     valid_events = 0
+    one_unit_events = 0
     default_terms: dict[str, UnitTerms] = {}
     for e, (start, end) in enumerate(ranges):
         if not event_live[e]:
@@ -947,16 +948,24 @@ def multiunit_views_reference(
         aal_terms.append(lam * math.fsum(p.mean_loss for _, p in live))
         conds = []
         unit_terms_list = []
+        # An event with one contributing unit never enters the mixture: its
+        # row is the unit's marginal bucketed by cdf differences at the
+        # half-bucket edges (spec section 4A, requirement (i)).
+        one_unit = len(live) == 1
+        one_unit_events += one_unit
+        weights = np.ones(1) if one_unit else z_weights
         for j, prep in live:
             uid = str(unit_id[j])
             t = term_table.get(uid)
             if t is None:
                 t = default_terms.setdefault(uid, UnitTerms(uid))
             unit_terms_list.append(t)
-            conds.append(conditional_pmfs(prep, h, grid_length_for(prep.support, h), rule))
+            n_unit = grid_length_for(prep.support, h)
+            conds.append(marginal_pmf(prep, h, n_unit)[None, :] if one_unit
+                         else conditional_pmfs(prep, h, n_unit, rule))
         for view in views:
             rows = [_view_transform(c, h, t, view) for c, t in zip(conds, unit_terms_list)]
-            pmf = _event_pmf(rows, z_weights)
+            pmf = _event_pmf(rows, weights)
             out[view][:pmf.size] += lam * pmf
             analytic_terms[view].append(
                 lam * math.fsum(analytic_view_mean(p, t, view)
@@ -993,6 +1002,7 @@ def multiunit_views_reference(
         valid_rows=valid_rows,
         events=len(ranges),
         valid_events=valid_events,
+        one_unit_events=one_unit_events,
         unit_ids=tuple(unit_order),
         terms_echo={uid: t.text() for uid, t in term_table.items()},
         unused_terms=tuple(uid for uid in term_table if uid not in unit_order),

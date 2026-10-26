@@ -251,6 +251,9 @@ class MultiMeta:
     valid_rows: int
     events: int
     valid_events: int
+    #: Events with one contributing unit, bucketed directly, outside the
+    #: mixture over the factor (spec section 4A).
+    one_unit_events: int
     unit_ids: tuple
     terms_echo: dict
     unused_terms: tuple

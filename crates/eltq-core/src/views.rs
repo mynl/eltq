@@ -236,6 +236,8 @@ pub struct MultiMeta {
     pub valid_rows: usize,
     pub events: usize,
     pub valid_events: usize,
+    /// Events with one contributing unit, bucketed directly (no mixture).
+    pub one_unit_events: usize,
     pub diagnostics: Diagnostics,
     pub roll_up: Option<Vec<RollUpEntry>>,
     /// Largest |mass - 1| of any per-event view pmf (conditional exactness).
@@ -264,6 +266,7 @@ struct ChunkPartial {
     roll_up: Vec<RollUpEntry>,
     direct_paths: usize,
     fft_paths: usize,
+    one_unit_events: usize,
 }
 
 /// Row-set ids: the distinct transformed rows a unit can need.
@@ -892,6 +895,7 @@ pub fn multiunit_views(
             roll_up: Vec::new(),
             direct_paths: 0,
             fft_paths: 0,
+            one_unit_events: 0,
         };
         let mut rate_acc = Neumaier::default();
         let mut aal_acc = Neumaier::default();
@@ -922,23 +926,32 @@ pub fn multiunit_views(
             let lam = input.rate[start];
             partial.valid_events += 1;
             rate_acc.add(lam);
-            // Live units with their base conditional rows.
+            // Live units with their base conditional rows. An event with one
+            // contributing unit never enters the mixture: its base row is the
+            // unit's marginal bucketed by cdf differences at the half-bucket
+            // edges, exact in probability (spec section 4A, requirement (i)).
             units.clear();
             let mut mu_sum = 0.0;
-            for row in start..end {
-                let class = classes[row];
-                if class.kind == UnitKind::Drop {
-                    continue;
-                }
+            let live: Vec<usize> = (start..end).filter(|&row| classes[row].kind != UnitKind::Drop).collect();
+            let one_unit = live.len() == 1;
+            if one_unit {
+                partial.one_unit_events += 1;
+            }
+            for &row in &live {
                 let spec = input.spec(row);
-                let plan = UnitPlan::from_row(&class, &spec);
+                let plan = UnitPlan::from_row(&classes[row], &spec);
                 let n_unit = grid_length_for(plan.support(), h);
-                let unit_rule = if plan.depends_on_factor() { &rule } else { &single };
-                let base = conditional_matrix(&plan, h, n_unit, unit_rule).map_err(|_| Error::KernelFailure {
-                    row,
-                    alpha: plan.alpha,
-                    beta: plan.beta,
-                })?;
+                let (base, rows) = if one_unit {
+                    (marginal_pmf(&plan, h, n_unit), 1)
+                } else {
+                    let unit_rule = if plan.depends_on_factor() { &rule } else { &single };
+                    let base = conditional_matrix(&plan, h, n_unit, unit_rule).map_err(|_| Error::KernelFailure {
+                        row,
+                        alpha: plan.alpha,
+                        beta: plan.beta,
+                    })?;
+                    (base, unit_rule.len())
+                };
                 mu_sum += plan.mean_loss;
                 let code = input.unit_code[row] as usize;
                 let t = &terms[code];
@@ -946,7 +959,7 @@ pub fn multiunit_views(
                     row,
                     code,
                     plan,
-                    rows: unit_rule.len(),
+                    rows,
                     sets: [base, Vec::new(), Vec::new(), Vec::new()],
                     lens: [n_unit, 0, 0, 0],
                     bare: !t.has_policy_terms() && !t.has_reinsurance(),
@@ -1037,6 +1050,7 @@ pub fn multiunit_views(
     let mut max_mass_error = 0.0_f64;
     let mut roll_up: Vec<RollUpEntry> = Vec::new();
     let (mut direct_paths, mut fft_paths) = (0, 0);
+    let mut one_unit_events = 0;
     let mut fold = |partials: Vec<Result<ChunkPartial, Error>>| -> Result<(), Error> {
         for partial in partials {
             let partial = partial?;
@@ -1056,6 +1070,7 @@ pub fn multiunit_views(
             roll_up.extend(partial.roll_up);
             direct_paths += partial.direct_paths;
             fft_paths += partial.fft_paths;
+            one_unit_events += partial.one_unit_events;
         }
         Ok(())
     };
@@ -1122,6 +1137,7 @@ pub fn multiunit_views(
         valid_rows,
         events: events.len(),
         valid_events,
+        one_unit_events,
         diagnostics,
         roll_up: if config.roll_up_diagnostic { Some(roll_up) } else { None },
         max_mass_error,

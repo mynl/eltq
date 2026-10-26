@@ -694,6 +694,7 @@ fn multiunit_views<'py>(
     dict.set_item("valid_rows", meta.valid_rows)?;
     dict.set_item("events", meta.events)?;
     dict.set_item("valid_events", meta.valid_events)?;
+    dict.set_item("one_unit_events", meta.one_unit_events)?;
     let diagnostics = PyDict::new(py);
     for (category, issues) in meta.diagnostics.iter_nonzero() {
         let entry = PyDict::new(py);
