@@ -203,6 +203,8 @@ class JointMeta:
     """
 
     bucket_size: float
+    #: The coupling rule of spec section 4A.
+    coupling: str
     z_nodes: int
     z_rule: str
     #: Nodes or strata the rule actually used (``z_nodes`` body strata plus
@@ -235,6 +237,8 @@ class MultiMeta:
 
     bucket_size: float
     grid_length: int
+    #: The coupling rule of spec section 4A.
+    coupling: str
     z_nodes: int
     z_rule: str
     #: Nodes or strata the rule actually used.
@@ -254,6 +258,10 @@ class MultiMeta:
     #: Events with one contributing unit, bucketed directly, outside the
     #: mixture over the factor (spec section 4A).
     one_unit_events: int
+    #: Under ``coupling="homer"`` the rate-weighted expected allocation over
+    #: the units' exposures, ``sum_j lambda_j P(sum_k (s_k X_R - M_k)^+)``;
+    #: None otherwise.
+    homer_excess_mean: float | None
     unit_ids: tuple
     terms_echo: dict
     unused_terms: tuple

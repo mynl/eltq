@@ -423,13 +423,19 @@ pub struct ViewMap {
 impl ViewMap {
     /// Compile `view` of `terms` for the first `n` buckets of the grid.
     pub fn compile(terms: &UnitTerms, view: View, bucket_size: f64, n: usize) -> Self {
+        let values: Vec<f64> = (0..n).map(|k| terms.view(view, k as f64 * bucket_size)).collect();
+        Self::from_values(view, &values, bucket_size)
+    }
+
+    /// Compile a map from the view's value at each source node, `values[k]`
+    /// at loss `k h` (the `homer` coupling's composed allocation map, 2.8.0).
+    pub fn from_values(view: View, values: &[f64], bucket_size: f64) -> Self {
+        let n = values.len();
         let mut index = Vec::with_capacity(2 * n);
         let mut weight = Vec::with_capacity(2 * n);
         let mut support_len = 0;
         let mut identity = true;
-        for k in 0..n {
-            let x = k as f64 * bucket_size;
-            let value = terms.view(view, x);
+        for (k, &value) in values.iter().enumerate() {
             let r = value / bucket_size;
             let i = (r as usize).min(n.saturating_sub(1));
             let f = r - i as f64;

@@ -48,6 +48,7 @@ eltq pattern.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import warnings
 from collections import namedtuple
@@ -69,10 +70,11 @@ from eltq.reference import (
     VarianceError,
     _deposit,
 )
-from eltq.terms import VIEWS, TermsError, UnitTerms, check_grid_alignment, parse_terms
+from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, check_grid_alignment, parse_terms
 
 VARIANCE_POLICIES = ("bernoulli", "clamp", "error", "drop", "atom")
 Z_RULES = ("midpoint", "gauss_hermite", "stratified")
+COUPLINGS = ("burke", "comonotone", "independent", "homer")
 
 CLAMP_DEPRECATION = (
     "the clamp variance policy on the multi-unit route is deprecated from 2.5.0 "
@@ -219,6 +221,99 @@ def prepare_unit(unit, label, variance_policy="bernoulli",
     prep.w_indep = s_i / t
     prep.kind = _COMONOTONE if s_i == 0.0 else _BETA
     return prep
+
+
+def couple(prep: _Prepped, coupling: str) -> _Prepped:
+    """The unit under a coupling rule (spec section 4A): Burke's loadings as
+    prepared, or every loading forced to one (``comonotone``) or zero
+    (``independent``); a beta unit at loading one takes the comonotone kind
+    and at loading zero the beta kind with no factor dependence. Atoms, drops
+    and ``homer`` (which rolls the event up instead) leave the unit alone."""
+    if coupling not in COUPLINGS:
+        raise EltqError(f"unknown coupling {coupling!r}; expected one of {COUPLINGS}")
+    if coupling in ("burke", "homer") or prep.kind in (_ATOM, _DROP):
+        return prep
+    out = dataclasses.replace(prep, notes=list(prep.notes))
+    if coupling == "comonotone":
+        if out.kind == _BETA:
+            out.kind = _COMONOTONE
+        out.w_corr, out.w_indep = 1.0, 0.0
+    else:
+        if out.kind == _COMONOTONE:
+            out.kind = _BETA
+        out.w_corr, out.w_indep = 0.0, 1.0
+    return out
+
+
+def comonotone_merge(rows, deposit) -> None:
+    """Merge the cumulative probabilities of bucketed marginals on one grid:
+    every unit is a nondecreasing function of one uniform, so between two
+    consecutive breakpoints each unit sits in one bucket, and ``deposit(indices,
+    mass)`` receives each combination with the interval's length. Each row's
+    last cumulative value is taken as exactly one."""
+    cums = []
+    for r in rows:
+        c = np.cumsum(np.asarray(r, dtype=np.float64))
+        c[-1] = 1.0
+        cums.append(c)
+    idx = [0] * len(rows)
+    u = 0.0
+    while True:
+        nxt = min((c[i] for c, i in zip(cums, idx)), default=1.0)
+        deposit(tuple(idx), max(nxt - u, 0.0))
+        if nxt >= 1.0:
+            return
+        u = nxt
+        for j, c in enumerate(cums):
+            while c[idx[j]] <= u and idx[j] + 1 < c.size:
+                idx[j] += 1
+
+
+def comonotone_sum(rows) -> np.ndarray:
+    """The comonotone sum's bucket pmf: the indices add on the shared grid."""
+    out = np.zeros(sum(len(r) - 1 for r in rows) + 1)
+
+    def deposit(indices, mass):
+        out[sum(indices)] += mass
+
+    comonotone_merge(rows, deposit)
+    return out
+
+
+def rolled_unit(units) -> Unit:
+    """Homer and Li 2017, section 3.2.2 (and Mitchell-Wallace et al. 2017,
+    section 1.10.5.10): means, exposures and correlated sds added, the
+    independent sds in quadrature."""
+    return Unit(math.fsum(u.mean_loss for u in units),
+                math.sqrt(math.fsum(u.sd_indep ** 2 for u in units)),
+                math.fsum(u.sd_corr for u in units),
+                math.fsum(u.max_loss for u in units))
+
+
+def terms_on_rolled(terms: UnitTerms, share: float) -> UnitTerms:
+    """Unit terms expressed on the rolled loss: with the allocation ``X_k = s
+    X_R``, ``term_k(s x) = s term_k'(x)`` where every monetary breakpoint of
+    ``term_k'`` is the original divided by ``s``."""
+    return UnitTerms(terms.unit_id, terms.limit / share, terms.ded / share,
+                     tuple(Clause(c.share, c.limit / share, c.attach / share) for c in terms.clauses))
+
+
+def homer_view_values(unit_terms, shares, view: str, bucket_size: float, n: int) -> np.ndarray:
+    """The value of a view of the event total under ``homer`` at each node of
+    the rolled grid, ``sum_k term_k(s_k x)``; zero-mean units receive nothing."""
+    x = bucket_size * np.arange(n)
+    values = np.zeros(n)
+    for t, s in zip(unit_terms, shares):
+        if s > 0.0:
+            values += t.view(view, s * x)
+    return values
+
+
+def homer_excess(rolled: _Prepped, shares, max_losses) -> float:
+    """The expected allocation over the exposures, ``sum_k P((s_k X_R -
+    M_k)^+)``, from the rolled row's limited expected values."""
+    return math.fsum(s * layer_mean(rolled, m / s, math.inf)
+                     for s, m in zip(shares, max_losses) if s > 0.0)
 
 
 def z_quadrature(n_z: int, rule: str = "midpoint"):
@@ -529,7 +624,8 @@ class BivariateSU:
 
 
 def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratified",
-                        variance_policy="bernoulli", clamp_factor=DEFAULT_CLAMP_FACTOR):
+                        variance_policy="bernoulli", clamp_factor=DEFAULT_CLAMP_FACTOR,
+                        coupling="burke"):
     """Joint bucketed loss distribution for one event across two units.
 
     Parameters
@@ -554,6 +650,11 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratifie
         raise, or collapse the unit to an atom at its mean.
     clamp_factor : float, optional
         Factor in (0, 1) applied to the sd bound under the clamp policy.
+    coupling : {"burke", "comonotone", "independent", "homer"}, optional
+        The coupling rule (spec section 4A). ``comonotone`` and ``homer`` are
+        computed exactly with no factor rule: the merged breakpoints of the
+        two bucketed marginals, or the rolled row deposited at the pair of its
+        allocations (uncapped, so a unit's grid must reach ``s_k M_R``).
 
     Returns
     -------
@@ -570,6 +671,8 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratifie
     warn_if_clamp(variance_policy)
     if not (0.0 < clamp_factor < 1.0):
         raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
+    if coupling not in COUPLINGS:
+        raise EltqError(f"unknown coupling {coupling!r}; expected one of {COUPLINGS}")
     rule = FactorRule.new(n_z, z_rule)
     w = rule.weights
     lengths = (int(n1), int(n2))
@@ -577,18 +680,52 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratifie
     for i, (unit, n) in enumerate(zip(units, lengths), start=1):
         if n < 1:
             raise EltqError(f"n{i} must be >= 1, got {n}")
-        prep = prepare_unit(unit, f"unit {i}", variance_policy, clamp_factor)
-        if prep.max_loss > (n - 1) * h:
+        preps.append(couple(prepare_unit(unit, f"unit {i}", variance_policy, clamp_factor), coupling))
+    units = [Unit(*(float(v) for v in u)) for u in units]
+    rolled = rolled_unit(units)
+    rolled_prep = (prepare_unit(rolled, "rolled", variance_policy, clamp_factor)
+                   if coupling == "homer" else None)
+    shares = ([u.mean_loss / rolled.mean_loss for u in units] if rolled.mean_loss > 0.0
+              else [0.0, 0.0])
+    for i, (prep, n) in enumerate(zip(preps, lengths), start=1):
+        # Under homer unit k receives s_k X_R up to s_k M_R, beyond M_k when
+        # its share of the mean exceeds its share of the exposure.
+        reach = shares[i - 1] * rolled_prep.support if rolled_prep is not None else prep.max_loss
+        if reach > (n - 1) * h:
             raise GridOverflowError(
                 f"unit {i}: grid of {n} nodes at spacing {h} covers only "
-                f"{(n - 1) * h}, but max_loss is {prep.max_loss}; "
-                f"n{i} >= {grid_length_for(prep.max_loss, h)} required",
-                required_length=grid_length_for(prep.max_loss, h))
-        preps.append(prep)
+                f"{(n - 1) * h}, but the unit reaches {reach}; "
+                f"n{i} >= {grid_length_for(reach, h)} required",
+                required_length=grid_length_for(reach, h))
 
-    cond1 = conditional_pmfs(preps[0], h, lengths[0], rule)
-    cond2 = conditional_pmfs(preps[1], h, lengths[1], rule)
-    pmf = np.einsum("q,qi,qj->ij", w, cond1, cond2)
+    if coupling == "homer":
+        # Each bucket of the rolled row at the pair of its allocations,
+        # deposited linearly on each axis.
+        n_r = grid_length_for(rolled_prep.support, h)
+        base = marginal_pmf(rolled_prep, h, n_r)
+        pmf = np.zeros(lengths)
+        inv_h = 1.0 / h
+        for i, p in enumerate(base):
+            if p == 0.0:
+                continue
+            rows = []
+            for s, n in zip(shares, lengths):
+                row = np.zeros(n)
+                _deposit(row, s * i * h, 1.0, inv_h)
+                rows.append(row)
+            pmf += p * np.outer(rows[0], rows[1])
+    elif coupling == "comonotone":
+        marginals = [marginal_pmf(p, h, n) for p, n in zip(preps, lengths)]
+        pmf = np.zeros(lengths)
+
+        def deposit(indices, mass):
+            pmf[indices] += mass
+
+        comonotone_merge(marginals, deposit)
+    else:
+        cond1 = conditional_pmfs(preps[0], h, lengths[0], rule)
+        cond2 = conditional_pmfs(preps[1], h, lengths[1], rule)
+        pmf = np.einsum("q,qi,qj->ij", w, cond1, cond2)
 
     x1 = h * np.arange(lengths[0])
     x2 = h * np.arange(lengths[1])
@@ -601,6 +738,7 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratifie
             if sd1 > 0.0 and sd2 > 0.0 else math.nan)
     meta = JointMeta(
         bucket_size=h,
+        coupling=coupling,
         z_nodes=int(n_z),
         z_rule=z_rule,
         z_strata=len(rule),
@@ -713,7 +851,13 @@ def _view_transform(cond: np.ndarray, bucket_size: float, terms: UnitTerms,
     if view == "ground_up":
         return cond
     n = cond.shape[1]
-    values = terms.view(view, bucket_size * np.arange(n))
+    return _transform_values(cond, bucket_size, terms.view(view, bucket_size * np.arange(n)))
+
+
+def _transform_values(cond: np.ndarray, bucket_size: float, values) -> np.ndarray:
+    """Move each source bucket's mass to ``values[k]`` by the linear deposit
+    (the composed allocation map of the ``homer`` coupling, 2.8.0)."""
+    n = cond.shape[1]
     transform = np.zeros((n, n))
     inv_h = 1.0 / bucket_size
     for k in range(n):
@@ -777,6 +921,7 @@ def multiunit_views_reference(
     variance_policy="bernoulli",
     clamp_factor=DEFAULT_CLAMP_FACTOR,
     roll_up_diagnostic=False,
+    coupling="burke",
 ):
     """Total event severity by view for a multi-unit ELT; return ``(views, meta)``.
 
@@ -815,6 +960,13 @@ def multiunit_views_reference(
         Also compute, per event with two or more contributing units, the
         sd and 99th-percentile ratios of the exact ground-up total against
         the rolled single-row beta (the additivity note's diagnostic).
+    coupling : {"burke", "comonotone", "independent", "homer"}
+        The coupling rule of spec section 4A, applied to every event.
+        ``burke`` and ``independent`` set the loadings and run the factor
+        rule; ``comonotone`` is the comonotone sum of the bucketed view
+        marginals, exact, and ``homer`` the rolled row bucketed directly and
+        pushed through the composed allocation map per view (uncapped, as
+        published), both with no factor rule.
 
     Returns
     -------
@@ -851,6 +1003,8 @@ def multiunit_views_reference(
     if not (0.0 < clamp_factor < 1.0):
         raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
     warn_if_clamp(variance_policy)
+    if coupling not in COUPLINGS:
+        raise EltqError(f"unknown coupling {coupling!r}; expected one of {COUPLINGS}")
     rule = FactorRule.new(z_nodes, z_rule)
     z_weights = rule.weights
 
@@ -896,6 +1050,8 @@ def multiunit_views_reference(
                 _note(diagnostics, "zero_rate", f"{eid}/{unit_id[j]}")
             continue
         span = 0
+        live_rows = 0
+        exposure = 0.0
         for j in range(start, end):
             unit = Unit(columns["mean_loss"][j], columns["sd_indep"][j],
                         columns["sd_corr"][j], columns["max_loss"][j])
@@ -905,7 +1061,13 @@ def multiunit_views_reference(
                 continue
             preps[j] = prep
             valid_rows += 1
+            live_rows += 1
+            exposure += unit.max_loss
             span += grid_length_for(prep.support, h) - 1
+        # Under homer the rolled row's beta reaches the summed exposures,
+        # beyond the supports of any atoms among the units.
+        if coupling == "homer" and live_rows >= 2:
+            span = max(span, grid_length_for(exposure, h) - 1)
         if any(preps[j] is not None for j in range(start, end)):
             event_live[e] = True
             event_span[e] = span
@@ -936,6 +1098,7 @@ def multiunit_views_reference(
     roll_up = [] if roll_up_diagnostic else None
     valid_events = 0
     one_unit_events = 0
+    excess_terms: list[float] = []
     default_terms: dict[str, UnitTerms] = {}
     for e, (start, end) in enumerate(ranges):
         if not event_live[e]:
@@ -944,16 +1107,20 @@ def multiunit_views_reference(
         eid = event_id[start]
         lam = rates[start]
         rate_terms.append(lam)
-        live = [(j, preps[j]) for j in range(start, end) if preps[j] is not None]
+        live = [(j, couple(preps[j], coupling)) for j in range(start, end) if preps[j] is not None]
         aal_terms.append(lam * math.fsum(p.mean_loss for _, p in live))
         conds = []
         unit_terms_list = []
         # An event with one contributing unit never enters the mixture: its
         # row is the unit's marginal bucketed by cdf differences at the
-        # half-bucket edges (spec section 4A, requirement (i)).
+        # half-bucket edges (spec section 4A, requirement (i)). The comonotone
+        # and homer couplings need no factor rule either: every unit carries
+        # its marginal as one row (comonotone, merged below) or the event is
+        # rolled up (homer, below).
         one_unit = len(live) == 1
         one_unit_events += one_unit
-        weights = np.ones(1) if one_unit else z_weights
+        exact_path = not one_unit and coupling in ("comonotone", "homer")
+        weights = np.ones(1) if (one_unit or exact_path) else z_weights
         for j, prep in live:
             uid = str(unit_id[j])
             t = term_table.get(uid)
@@ -961,17 +1128,41 @@ def multiunit_views_reference(
                 t = default_terms.setdefault(uid, UnitTerms(uid))
             unit_terms_list.append(t)
             n_unit = grid_length_for(prep.support, h)
-            conds.append(marginal_pmf(prep, h, n_unit)[None, :] if one_unit
+            conds.append(marginal_pmf(prep, h, n_unit)[None, :] if (one_unit or exact_path)
                          else conditional_pmfs(prep, h, n_unit, rule))
-        for view in views:
-            rows = [_view_transform(c, h, t, view) for c, t in zip(conds, unit_terms_list)]
-            pmf = _event_pmf(rows, weights)
-            out[view][:pmf.size] += lam * pmf
-            analytic_terms[view].append(
-                lam * math.fsum(analytic_view_mean(p, t, view)
-                                for (_, p), t in zip(live, unit_terms_list)))
+        if exact_path and coupling == "homer":
+            # The rolled row bucketed directly, pushed through the composed
+            # allocation map per view (uncapped, as published).
+            specs = [Unit(columns["mean_loss"][j], columns["sd_indep"][j],
+                          columns["sd_corr"][j], columns["max_loss"][j]) for j, _ in live]
+            rolled = rolled_unit(specs)
+            rolled_prep = prepare_unit(rolled, f"{eid}/rolled", variance_policy, clamp_factor)
+            shares = [u.mean_loss / rolled.mean_loss if rolled.mean_loss > 0.0 else 0.0 for u in specs]
+            n_r = grid_length_for(rolled_prep.support, h)
+            base = marginal_pmf(rolled_prep, h, n_r)
+            for view in views:
+                if view == "ground_up":
+                    pmf = base
+                else:
+                    values = homer_view_values(unit_terms_list, shares, view, h, n_r)
+                    pmf = _transform_values(base[None, :], h, values)[0]
+                out[view][:pmf.size] += lam * pmf
+                # Each unit's view acts on its allocation s_k X_R, a layer of
+                # the rolled row with the breakpoints divided by s_k.
+                analytic_terms[view].append(
+                    lam * math.fsum(s * analytic_view_mean(rolled_prep, terms_on_rolled(t, s), view)
+                                    for s, t in zip(shares, unit_terms_list) if s > 0.0))
+            excess_terms.append(lam * homer_excess(rolled_prep, shares, [u.max_loss for u in specs]))
+        else:
+            for view in views:
+                rows = [_view_transform(c, h, t, view) for c, t in zip(conds, unit_terms_list)]
+                pmf = comonotone_sum([r[0] for r in rows]) if exact_path else _event_pmf(rows, weights)
+                out[view][:pmf.size] += lam * pmf
+                analytic_terms[view].append(
+                    lam * math.fsum(analytic_view_mean(p, t, view)
+                                    for (_, p), t in zip(live, unit_terms_list)))
         if roll_up is not None and len(live) >= 2:
-            roll_up.append(_roll_up_entry(eid, live, columns, conds, z_weights, h))
+            roll_up.append(_roll_up_entry(eid, live, columns, conds, weights, h))
 
     total_rate = math.fsum(rate_terms)
     if normalize:
@@ -987,6 +1178,7 @@ def multiunit_views_reference(
     meta = MultiMeta(
         bucket_size=h,
         grid_length=n,
+        coupling=coupling,
         z_nodes=int(z_nodes),
         z_rule=z_rule,
         z_strata=len(rule),
@@ -1003,6 +1195,7 @@ def multiunit_views_reference(
         events=len(ranges),
         valid_events=valid_events,
         one_unit_events=one_unit_events,
+        homer_excess_mean=math.fsum(excess_terms) if coupling == "homer" else None,
         unit_ids=tuple(unit_order),
         terms_echo={uid: t.text() for uid, t in term_table.items()},
         unused_terms=tuple(uid for uid in term_table if uid not in unit_order),

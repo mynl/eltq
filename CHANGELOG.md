@@ -3,6 +3,18 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.8.0] - 2026-10-26
+
+### Added
+
+- [coupling] `coupling=` on `multiunit_views` and `joint_two_units`, echoed as `meta.coupling` (spec section 4A): `burke` (the default, Burke 2016's loading on the common factor), `comonotone` (every loading one, Mitchell-Wallace et al. 2017), `independent` (every loading zero) and `homer` (Homer and Li 2017: the event's rows rolled into one, the rolled loss allocated pro rata to the means). `comonotone` and `homer` are computed exactly with no factor rule: the comonotone sum of the units' bucketed view marginals by merging their cumulative probabilities, and the rolled row bucketed directly and pushed through the composed allocation map per view; the two-unit joint deposits at the pair of indices or allocations.
+- The Homer allocation is uncapped, as published (plan decision 2, revised at execution): a unit can be allocated more than its exposed value whenever its share of the mean exceeds its share of the exposure, as it does in the paper's own Table 11, and `meta.homer_excess_mean` reports the rate-weighted expected allocation over the exposures from the rolled row's limited expected values. A two-unit joint whose grid stops short of a unit's share of the rolled exposure raises the grid overflow error.
+- Spec test 25 on both backends: `independent` against the plain convolution, `comonotone` against its marginals, an inverse-cdf check and the multi-unit article's 4,096-node construction of case A, Proposition 6 by the exact path, and `homer` against the rolled table, its composed map, the one-row survival grid and its own expected excess.
+
+### Changed
+
+- The roll-up diagnostic's rolled row goes through the shared roll-up helper; its numbers are unchanged. Grids under the default `burke` coupling are unchanged.
+
 ## [2.7.0] - 2026-10-26
 
 ### Changed

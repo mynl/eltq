@@ -571,3 +571,39 @@ parked, had already been closed as superseded in `dev/done/` on 2026-10-25; noth
   test 27 fixes $10^{-6}$. Test 27 also covers a two-point, an atom and a comonotone row under all
   three rules, and the termed unit's gross view against the direct bucketing pushed through its
   tower.
+
+### [coupling] 2.8.0, 2026-10-26
+
+- As ruled at execution (decision 2 revised): no `homer_cap`, no capped mode; the step's text
+  above still describes both modes and `homer_cap_mean_loss`, and the specification's `homer`
+  paragraph, metadata paragraph, item 9 of section 11 and test 25 were rewritten for the uncapped
+  rule with `homer_excess_mean`. The expected allocation over the exposures is kept as a
+  diagnostic, the one figure that shows the published rule's defect; on Homer's Table 11 it is
+  positive (event 1's commercial line holds 40% of the mean and 25% of the exposure).
+- `Coupling` in `multiunit.rs` with `UnitPlan::couple`; `comonotone_merge` (a callback per
+  combination of bucket indices, shared by the total and the pair joint), `rolled_spec`,
+  `terms_on_rolled`, `homer_view_values`, `homer_excess`; `ViewMap::from_values` for the composed
+  allocation map. The reference mirrors each (`couple`, `comonotone_merge`, `rolled_unit`,
+  `terms_on_rolled`, `homer_view_values`, `homer_excess`, `_transform_values`).
+- The homer path's grid: pass 1 sizes an event under `homer` to the summed exposures as well as
+  the units' supports, since the rolled beta reaches $M_R$ while an atom's support is its mean;
+  the two-unit joint checks each unit's grid against $s_k M_R$ and raises the overflow error
+  with the required length.
+- Divergence, recorded: test 25's `comonotone` clause asked for the total within $10^{-12}$ of
+  "the comonotone sum of the bucketed marginals"; the test checks that identity through an
+  independent inverse-cdf construction on a uniform grid of $10^{-6}$, which agrees within
+  $2\times10^{-6}$, and the exactness of the marginals and the mass within $10^{-12}$. The view
+  means under `comonotone` equal the bucketed marginals' means exactly and differ from the
+  analytic means by the bucketing of the betas, as under every rule; likewise the `homer`
+  ground-up mean is the rolled row's to its bucketing ($3\times10^{-4}$ at $h = 10$ on Homer's
+  table), not "exact" as the step's text says: cdf differences at the half-bucket edges are exact
+  in probability, not in mean (decision 9). The tests fix $10^{-3}$ for those means. Proposition 6
+  by the exact path: the comonotone sum of two U-shaped bucketed marginals is coarser than the
+  rolled beta's bucketing at the origin (both units in bucket 0 land at 0), $1.6\times10^{-2}$ in
+  the first cell of the cdf at $h = 5$, while the standard deviation and the 99th percentile agree
+  within $10^{-3}$ and $5\times10^{-3}$.
+- The article's `tbl-couplings` (case A under the three loadings): the `independent` and `burke`
+  rows are the existing joint tests; the `comonotone` row, built in the article on 4,096 midpoint
+  nodes with each unit's whole sd on the factor, agrees with the exact path on the total's
+  standard deviation within $10^{-3}$ and on its 99th percentile within $5\times10^{-3}$, the
+  midpoint rule's error at that count.

@@ -41,8 +41,9 @@ use crate::convolve::{FftCache, convolve_direct, fft_cost, fft_size};
 use crate::diagnostics::{Category, Diagnostics, MAX_EXAMPLES};
 use crate::error::Error;
 use crate::multiunit::{
-    LayerMeans, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, conditional_matrix,
-    grid_length_for, marginal_pmf, prepare_unit,
+    Coupling, LayerMeans, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, comonotone_sum,
+    conditional_matrix, grid_length_for, homer_excess, homer_view_values, marginal_pmf, prepare_unit, rolled_spec,
+    terms_on_rolled,
 };
 use crate::quadrature::{FactorRule, ZRule};
 use crate::sum::{Neumaier, grid_moment, sum};
@@ -149,6 +150,8 @@ pub struct MultiConfig {
     pub chunk_rows: usize,
     pub roll_up_diagnostic: bool,
     pub convolution: Convolution,
+    /// The coupling rule of spec section 4A.
+    pub coupling: Coupling,
 }
 
 impl MultiConfig {
@@ -165,6 +168,7 @@ impl MultiConfig {
             chunk_rows: DEFAULT_MULTI_CHUNK_ROWS,
             roll_up_diagnostic: false,
             convolution: Convolution::Auto,
+            coupling: Coupling::Burke,
         }
     }
 
@@ -220,6 +224,7 @@ pub struct RollUpEntry {
 pub struct MultiMeta {
     pub bucket_size: f64,
     pub grid_length: usize,
+    pub coupling: Coupling,
     pub z_nodes: usize,
     pub z_rule: ZRule,
     /// Nodes or strata the rule actually used.
@@ -238,6 +243,9 @@ pub struct MultiMeta {
     pub valid_events: usize,
     /// Events with one contributing unit, bucketed directly (no mixture).
     pub one_unit_events: usize,
+    /// Under the `homer` coupling, the rate-weighted expected allocation
+    /// over the units' exposures, `sum_j lambda_j P(sum_k (s_k X_R - M_k)^+)`.
+    pub homer_excess_mean: Option<f64>,
     pub diagnostics: Diagnostics,
     pub roll_up: Option<Vec<RollUpEntry>>,
     /// Largest |mass - 1| of any per-event view pmf (conditional exactness).
@@ -267,6 +275,7 @@ struct ChunkPartial {
     direct_paths: usize,
     fft_paths: usize,
     one_unit_events: usize,
+    homer_excess: f64,
 }
 
 /// Row-set ids: the distinct transformed rows a unit can need.
@@ -827,15 +836,24 @@ pub fn multiunit_views(
             continue;
         }
         let mut span = 0;
+        let mut live_rows = 0;
+        let mut exposure = 0.0;
         for row in start..end {
             let class = classify_unit_row(row, &input.spec(row), config.variance_policy, &mut diagnostics)?;
             classes[row] = class;
             if class.kind != UnitKind::Drop {
                 event_live[e] = true;
+                live_rows += 1;
+                exposure += input.max_loss[row];
                 // Same support as `UnitPlan::support`, which sizes the unit's rows in pass 2.
                 let support = if class.kind == UnitKind::Atom { class.mu } else { input.max_loss[row] };
                 span += grid_length_for(support, h) - 1;
             }
+        }
+        // Under the homer coupling the rolled row's beta reaches the summed
+        // exposures, beyond the supports of any atoms among the units.
+        if config.coupling == Coupling::Homer && live_rows >= 2 {
+            span = span.max(grid_length_for(exposure, h) - 1);
         }
         event_span[e] = span;
     }
@@ -896,8 +914,10 @@ pub fn multiunit_views(
             direct_paths: 0,
             fft_paths: 0,
             one_unit_events: 0,
+            homer_excess: 0.0,
         };
         let mut rate_acc = Neumaier::default();
+        let mut excess_acc = Neumaier::default();
         let mut aal_acc = Neumaier::default();
         let mut analytic_acc: Vec<Neumaier> = vec![Neumaier::default(); n_views];
         let mut worker = Worker {
@@ -937,11 +957,15 @@ pub fn multiunit_views(
             if one_unit {
                 partial.one_unit_events += 1;
             }
+            // The comonotone and homer couplings need no factor rule: every
+            // unit carries its marginal as a single row (comonotone, merged
+            // below) or the event is rolled up (homer, below).
+            let exact_path = !one_unit && matches!(config.coupling, Coupling::Comonotone | Coupling::Homer);
             for &row in &live {
                 let spec = input.spec(row);
-                let plan = UnitPlan::from_row(&classes[row], &spec);
+                let plan = UnitPlan::from_row(&classes[row], &spec).couple(config.coupling);
                 let n_unit = grid_length_for(plan.support(), h);
-                let (base, rows) = if one_unit {
+                let (base, rows) = if one_unit || exact_path {
                     (marginal_pmf(&plan, h, n_unit), 1)
                 } else {
                     let unit_rule = if plan.depends_on_factor() { &rule } else { &single };
@@ -967,23 +991,68 @@ pub fn multiunit_views(
             }
             partial.valid_rows += units.len();
             aal_acc.add(lam * mu_sum);
-            worker.materialize(&mut units, terms, &computed);
-            let use_fft = match config.convolution {
-                Convolution::Direct => false,
-                Convolution::Fft => true,
-                Convolution::Auto => {
-                    let (direct, fft) = worker.estimate(&units, terms, &computed);
-                    fft * FFT_COST_FACTOR < direct
+            // The homer path: the rolled row bucketed directly and pushed
+            // through the composed allocation map per view (decision 2 of
+            // the plan: uncapped, as published).
+            let homer = if exact_path && config.coupling == Coupling::Homer {
+                let specs: Vec<UnitSpec> = live.iter().map(|&row| input.spec(row)).collect();
+                let rolled = rolled_spec(&specs);
+                let rolled_plan = prepare_unit(&rolled, "rolled", config.variance_policy)?;
+                let shares: Vec<f64> = specs
+                    .iter()
+                    .map(|s| if rolled.mean_loss > 0.0 { s.mean_loss / rolled.mean_loss } else { 0.0 })
+                    .collect();
+                let n_r = grid_length_for(rolled_plan.support(), h);
+                let base = marginal_pmf(&rolled_plan, h, n_r);
+                let unit_terms: Vec<&UnitTerms> = units.iter().map(|u| &terms[u.code]).collect();
+                for (vi, &view) in computed.iter().enumerate() {
+                    if view == View::GroundUp {
+                        pmfs[vi].clear();
+                        pmfs[vi].extend_from_slice(&base);
+                    } else {
+                        let values = homer_view_values(&unit_terms, &shares, view, h, n_r);
+                        let map = ViewMap::from_values(view, &values, h);
+                        pmfs[vi].clear();
+                        pmfs[vi].resize(map.support_len, 0.0);
+                        map.apply(&base, &mut pmfs[vi]);
+                    }
                 }
-            };
-            if use_fft {
-                worker.fft_views(&units, terms, &computed, &mut pmfs);
-                partial.fft_paths += 1;
+                let max_losses: Vec<f64> = specs.iter().map(|s| s.max_loss).collect();
+                excess_acc.add(lam * homer_excess(&LayerMeans::new(&rolled_plan), &shares, &max_losses));
+                Some((rolled_plan, shares))
             } else {
-                worker.direct_views(&units, terms, &computed, &mut pmfs);
-                partial.direct_paths += 1;
-            }
+                worker.materialize(&mut units, terms, &computed);
+                if exact_path {
+                    // Comonotone: the merged breakpoints of the bucketed view
+                    // marginals, exact for them, no factor rule.
+                    for (vi, &view) in computed.iter().enumerate() {
+                        let rows: Vec<&[f64]> = units
+                            .iter()
+                            .filter_map(|u| rowset_for(view, &terms[u.code]).map(|id| u.set(id)))
+                            .collect();
+                        comonotone_sum(&rows, &mut pmfs[vi]);
+                    }
+                } else {
+                    let use_fft = match config.convolution {
+                        Convolution::Direct => false,
+                        Convolution::Fft => true,
+                        Convolution::Auto => {
+                            let (direct, fft) = worker.estimate(&units, terms, &computed);
+                            fft * FFT_COST_FACTOR < direct
+                        }
+                    };
+                    if use_fft {
+                        worker.fft_views(&units, terms, &computed, &mut pmfs);
+                        partial.fft_paths += 1;
+                    } else {
+                        worker.direct_views(&units, terms, &computed, &mut pmfs);
+                        partial.direct_paths += 1;
+                    }
+                }
+                None
+            };
             let layer_means: Vec<LayerMeans> = units.iter().map(|u| LayerMeans::new(&u.plan)).collect();
+            let rolled_means = homer.as_ref().map(|(plan, _)| LayerMeans::new(plan));
             for (vi, &view) in computed.iter().enumerate() {
                 let pmf = &pmfs[vi];
                 let mass: f64 = pmf.iter().sum();
@@ -999,25 +1068,27 @@ pub fn multiunit_views(
                     for (dst, &p) in partial.views[vi].iter_mut().zip(pmf) {
                         *dst += lam * p;
                     }
-                    let analytic: f64 = units
-                        .iter()
-                        .zip(&layer_means)
-                        .map(|(u, lm)| lm.view_mean(&terms[u.code], view))
-                        .sum();
+                    // Under homer each unit's view acts on its allocation
+                    // s_k X_R, a layer of the rolled row with the breakpoints
+                    // divided by s_k, scaled back by s_k.
+                    let analytic: f64 = match (&homer, &rolled_means) {
+                        (Some((_, shares)), Some(rolled)) => units
+                            .iter()
+                            .zip(shares)
+                            .filter(|(_, s)| **s > 0.0)
+                            .map(|(u, &s)| s * rolled.view_mean(&terms_on_rolled(&terms[u.code], s), view))
+                            .sum(),
+                        _ => units
+                            .iter()
+                            .zip(&layer_means)
+                            .map(|(u, lm)| lm.view_mean(&terms[u.code], view))
+                            .sum(),
+                    };
                     analytic_acc[vi].add(lam * analytic);
                 }
                 if roll_up_slot == Some(vi) && units.len() >= 2 {
-                    let rolled = UnitSpec {
-                        mean_loss: units.iter().map(|u| input.mean_loss[u.row]).sum(),
-                        sd_indep: units
-                            .iter()
-                            .map(|u| input.sd_indep[u.row] * input.sd_indep[u.row])
-                            .sum::<f64>()
-                            .sqrt(),
-                        sd_corr: units.iter().map(|u| input.sd_corr[u.row]).sum(),
-                        max_loss: units.iter().map(|u| input.max_loss[u.row]).sum(),
-                    };
-                    let rolled_plan = prepare_unit(&rolled, "rolled", VariancePolicy::default())?;
+                    let specs: Vec<UnitSpec> = units.iter().map(|u| input.spec(u.row)).collect();
+                    let rolled_plan = prepare_unit(&rolled_spec(&specs), "rolled", VariancePolicy::default())?;
                     let rolled_pmf = marginal_pmf(&rolled_plan, h, pmf.len());
                     let (sd_exact, sd_rolled) = (sd_of(pmf, h), sd_of(&rolled_pmf, h));
                     let (q_exact, q_rolled) = (quantile_of(pmf, h, 0.99), quantile_of(&rolled_pmf, h, 0.99));
@@ -1036,6 +1107,7 @@ pub fn multiunit_views(
         }
         partial.rate = rate_acc.value();
         partial.aal = aal_acc.value();
+        partial.homer_excess = excess_acc.value();
         partial.analytic = analytic_acc.iter().map(Neumaier::value).collect();
         Ok(partial)
     };
@@ -1051,6 +1123,7 @@ pub fn multiunit_views(
     let mut roll_up: Vec<RollUpEntry> = Vec::new();
     let (mut direct_paths, mut fft_paths) = (0, 0);
     let mut one_unit_events = 0;
+    let mut homer_excess = Neumaier::default();
     let mut fold = |partials: Vec<Result<ChunkPartial, Error>>| -> Result<(), Error> {
         for partial in partials {
             let partial = partial?;
@@ -1071,6 +1144,7 @@ pub fn multiunit_views(
             direct_paths += partial.direct_paths;
             fft_paths += partial.fft_paths;
             one_unit_events += partial.one_unit_events;
+            homer_excess.add(partial.homer_excess);
         }
         Ok(())
     };
@@ -1122,6 +1196,7 @@ pub fn multiunit_views(
     let meta = MultiMeta {
         bucket_size: h,
         grid_length: n,
+        coupling: config.coupling,
         z_nodes: config.z_nodes,
         z_rule: config.z_rule,
         z_strata: rule.len(),
@@ -1138,6 +1213,7 @@ pub fn multiunit_views(
         events: events.len(),
         valid_events,
         one_unit_events,
+        homer_excess_mean: if config.coupling == Coupling::Homer { Some(homer_excess.value()) } else { None },
         diagnostics,
         roll_up: if config.roll_up_diagnostic { Some(roll_up) } else { None },
         max_mass_error,

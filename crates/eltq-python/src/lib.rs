@@ -15,7 +15,7 @@ use eltq_core::csv_input::{CsvColumns, read_elt_csv};
 use std::sync::Arc;
 
 use eltq_core::{
-    Clause, Config, Convolution, Curve, EltInput, Error as CoreError, JointConfig, Meta, Method,
+    Clause, Config, Convolution, Coupling, Curve, EltInput, Error as CoreError, JointConfig, Meta, Method,
     MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule,
     build_curve, classify_rows, joint_two_units as core_joint_two_units,
     multiunit_views as core_multiunit_views, quantize,
@@ -518,7 +518,7 @@ type JointReturn<'py> = (
 #[pyfunction]
 #[pyo3(signature = (unit1, unit2, *, bucket_size, n1, n2, z_nodes=32,
     z_rule="stratified", variance_policy="bernoulli",
-    clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR))]
+    clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, coupling="burke"))]
 #[allow(clippy::too_many_arguments)]
 fn joint_two_units<'py>(
     py: Python<'py>,
@@ -531,6 +531,7 @@ fn joint_two_units<'py>(
     z_rule: &str,
     variance_policy: &str,
     clamp_factor: f64,
+    coupling: &str,
 ) -> PyResult<JointReturn<'py>> {
     let spec = |u: (f64, f64, f64, f64)| UnitSpec {
         mean_loss: u.0,
@@ -545,6 +546,7 @@ fn joint_two_units<'py>(
         z_nodes,
         z_rule: ZRule::parse(z_rule).map_err(|e| to_py_err(py, e))?,
         variance_policy: parse_variance_policy(variance_policy, clamp_factor)?,
+        coupling: Coupling::parse(coupling).map_err(|e| to_py_err(py, e))?,
     };
     let result = py
         .detach(|| core_joint_two_units([spec(unit1), spec(unit2)], &config))
@@ -552,6 +554,7 @@ fn joint_two_units<'py>(
     let meta = &result.meta;
     let dict = PyDict::new(py);
     dict.set_item("bucket_size", meta.bucket_size)?;
+    dict.set_item("coupling", meta.coupling.as_str())?;
     dict.set_item("z_nodes", meta.z_nodes)?;
     dict.set_item("z_rule", meta.z_rule.as_str())?;
     dict.set_item("z_strata", meta.z_strata)?;
@@ -590,7 +593,7 @@ type TermsSpec = Vec<(String, f64, f64, Vec<(f64, f64, f64)>)>;
     max_loss, *, terms, bucket_size, grid_length=None, z_nodes=32,
     z_rule="stratified", views=None, normalize=false, variance_policy="bernoulli",
     clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
-    chunk_rows=None, roll_up_diagnostic=false, convolution="auto"))]
+    chunk_rows=None, roll_up_diagnostic=false, convolution="auto", coupling="burke"))]
 #[allow(clippy::too_many_arguments)]
 fn multiunit_views<'py>(
     py: Python<'py>,
@@ -614,6 +617,7 @@ fn multiunit_views<'py>(
     chunk_rows: Option<usize>,
     roll_up_diagnostic: bool,
     convolution: &str,
+    coupling: &str,
 ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
     let err = |e: CoreError| to_py_err(py, e);
     let mut config = MultiConfig::new(bucket_size);
@@ -634,6 +638,7 @@ fn multiunit_views<'py>(
     }
     config.roll_up_diagnostic = roll_up_diagnostic;
     config.convolution = Convolution::parse(convolution).map_err(err)?;
+    config.coupling = Coupling::parse(coupling).map_err(err)?;
     let terms: Vec<UnitTerms> = terms
         .into_iter()
         .map(|(unit_id, limit, ded, clauses)| {
@@ -679,6 +684,7 @@ fn multiunit_views<'py>(
     let dict = PyDict::new(py);
     dict.set_item("bucket_size", meta.bucket_size)?;
     dict.set_item("grid_length", meta.grid_length)?;
+    dict.set_item("coupling", meta.coupling.as_str())?;
     dict.set_item("z_nodes", meta.z_nodes)?;
     dict.set_item("z_rule", meta.z_rule.as_str())?;
     dict.set_item("z_strata", meta.z_strata)?;
@@ -695,6 +701,7 @@ fn multiunit_views<'py>(
     dict.set_item("events", meta.events)?;
     dict.set_item("valid_events", meta.valid_events)?;
     dict.set_item("one_unit_events", meta.one_unit_events)?;
+    dict.set_item("homer_excess_mean", meta.homer_excess_mean)?;
     let diagnostics = PyDict::new(py);
     for (category, issues) in meta.diagnostics.iter_nonzero() {
         let entry = PyDict::new(py);

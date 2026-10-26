@@ -28,7 +28,7 @@ use crate::incbeta::BetaFn;
 use crate::normal;
 use crate::quadrature::{FactorRule, ZRule};
 use crate::sum::{Neumaier, sum};
-use crate::terms::{UnitTerms, View};
+use crate::terms::{Clause, UnitTerms, View};
 
 /// Per-unit ELT fields in loss currency units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +56,43 @@ pub enum UnitKind {
     /// w_corr z) / w_indep)`, a step at `z = Phi^{-1}(1 - p)` when `w_corr
     /// = 1`.
     TwoPoint,
+}
+
+/// The coupling rule (spec section 4A): the loading every unit of an event
+/// takes on the common factor, or Homer and Li's roll-up in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coupling {
+    /// `w_i = sd_corr / hypot(sd_indep, sd_corr)` (Burke 2016, step iv).
+    Burke,
+    /// Every loading one: one uniform per occurrence (Mitchell-Wallace et
+    /// al. 2017, section 1.10.5.9); computed exactly, with no factor rule.
+    Comonotone,
+    /// Every loading zero.
+    Independent,
+    /// Homer and Li 2017, section 3.2.2: the event's rows rolled into one,
+    /// its loss allocated pro rata to the means, uncapped as published.
+    Homer,
+}
+
+impl Coupling {
+    pub fn parse(name: &str) -> Result<Self, Error> {
+        match name {
+            "burke" => Ok(Coupling::Burke),
+            "comonotone" => Ok(Coupling::Comonotone),
+            "independent" => Ok(Coupling::Independent),
+            "homer" => Ok(Coupling::Homer),
+            other => Err(Error::BadCoupling(other.to_string())),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Coupling::Burke => "burke",
+            Coupling::Comonotone => "comonotone",
+            Coupling::Independent => "independent",
+            Coupling::Homer => "homer",
+        }
+    }
 }
 
 /// Validated, derived per-unit parameters.
@@ -95,6 +132,139 @@ impl UnitPlan {
             UnitKind::Atom | UnitKind::Drop => false,
         }
     }
+
+    /// The plan under a coupling: Burke's loadings as prepared, or every
+    /// loading forced to one (`Comonotone`) or zero (`Independent`). A beta
+    /// unit at loading one takes the `Comonotone` kind and at loading zero
+    /// the `Beta` kind with no factor dependence; atoms, dropped rows and
+    /// the `Homer` coupling, which rolls the event up instead, leave the
+    /// plan alone.
+    pub fn couple(mut self, coupling: Coupling) -> UnitPlan {
+        match coupling {
+            Coupling::Comonotone => match self.kind {
+                UnitKind::Beta | UnitKind::TwoPoint => {
+                    if self.kind == UnitKind::Beta {
+                        self.kind = UnitKind::Comonotone;
+                    }
+                    self.w_corr = 1.0;
+                    self.w_indep = 0.0;
+                }
+                _ => {}
+            },
+            Coupling::Independent => match self.kind {
+                UnitKind::Beta | UnitKind::Comonotone | UnitKind::TwoPoint => {
+                    if self.kind == UnitKind::Comonotone {
+                        self.kind = UnitKind::Beta;
+                    }
+                    self.w_corr = 0.0;
+                    self.w_indep = 1.0;
+                }
+                _ => {}
+            },
+            Coupling::Burke | Coupling::Homer => {}
+        }
+        self
+    }
+}
+
+/// The comonotone sum of bucketed marginals on one grid. Every unit is a
+/// nondecreasing function of one uniform `U`, so between two consecutive
+/// breakpoints of the merged cumulative probabilities each unit sits in one
+/// bucket, and the interval's length is the probability of that
+/// combination; `deposit(indices, mass)` receives each combination once.
+/// Each row's last cumulative value is taken as exactly one, so the masses
+/// sum to one whatever the rows' rounding.
+pub fn comonotone_merge(rows: &[&[f64]], mut deposit: impl FnMut(&[usize], f64)) {
+    let k = rows.len();
+    let mut idx = vec![0usize; k];
+    let mut cum: Vec<f64> = rows.iter().map(|r| if r.len() == 1 { 1.0 } else { r[0] }).collect();
+    let mut u = 0.0_f64;
+    loop {
+        let next = cum.iter().cloned().fold(1.0_f64, f64::min);
+        deposit(&idx, (next - u).max(0.0));
+        if next >= 1.0 {
+            return;
+        }
+        u = next;
+        for j in 0..k {
+            while cum[j] <= u && idx[j] + 1 < rows[j].len() {
+                idx[j] += 1;
+                cum[j] = if idx[j] + 1 == rows[j].len() { 1.0 } else { cum[j] + rows[j][idx[j]] };
+            }
+        }
+    }
+}
+
+/// The comonotone sum's bucket pmf: the indices add, since the rows share
+/// the grid; `out` is resized to the sum of the rows' spans plus one.
+pub fn comonotone_sum(rows: &[&[f64]], out: &mut Vec<f64>) {
+    let total = rows.iter().map(|r| r.len().saturating_sub(1)).sum::<usize>() + 1;
+    out.clear();
+    out.resize(total, 0.0);
+    comonotone_merge(rows, |idx, mass| out[idx.iter().sum::<usize>()] += mass);
+}
+
+/// Homer and Li 2017, section 3.2.2 (the same rule as Mitchell-Wallace et
+/// al. 2017, section 1.10.5.10): the event's rows rolled into one, means and
+/// exposures and correlated sds added, independent sds in quadrature.
+pub fn rolled_spec(specs: &[UnitSpec]) -> UnitSpec {
+    UnitSpec {
+        mean_loss: specs.iter().map(|s| s.mean_loss).sum(),
+        sd_indep: specs.iter().map(|s| s.sd_indep * s.sd_indep).sum::<f64>().sqrt(),
+        sd_corr: specs.iter().map(|s| s.sd_corr).sum(),
+        max_loss: specs.iter().map(|s| s.max_loss).sum(),
+    }
+}
+
+/// Unit `k`'s terms expressed on the rolled loss: with the allocation
+/// `X_k = s X_R`, `s = mu_k / mu_R`, `term_k(s x) = s term_k'(x)` where every
+/// monetary breakpoint of `term_k'` is the original divided by `s`.
+pub fn terms_on_rolled(terms: &UnitTerms, share: f64) -> UnitTerms {
+    UnitTerms {
+        unit_id: terms.unit_id.clone(),
+        limit: terms.limit / share,
+        ded: terms.ded / share,
+        clauses: terms
+            .clauses
+            .iter()
+            .map(|c| Clause {
+                share: c.share,
+                limit: c.limit / share,
+                attach: c.attach / share,
+            })
+            .collect(),
+    }
+}
+
+/// The value of a view of the event total under the `homer` coupling at
+/// each node of the rolled grid: `sum_k term_k(s_k x)` with `s_k` the
+/// units' shares of the rolled mean (zero-mean units receive nothing).
+pub fn homer_view_values(unit_terms: &[&UnitTerms], shares: &[f64], view: View, bucket_size: f64, n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| {
+            let x = i as f64 * bucket_size;
+            unit_terms
+                .iter()
+                .zip(shares)
+                .filter(|(_, s)| **s > 0.0)
+                .map(|(t, &s)| t.view(view, s * x))
+                .sum()
+        })
+        .collect()
+}
+
+/// The expected allocation over the exposures under the `homer` coupling,
+/// `sum_k P((s_k X_R - M_k)^+)`, from the rolled row's limited expected
+/// values: the one figure that shows how far the published rule allocates
+/// beyond a unit's exposed value (the multi-unit article, section on the
+/// rules).
+pub fn homer_excess(rolled: &LayerMeans<'_>, shares: &[f64], max_losses: &[f64]) -> f64 {
+    shares
+        .iter()
+        .zip(max_losses)
+        .filter(|(s, _)| **s > 0.0)
+        .map(|(&s, &m)| s * rolled.layer_mean(m / s, f64::INFINITY))
+        .sum()
 }
 
 /// Validate one unit and derive beta parameters and copula weights.
@@ -642,6 +812,7 @@ pub struct JointConfig {
     pub z_nodes: usize,
     pub z_rule: ZRule,
     pub variance_policy: VariancePolicy,
+    pub coupling: Coupling,
 }
 
 impl JointConfig {
@@ -653,6 +824,7 @@ impl JointConfig {
             z_nodes: 32,
             z_rule: ZRule::Stratified,
             variance_policy: VariancePolicy::default(),
+            coupling: Coupling::Burke,
         }
     }
 }
@@ -662,6 +834,7 @@ impl JointConfig {
 #[derive(Debug, Clone)]
 pub struct JointMeta {
     pub bucket_size: f64,
+    pub coupling: Coupling,
     pub z_nodes: usize,
     pub z_rule: ZRule,
     /// Nodes or strata the rule actually used (`z_nodes` body strata plus
@@ -710,51 +883,111 @@ pub fn joint_two_units(units: [UnitSpec; 2], config: &JointConfig) -> Result<Joi
         if n < 1 {
             return Err(Error::BadGridLength(n));
         }
-        let plan = prepare_unit(spec, &format!("unit {}", i + 1), config.variance_policy)?;
+        let plan = prepare_unit(spec, &format!("unit {}", i + 1), config.variance_policy)?.couple(config.coupling);
+        plans.push(plan);
+    }
+    // Under the homer coupling unit k receives s_k X_R up to s_k M_R, which
+    // exceeds M_k whenever its share of the mean exceeds its share of the
+    // exposure; its grid must cover that.
+    let rolled = rolled_spec(&units);
+    let rolled_plan = if config.coupling == Coupling::Homer {
+        Some(prepare_unit(&rolled, "rolled", config.variance_policy)?)
+    } else {
+        None
+    };
+    let shares: [f64; 2] = if rolled.mean_loss > 0.0 {
+        [units[0].mean_loss / rolled.mean_loss, units[1].mean_loss / rolled.mean_loss]
+    } else {
+        [0.0, 0.0]
+    };
+    for i in 0..2 {
+        let n = lengths[i];
+        let reach = match &rolled_plan {
+            Some(r) => shares[i] * r.support(),
+            None => plans[i].max_loss,
+        };
         let top = (n - 1) as f64 * h;
-        if plan.max_loss > top {
+        if reach > top {
             return Err(Error::GridOverflow {
                 grid_length: n,
                 bucket_size: h,
                 top,
-                max_loss: plan.max_loss,
-                required: grid_length_for(plan.max_loss, h),
+                max_loss: reach,
+                required: grid_length_for(reach, h),
                 example_rows: vec![i],
             });
         }
-        plans.push(plan);
     }
     let (n1, n2) = (config.n1, config.n2);
-    let mut c1 = conditional_matrix(&plans[0], h, n1, &rule)?;
-    let c2 = conditional_matrix(&plans[1], h, n2, &rule)?;
-    // Fold the weights into C1's rows, then pmf = C1^T C2.
-    for (row, &wq) in c1.chunks_exact_mut(n1).zip(w) {
-        for v in row.iter_mut() {
-            *v *= wq;
-        }
-    }
-    let q = rule.len();
     let mut pmf = vec![0.0_f64; n1 * n2];
-    // SAFETY: shapes are (q x n1)^T . (q x n2) -> (n1 x n2), all buffers
-    // sized exactly and non-overlapping; strides describe row-major
-    // storage with C1 read transposed.
-    unsafe {
-        matrixmultiply::dgemm(
-            n1,
-            q,
-            n2,
-            1.0,
-            c1.as_ptr(),
-            1,
-            n1 as isize,
-            c2.as_ptr(),
-            n2 as isize,
-            1,
-            0.0,
-            pmf.as_mut_ptr(),
-            n2 as isize,
-            1,
-        );
+    match (config.coupling, &rolled_plan) {
+        (Coupling::Homer, Some(rolled_plan)) => {
+            // Each bucket of the rolled row at the pair of its allocations,
+            // deposited linearly on each axis.
+            let n_r = grid_length_for(rolled_plan.support(), h);
+            let base = marginal_pmf(rolled_plan, h, n_r);
+            let inv_h = 1.0 / h;
+            let mut row1 = vec![0.0_f64; n1];
+            let mut row2 = vec![0.0_f64; n2];
+            for (i, &p) in base.iter().enumerate() {
+                if p == 0.0 {
+                    continue;
+                }
+                let x = i as f64 * h;
+                row1.iter_mut().for_each(|v| *v = 0.0);
+                row2.iter_mut().for_each(|v| *v = 0.0);
+                deposit(&mut row1, shares[0] * x, 1.0, inv_h);
+                deposit(&mut row2, shares[1] * x, 1.0, inv_h);
+                for (a, &pa) in row1.iter().enumerate() {
+                    if pa == 0.0 {
+                        continue;
+                    }
+                    for (b, &pb) in row2.iter().enumerate() {
+                        if pb != 0.0 {
+                            pmf[a * n2 + b] += p * pa * pb;
+                        }
+                    }
+                }
+            }
+        }
+        (Coupling::Comonotone, _) => {
+            // Exact: the merged breakpoints of the two bucketed marginals.
+            let m1 = marginal_pmf(&plans[0], h, n1);
+            let m2 = marginal_pmf(&plans[1], h, n2);
+            comonotone_merge(&[&m1, &m2], |idx, mass| pmf[idx[0] * n2 + idx[1]] += mass);
+        }
+        _ => {
+            let mut c1 = conditional_matrix(&plans[0], h, n1, &rule)?;
+            let c2 = conditional_matrix(&plans[1], h, n2, &rule)?;
+            // Fold the weights into C1's rows, then pmf = C1^T C2.
+            for (row, &wq) in c1.chunks_exact_mut(n1).zip(w) {
+                for v in row.iter_mut() {
+                    *v *= wq;
+                }
+            }
+            let q = rule.len();
+            // SAFETY: shapes are (q x n1)^T . (q x n2) -> (n1 x n2), all
+            // buffers sized exactly and non-overlapping; strides describe
+            // row-major storage with C1 read transposed.
+            unsafe {
+                matrixmultiply::dgemm(
+                    n1,
+                    q,
+                    n2,
+                    1.0,
+                    c1.as_ptr(),
+                    1,
+                    n1 as isize,
+                    c2.as_ptr(),
+                    n2 as isize,
+                    1,
+                    0.0,
+                    pmf.as_mut_ptr(),
+                    n2 as isize,
+                    1,
+                );
+            }
+        }
     }
 
     // Moments of the returned pmf.
@@ -792,6 +1025,7 @@ pub fn joint_two_units(units: [UnitSpec; 2], config: &JointConfig) -> Result<Joi
     };
     let meta = JointMeta {
         bucket_size: h,
+        coupling: config.coupling,
         z_nodes: config.z_nodes,
         z_rule: config.z_rule,
         z_strata: rule.len(),

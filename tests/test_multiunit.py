@@ -633,6 +633,184 @@ def test_two_point_event_matches_the_article(multi):
 
 
 # ---------------------------------------------------------------------------
+# [coupling] spec test 25: the coupling rules (2.8.0).
+
+def comonotone_by_inverse_cdf(marginals, steps=1_000_000):
+    """The comonotone sum of bucketed marginals by inverse cdf at the midpoints
+    of a fine uniform grid: an independent check of the merged breakpoints."""
+    u = (np.arange(steps) + 0.5) / steps
+    total = np.zeros(sum(m.size - 1 for m in marginals) + 1)
+    index = sum(np.searchsorted(np.cumsum(m), u) for m in marginals)
+    np.add.at(total, np.minimum(index, total.size - 1), 1.0 / steps)
+    return total
+
+
+def homer_rows(terms=False):
+    rows = []
+    for event, (personal, commercial) in HOMER.items():
+        rows.append((f"e{event}", "P", HOMER_RATES[event], *personal))
+        rows.append((f"e{event}", "C", HOMER_RATES[event], *commercial))
+    return rows
+
+
+HOMER_TERMS = ["unit P 2000 xs 100 occurrence net of 50% po 1000 xs 500", "unit C 1500 xs 0"]
+
+
+def test_coupling_independent_is_the_convolution(multi):
+    lam = 0.03
+    rows = [("e", "a", lam, *U1), ("e", "b", lam, *U2)]
+    views, meta = run_multi(multi, rows, bucket_size=H, views=("ground_up",), coupling="independent")
+    expected = lam * np.convolve(direct_marginal(U1, N1), direct_marginal(U2, N2))
+    assert meta.coupling == "independent"
+    assert np.abs(views["ground_up"] - expected).max() < 1e-12 * lam
+    pmf, _, _, j_meta = multi.joint(U1, U2, bucket_size=H, n1=N1, n2=N2, coupling="independent")
+    assert j_meta.coupling == "independent" and j_meta.copula_normal_correlation == 0.0
+    assert np.abs(pmf - np.outer(pmf.sum(axis=1), pmf.sum(axis=0))).max() < 1e-15
+    assert np.abs(pmf.sum(axis=1) - direct_marginal(U1, N1)).max() < 1e-13
+
+
+def test_coupling_comonotone_is_exact(multi):
+    # The two-unit joint: marginals exact, total the comonotone sum of the
+    # bucketed marginals, checked by inverse cdf on a fine uniform grid.
+    pmf, _, _, meta = multi.joint(U1, U2, bucket_size=H, n1=N1, n2=N2, coupling="comonotone")
+    assert meta.coupling == "comonotone" and meta.copula_normal_correlation == 1.0
+    m1, m2 = direct_marginal(U1, N1), direct_marginal(U2, N2)
+    assert np.abs(pmf.sum(axis=1) - m1).max() < 1e-12
+    assert np.abs(pmf.sum(axis=0) - m2).max() < 1e-12
+    idx = np.add.outer(np.arange(N1), np.arange(N2)).ravel()
+    total = np.bincount(idx, weights=pmf.ravel(), minlength=N1 + N2 - 1)
+    assert np.abs(np.cumsum(total) - np.cumsum(comonotone_by_inverse_cdf([m1, m2]))).max() < 2e-6
+    assert math.isclose(total.sum(), 1.0, abs_tol=1e-12)
+    # The joint sits on the comonotone curve: every cell with mass lies where
+    # the two cumulative probabilities overlap, so the mass-weighted count of
+    # cells per row stays near one per breakpoint.
+    assert np.count_nonzero(pmf) < N1 + N2
+    # The views route agrees with the joint's total, and with a two-point and
+    # a comonotone unit in the mix stays exact in mass and marginals.
+    lam = 0.02
+    views, v_meta = run_multi(multi, [("e", "a", lam, *U1), ("e", "b", lam, *U2)], bucket_size=H,
+                              views=("ground_up",), coupling="comonotone")
+    assert np.abs(views["ground_up"] - lam * total).max() < 1e-12 * lam
+    assert v_meta.coupling == "comonotone"
+    rows = [("e", "a", lam, 30.0, 50.0, 30.0, 100.0), ("e", "b", lam, *U2),
+            ("e", "c", lam, 200.0, 0.0, 250.0, 1000.0)]
+    views, v_meta = run_multi(multi, rows, terms=TOWER, bucket_size=H, coupling="comonotone")
+    for view in v_meta.views:
+        assert math.isclose(views[view].sum(), lam, rel_tol=1e-12), view
+        # The comonotone sum keeps the bucketed marginals' means exactly;
+        # those differ from the analytic means by the bucketing of the beta
+        # at h = 10 (cdf differences are exact in probability, not in mean).
+        assert abs(v_meta.view_mean_error[view]) < 1e-3 * abs(v_meta.analytic_view_mean[view]) + 1e-12, view
+    marginal_mean = sum(lam * (direct_marginal(rm.Unit(*r[3:]), rm.grid_length_for(r[6], H)) @ (H * np.arange(rm.grid_length_for(r[6], H))))
+                        for r in rows)
+    assert math.isclose(views["ground_up"] @ (H * np.arange(v_meta.grid_length)), marginal_mean, rel_tol=1e-12)
+
+
+def test_coupling_comonotone_common_shape_is_the_rolled_beta(multi):
+    # Proposition 6, by the exact path: equal normalized moments and loading
+    # one make the total the rolled row's beta (bucket rounding aside).
+    h = 5.0
+    rows = [("e", "p", 0.01, 200.0, 0.0, 250.0, 1000.0), ("e", "q", 0.01, 400.0, 0.0, 500.0, 2000.0)]
+    views, meta = run_multi(multi, rows, bucket_size=h, views=("ground_up",), coupling="comonotone")
+    total = views["ground_up"] / meta.total_rate
+    xs = h * np.arange(total.size)
+    rolled = direct_marginal(rm.Unit(600.0, 0.0, 750.0, 3000.0), total.size, h)
+    mean_t, sd_t, q_t = moments(xs, total)
+    mean_r, sd_r, q_r = moments(xs, rolled)
+    assert math.isclose(mean_t, 600.0, rel_tol=1e-3)  # the betas' bucketing at h = 5
+    assert math.isclose(sd_t, sd_r, rel_tol=1e-3) and math.isclose(q_t, q_r, rel_tol=5e-3)
+    # The comonotone sum of the bucketed marginals is coarser than the
+    # bucketing of the rolled beta where both U-shaped units pile mass at
+    # the origin (both in bucket 0 lands at 0, not spread over 0 and 1): a
+    # bucketing effect of order h in the first cells, 1.6e-2 here.
+    assert np.abs(np.cumsum(total) - np.cumsum(rolled)).max() < 2e-2
+
+
+def test_coupling_comonotone_matches_the_article(multi):
+    # The multi-unit article's `tbl-couplings`: case A under loading one,
+    # built there on 4,096 midpoint nodes with each unit's whole sd on the
+    # factor; the exact path agrees to that rule's error.
+    a1, a2 = rm.Unit(200.0, 0.0, 250.0, 1000.0), rm.Unit(500.0, 0.0, 500.0, 2000.0)
+    article = rm.secondary_two_units([a1, a2], H, N1, N2, n_z=4096, z_rule="midpoint")
+    pmf, _, _, _ = multi.joint(U1, U2, bucket_size=H, n1=N1, n2=N2, coupling="comonotone")
+    xs = H * np.arange(N1 + N2 - 1)
+    idx = np.add.outer(np.arange(N1), np.arange(N2)).ravel()
+    total = np.bincount(idx, weights=pmf.ravel(), minlength=N1 + N2 - 1)
+    mean_a, sd_a, q_a = moments(*article.sum_distribution())
+    mean_t, sd_t, q_t = moments(xs, total)
+    assert math.isclose(mean_t, mean_a, rel_tol=1e-3)
+    assert math.isclose(sd_t, sd_a, rel_tol=1e-3) and math.isclose(q_t, q_a, rel_tol=5e-3)
+
+
+def test_coupling_homer_is_the_rolled_table(multi):
+    rows = homer_rows()
+    views, meta = run_multi(multi, rows, terms=HOMER_TERMS, bucket_size=H, coupling="homer")
+    assert meta.coupling == "homer" and meta.homer_excess_mean is not None
+    expected = np.zeros(meta.grid_length)
+    gross = np.zeros(meta.grid_length)
+    excess = 0.0
+    terms = {t.unit_id: t for t in map(parse_terms_line, HOMER_TERMS)}
+    for event, (personal, commercial) in HOMER.items():
+        lam = HOMER_RATES[event]
+        rolled = rm.rolled_unit([rm.Unit(*personal), rm.Unit(*commercial)])
+        base = rm.marginal_pmf(rm.prepare_unit(rolled, "r"), H, rm.grid_length_for(rolled.max_loss, H))
+        expected[:base.size] += lam * base
+        shares = [personal[0] / rolled.mean_loss, commercial[0] / rolled.mean_loss]
+        for i, p in enumerate(base):
+            x = H * i
+            value = sum(float(terms[u].view("gross", s * x)) for u, s in zip("PC", shares))
+            rm._deposit(gross, value, lam * p, 1.0 / H)
+            excess += lam * p * sum(max(s * x - m, 0.0) for s, m in zip(shares, (personal[3], commercial[3])))
+    assert np.abs(views["ground_up"] - expected).max() < 1e-12 * meta.total_rate
+    assert np.abs(views["gross"] - gross).max() < 1e-12 * meta.total_rate
+    # The allocations sum to the rolled loss, so the ground-up mean is the
+    # rolled row's to the bucketing of its beta by cdf differences (3e-4 at
+    # h = 10); the other views reconcile to the scaled layer means of the
+    # rolled row to the same bucketing tolerance.
+    assert abs(meta.view_mean_error["ground_up"]) < 1e-3 * meta.analytic_aal
+    for view in ("gross", "ceded", "net"):
+        assert abs(meta.view_mean_error[view]) < 2e-2 * abs(meta.analytic_view_mean[view]), view
+    # The published rule allocates beyond the exposures on this table (event
+    # 1's commercial line holds 40% of the mean and 25% of the exposure).
+    assert meta.homer_excess_mean > 0.0
+    assert math.isclose(meta.homer_excess_mean, excess, rel_tol=2e-2)
+    # The one-row survival grid of the rolled table agrees to its
+    # interpolation tolerance.
+    import eltq
+
+    rolled_rows = [rm.rolled_unit([rm.Unit(*p), rm.Unit(*c)]) for p, c in HOMER.values()]
+    _, secondary, _ = eltq.quantize_arrays(
+        np.array(list(HOMER_RATES.values())), np.array([u.max_loss for u in rolled_rows]),
+        np.array([u.mean_loss for u in rolled_rows]), np.array([u.sd_indep for u in rolled_rows]),
+        np.array([u.sd_corr for u in rolled_rows]), bucket_size=H, grid_length=meta.grid_length)
+    assert np.abs(views["ground_up"] - secondary).max() < 1e-6 * meta.total_rate
+    # The two-unit joint under homer: the marginal of unit k is the rolled
+    # row scaled by s_k, and a grid short of s_k M_R is refused.
+    p1, c1 = HOMER[1]
+    rolled = rm.rolled_unit([rm.Unit(*p1), rm.Unit(*c1)])
+    n_c = rm.grid_length_for(c1[0] / rolled.mean_loss * rolled.max_loss, H)
+    with pytest.raises(multi.overflow_error):
+        multi.joint(p1, c1, bucket_size=H, n1=301, n2=101, coupling="homer")
+    pmf, x1, x2, j_meta = multi.joint(p1, c1, bucket_size=H, n1=301, n2=n_c, coupling="homer")
+    assert j_meta.coupling == "homer" and math.isclose(pmf.sum(), 1.0, abs_tol=1e-12)
+    # Means to the bucketing of the rolled row (its allocation is deposited
+    # mean-exactly, the rolled row itself by cdf differences).
+    assert math.isclose(pmf.sum(axis=1) @ x1, p1[0], rel_tol=1e-3)
+    assert math.isclose(pmf.sum(axis=0) @ x2, c1[0], rel_tol=1e-3)
+    assert x2[np.nonzero(pmf.sum(axis=0))[0][-1]] > c1[3]  # allocated beyond the exposure
+
+
+def test_coupling_errors_and_echo(multi):
+    rows = [("e", "a", 0.01, *U1), ("e", "b", 0.01, *U2)]
+    with pytest.raises(multi.base_error):
+        run_multi(multi, rows, bucket_size=H, coupling="gumbel")
+    with pytest.raises(multi.base_error):
+        multi.joint(U1, U2, bucket_size=H, n1=N1, n2=N2, coupling="gumbel")
+    _, meta = run_multi(multi, rows, bucket_size=H)
+    assert meta.coupling == "burke" and meta.homer_excess_mean is None
+
+
+# ---------------------------------------------------------------------------
 # [one-unit] spec test 27: one-unit events leave the mixture (2.7.0).
 
 ONE_UNIT_ROWS = {

@@ -102,4 +102,6 @@ pub enum Error {
     NoViews,
     #[error("unknown convolution mode {0:?} (expected auto, direct, or fft)")]
     BadConvolution(String),
+    #[error("unknown coupling {0:?} (expected burke, comonotone, independent, or homer)")]
+    BadCoupling(String),
 }

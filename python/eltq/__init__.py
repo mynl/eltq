@@ -36,7 +36,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 try:
     from eltq._eltq import (
@@ -721,7 +721,7 @@ def _factorize(values):
 
 def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_length, views,
                     z_nodes, z_rule, normalize, variance_policy, clamp_factor, threads,
-                    chunk_rows, roll_up_diagnostic, convolution):
+                    chunk_rows, roll_up_diagnostic, convolution, coupling):
     """Run the Rust engine on factorized identifiers; build ``MultiMeta``."""
     from eltq.terms import check_grid_alignment
 
@@ -747,7 +747,7 @@ def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_leng
         grid_length=grid_length, z_nodes=int(z_nodes), z_rule=z_rule,
         views=list(views), normalize=normalize, variance_policy=variance_policy,
         clamp_factor=clamp_factor, threads=threads, chunk_rows=chunk_rows,
-        roll_up_diagnostic=roll_up_diagnostic, convolution=convolution,
+        roll_up_diagnostic=roll_up_diagnostic, convolution=convolution, coupling=coupling,
     )
     event_labels = np.asarray(event_id)
     unit_labels = np.asarray(unit_id)
@@ -794,6 +794,7 @@ def multiunit_views(
     chunk_rows=None,
     roll_up_diagnostic=False,
     convolution="auto",
+    coupling="burke",
 ):
     """Total event severity by view for a multi-unit ELT; return ``(views, meta)``.
 
@@ -862,6 +863,18 @@ def multiunit_views(
     convolution : {"auto", "direct", "fft"}, default "auto"
         How units are convolved across an event on the Rust backend: by
         estimated cost, or forced. Ignored by the reference backend.
+    coupling : {"burke", "comonotone", "independent", "homer"}, default "burke"
+        The coupling rule of spec section 4A, applied to every event.
+        ``burke``: the loading ``sd_corr / hypot(sd_indep, sd_corr)`` on the
+        common factor (Burke 2016). ``comonotone``: every loading one, one
+        uniform per occurrence, computed exactly as the comonotone sum of the
+        bucketed view marginals. ``independent``: every loading zero.
+        ``homer``: Homer and Li 2017, the event's rows rolled into one and
+        the rolled loss allocated pro rata to the means, uncapped as
+        published (a unit can be allocated more than its exposed value;
+        ``meta.homer_excess_mean`` reports the expected excess), the rolled
+        row bucketed directly and pushed through the composed allocation map
+        per view. Echoed as ``meta.coupling``.
 
     Returns
     -------
@@ -884,6 +897,7 @@ def multiunit_views(
             normalize=normalize, variance_policy=variance_policy,
             clamp_factor=clamp_factor, threads=threads, chunk_rows=chunk_rows,
             roll_up_diagnostic=roll_up_diagnostic, convolution=convolution,
+            coupling=coupling,
         )
     return _via_reference(
         lambda module: module.multiunit_views_reference,
@@ -891,7 +905,7 @@ def multiunit_views(
         terms=terms, bucket_size=bucket_size, grid_length=grid_length,
         views=views, z_nodes=z_nodes, z_rule=z_rule, normalize=normalize,
         variance_policy=variance_policy, clamp_factor=clamp_factor,
-        roll_up_diagnostic=roll_up_diagnostic,
+        roll_up_diagnostic=roll_up_diagnostic, coupling=coupling,
     )
 
 
@@ -947,6 +961,7 @@ def joint_two_units(
     z_rule="stratified",
     variance_policy="bernoulli",
     clamp_factor=0.999,
+    coupling="burke",
 ):
     """Exact bucketed bivariate pmf of one event across two units.
 
@@ -960,7 +975,10 @@ def joint_two_units(
     ``z_nodes`` midpoint or Gauss-Hermite nodes, as ``multiunit_views``. A unit whose
     variance is inadmissible follows ``variance_policy`` as in
     ``multiunit_views`` (``bernoulli``, the deprecated ``clamp``, ``error``
-    or ``atom``).
+    or ``atom``), and ``coupling`` selects the rule as there; under
+    ``comonotone`` and ``homer`` the joint is exact with no factor rule
+    (under ``homer`` a unit's grid must reach its share of the rolled
+    exposure, ``s_k M_R``).
     """
     if _rust_joint_two_units is not None:
         _reference_multiunit().warn_if_clamp(variance_policy)
@@ -968,13 +986,13 @@ def joint_two_units(
             tuple(float(v) for v in unit1), tuple(float(v) for v in unit2),
             bucket_size=float(bucket_size), n1=int(n1), n2=int(n2),
             z_nodes=int(z_nodes), z_rule=z_rule, variance_policy=variance_policy,
-            clamp_factor=clamp_factor,
+            clamp_factor=clamp_factor, coupling=coupling,
         )
         meta_dict["notes"] = tuple(tuple(notes) for notes in meta_dict["notes"])
         return pmf, x1, x2, JointMeta(**meta_dict)
     result = _via_reference(
         lambda module: module.secondary_two_units,
         [unit1, unit2], bucket_size, n1, n2, n_z=z_nodes, z_rule=z_rule,
-        variance_policy=variance_policy, clamp_factor=clamp_factor,
+        variance_policy=variance_policy, clamp_factor=clamp_factor, coupling=coupling,
     )
     return result.pmf, result.x1, result.x2, result.meta

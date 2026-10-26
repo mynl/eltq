@@ -95,6 +95,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [bernoulli] inadmissible unit rows are two-point units given the shared factor on the multi-unit route; the clamp deprecated there | 2.5.0 | done |
 | [z-rule] the stratified factor rule with a tail ladder is the default: exact marginals, the event total's tail within 7e-3; the bivariate normal in the engine; the convergence study with tail metrics | 2.6.0 | done |
 | [one-unit] events with one contributing unit bucketed directly, outside the mixture; `one_unit_events` | 2.7.0 | done |
+| [coupling] `coupling=` burke, comonotone, independent, homer; the comonotone and Homer paths exact with no factor rule; the Homer allocation uncapped with `homer_excess_mean` | 2.8.0 | done |
 
 ## Layout
 
@@ -275,12 +276,13 @@ views, meta = eltq.multiunit_views(
     *, terms, bucket_size, grid_length=None,
     views=("ground_up", "gross", "ceded", "net"),
     z_nodes=32, z_rule="stratified", normalize=False,
-    variance_policy="bernoulli", clamp_factor=0.999, roll_up_diagnostic=False)
+    variance_policy="bernoulli", clamp_factor=0.999, roll_up_diagnostic=False,
+    coupling="burke")   # or comonotone, independent, homer
 # views: dict view -> rate-weighted array on the grid i * h; meta: MultiMeta
 
 pmf, x1, x2, meta = eltq.joint_two_units(
     (mu1, sd_i1, sd_c1, M1), (mu2, sd_i2, sd_c2, M2),
-    *, bucket_size, n1, n2, z_nodes=32, z_rule="stratified")
+    *, bucket_size, n1, n2, z_nodes=32, z_rule="stratified", coupling="burke")
 ```
 
 Rows of one event must be contiguous with one row per unit and a constant

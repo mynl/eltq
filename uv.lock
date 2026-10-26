@@ -21,7 +21,7 @@ wheels = [
 
 [[package]]
 name = "eltq"
-version = "2.7.0"
+version = "2.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
