@@ -74,7 +74,7 @@ from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, check_grid_alignmen
 
 VARIANCE_POLICIES = ("bernoulli", "clamp", "error", "drop", "atom")
 Z_RULES = ("midpoint", "gauss_hermite", "stratified")
-COUPLINGS = ("burke", "comonotone", "independent", "homer")
+COUPLINGS = ("burke", "comonotone", "independent", "homer", "matched")
 
 CLAMP_DEPRECATION = (
     "the clamp variance policy on the multi-unit route is deprecated from 2.5.0 "
@@ -231,8 +231,8 @@ def couple(prep: _Prepped, coupling: str) -> _Prepped:
     and ``homer`` (which rolls the event up instead) leave the unit alone."""
     if coupling not in COUPLINGS:
         raise EltqError(f"unknown coupling {coupling!r}; expected one of {COUPLINGS}")
-    if coupling in ("burke", "homer") or prep.kind in (_ATOM, _DROP):
-        return prep
+    if coupling in ("burke", "homer", "matched") or prep.kind in (_ATOM, _DROP):
+        return prep  # matched: the scale is found per event (matched_scale)
     out = dataclasses.replace(prep, notes=list(prep.notes))
     if coupling == "comonotone":
         if out.kind == _BETA:
@@ -243,6 +243,82 @@ def couple(prep: _Prepped, coupling: str) -> _Prepped:
             out.kind = _BETA
         out.w_corr, out.w_indep = 0.0, 1.0
     return out
+
+
+def with_loading(prep: _Prepped, w: float) -> _Prepped:
+    """The unit at loading ``w`` on the common factor, the kind following
+    the loading for beta units."""
+    if prep.kind not in (_BETA, _COMONOTONE, _TWO_POINT):
+        return prep
+    w = min(max(w, 0.0), 1.0)
+    out = dataclasses.replace(prep, notes=list(prep.notes), w_corr=w, w_indep=math.sqrt((1.0 - w) * (1.0 + w)))
+    if out.kind != _TWO_POINT:
+        out.kind = _COMONOTONE if w >= 1.0 else _BETA
+    return out
+
+
+def roll_up_sd(units) -> float:
+    """The roll-up convention's sd of the event total, ``sqrt(sum sd_indep^2)
+    + sum sd_corr``, the target of the ``matched`` coupling."""
+    r = rolled_unit(units)
+    return r.sd_indep + r.sd_corr
+
+
+def total_variance(preps, bucket_size: float, rule: FactorRule) -> float:
+    """Variance of the event total of the bucketed conditional laws under the
+    rule from the conditional means and variances alone, the units
+    independent given the node or stratum."""
+    q = len(rule)
+    cond_mean = np.zeros(q)
+    cond_var = np.zeros(q)
+    mean = 0.0
+    for prep in preps:
+        n = grid_length_for(prep.support, bucket_size)
+        unit_rule = rule if prep.depends_on_factor else FactorRule.single()
+        rows = conditional_pmfs(prep, bucket_size, n, unit_rule)
+        if rows.shape[0] == 1:
+            rows = np.broadcast_to(rows, (q, n))
+        x = bucket_size * np.arange(n)
+        m1 = rows @ x
+        m2 = rows @ x**2
+        cond_mean += m1
+        cond_var += np.maximum(m2 - m1 * m1, 0.0)
+        mean += float(rule.weights @ m1)
+    second = float(rule.weights @ (cond_var + cond_mean**2))
+    return max(second - mean * mean, 0.0)
+
+
+def matched_scale(preps, bucket_size: float, rule: FactorRule, sd_target: float) -> dict:
+    """The common scale ``c`` on Burke's loadings with ``Var(sum X_i) =
+    sd_target**2`` by bisection on ``[0, 1 / max w_i]`` to 1e-7 relative in
+    the variance; the saturated end when the target is out of reach, or 0
+    when the independent variance already exceeds it. Returns ``{"scale",
+    "sd_target", "sd_achieved", "saturated"}``."""
+    w_max = max((p.w_corr for p in preps), default=0.0)
+    target = sd_target * sd_target
+
+    def at(c):
+        return total_variance([with_loading(p, c * p.w_corr) for p in preps], bucket_size, rule)
+
+    lo, hi = 0.0, (1.0 / w_max if w_max > 0.0 else 0.0)
+    var_lo = at(lo)
+    if var_lo >= target:
+        return {"scale": 0.0, "sd_target": sd_target, "sd_achieved": math.sqrt(var_lo),
+                "saturated": var_lo > target}
+    var_hi = at(hi)
+    if var_hi < target:
+        return {"scale": hi, "sd_target": sd_target, "sd_achieved": math.sqrt(var_hi), "saturated": True}
+    c, achieved = hi, var_hi
+    for _ in range(60):
+        c = 0.5 * (lo + hi)
+        achieved = at(c)
+        if abs(achieved - target) <= 1e-7 * target:
+            break
+        if achieved < target:
+            lo = c
+        else:
+            hi = c
+    return {"scale": c, "sd_target": sd_target, "sd_achieved": math.sqrt(achieved), "saturated": False}
 
 
 def comonotone_merge(rows, deposit) -> None:
@@ -682,6 +758,10 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratifie
             raise EltqError(f"n{i} must be >= 1, got {n}")
         preps.append(couple(prepare_unit(unit, f"unit {i}", variance_policy, clamp_factor), coupling))
     units = [Unit(*(float(v) for v in u)) for u in units]
+    matched = None
+    if coupling == "matched":
+        matched = matched_scale(preps, h, rule, roll_up_sd(units))
+        preps = [with_loading(p, matched["scale"] * p.w_corr) for p in preps]
     rolled = rolled_unit(units)
     rolled_prep = (prepare_unit(rolled, "rolled", variance_policy, clamp_factor)
                    if coupling == "homer" else None)
@@ -739,6 +819,7 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratifie
     meta = JointMeta(
         bucket_size=h,
         coupling=coupling,
+        matched=matched,
         z_nodes=int(n_z),
         z_rule=z_rule,
         z_strata=len(rule),
@@ -962,13 +1043,16 @@ def multiunit_views_reference(
         Also compute, per event with two or more contributing units, the
         sd and 99th-percentile ratios of the exact ground-up total against
         the rolled single-row beta (the additivity note's diagnostic).
-    coupling : {"burke", "comonotone", "independent", "homer"}
+    coupling : {"burke", "comonotone", "independent", "homer", "matched"}
         The coupling rule of spec section 4A, applied to every event.
         ``burke`` and ``independent`` set the loadings and run the factor
         rule; ``comonotone`` is the comonotone sum of the bucketed view
         marginals, exact, and ``homer`` the rolled row bucketed directly and
         pushed through the composed allocation map per view (uncapped, as
-        published), both with no factor rule.
+        published), both with no factor rule; ``matched`` scales Burke's
+        loadings per event so that the total's variance meets the roll-up
+        convention's ``(sd_I,R + sd_C,R)^2``, saturating at the largest
+        loading one (``meta.matched_shortfall``).
     pair : tuple of two unit ids, optional
         Also return the rate-weighted joint occurrence severity of the two
         units for the first view in ``views`` (spec section 4A): an event
@@ -1135,6 +1219,7 @@ def multiunit_views_reference(
     valid_events = 0
     one_unit_events = 0
     excess_terms: list[float] = []
+    matched_shortfall: list[dict] = []
     default_terms: dict[str, UnitTerms] = {}
     for e, (start, end) in enumerate(ranges):
         if not event_live[e]:
@@ -1144,6 +1229,15 @@ def multiunit_views_reference(
         lam = rates[start]
         rate_terms.append(lam)
         live = [(j, couple(preps[j], coupling)) for j in range(start, end) if preps[j] is not None]
+        if coupling == "matched" and len(live) >= 2:
+            # Burke's loadings scaled per event so that the total's variance
+            # meets the roll-up convention's.
+            specs = [Unit(columns["mean_loss"][j], columns["sd_indep"][j],
+                          columns["sd_corr"][j], columns["max_loss"][j]) for j, _ in live]
+            scale = matched_scale([p for _, p in live], h, rule, roll_up_sd(specs))
+            if scale["saturated"]:
+                matched_shortfall.append({"event_id": eid, **{k: v for k, v in scale.items() if k != "saturated"}})
+            live = [(j, with_loading(p, scale["scale"] * p.w_corr)) for j, p in live]
         aal_terms.append(lam * math.fsum(p.mean_loss for _, p in live))
         conds = []
         unit_terms_list = []
@@ -1252,6 +1346,7 @@ def multiunit_views_reference(
         valid_events=valid_events,
         one_unit_events=one_unit_events,
         homer_excess_mean=math.fsum(excess_terms) if coupling == "homer" else None,
+        matched_shortfall=matched_shortfall if coupling == "matched" else None,
         unit_ids=tuple(unit_order),
         terms_echo={uid: t.text() for uid, t in term_table.items()},
         unused_terms=tuple(uid for uid in term_table if uid not in unit_order),

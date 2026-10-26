@@ -41,9 +41,9 @@ use crate::convolve::{FftCache, convolve_direct, fft_cost, fft_size};
 use crate::diagnostics::{Category, Diagnostics, MAX_EXAMPLES};
 use crate::error::Error;
 use crate::multiunit::{
-    Coupling, LayerMeans, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, comonotone_merge,
-    comonotone_sum, conditional_matrix, grid_length_for, homer_excess, homer_view_values, marginal_pmf, prepare_unit,
-    rolled_spec, terms_on_rolled,
+    Coupling, LayerMeans, MatchedScale, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, comonotone_merge,
+    comonotone_sum, conditional_matrix, grid_length_for, homer_excess, homer_view_values, marginal_pmf, matched_scale,
+    prepare_unit, roll_up_sd, rolled_spec, terms_on_rolled,
 };
 use crate::quadrature::{FactorRule, ZRule};
 use crate::sum::{Neumaier, grid_moment, sum};
@@ -210,6 +210,14 @@ impl MultiConfig {
     }
 }
 
+/// One event the `matched` coupling could not match.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedEntry {
+    /// First row of the event (callers translate to the event id).
+    pub event_row: usize,
+    pub scale: MatchedScale,
+}
+
 /// Exact ground-up total versus the rolled single-row beta for one event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RollUpEntry {
@@ -254,6 +262,9 @@ pub struct MultiMeta {
     /// Under the `homer` coupling, the rate-weighted expected allocation
     /// over the units' exposures, `sum_j lambda_j P(sum_k (s_k X_R - M_k)^+)`.
     pub homer_excess_mean: Option<f64>,
+    /// Under the `matched` coupling, the events whose target variance was
+    /// out of reach, with the scale and standard deviations at saturation.
+    pub matched_shortfall: Option<Vec<MatchedEntry>>,
     pub diagnostics: Diagnostics,
     pub roll_up: Option<Vec<RollUpEntry>>,
     /// Largest |mass - 1| of any per-event view pmf (conditional exactness).
@@ -319,6 +330,7 @@ struct ChunkPartial {
     pair_events: usize,
     moments: Vec<Vec<f64>>,
     moment_identity: f64,
+    matched_shortfall: Vec<MatchedEntry>,
 }
 
 /// Row-set ids: the distinct transformed rows a unit can need.
@@ -1150,6 +1162,7 @@ pub fn multiunit_views(
             pair_events: 0,
             moments: if config.first_moments { (0..terms.len()).map(|_| vec![0.0; n]).collect() } else { Vec::new() },
             moment_identity: 0.0,
+            matched_shortfall: Vec::new(),
         };
         let mut rate_acc = Neumaier::default();
         let mut pair_rate_acc = Neumaier::default();
@@ -1201,9 +1214,30 @@ pub fn multiunit_views(
             // unit carries its marginal as a single row (comonotone, merged
             // below) or the event is rolled up (homer, below).
             let exact_path = !one_unit && matches!(config.coupling, Coupling::Comonotone | Coupling::Homer);
+            // The matched coupling: Burke's loadings scaled per event so that
+            // the total's variance meets the roll-up convention's.
+            let matched = if config.coupling == Coupling::Matched && !one_unit {
+                let plans: Vec<UnitPlan> =
+                    live.iter().map(|&row| UnitPlan::from_row(&classes[row], &input.spec(row))).collect();
+                let specs: Vec<UnitSpec> = live.iter().map(|&row| input.spec(row)).collect();
+                let scale = matched_scale(&plans, h, &rule, roll_up_sd(&specs))?;
+                if scale.saturated {
+                    partial.matched_shortfall.push(MatchedEntry {
+                        event_row: start,
+                        scale: scale.clone(),
+                    });
+                }
+                Some(scale.scale)
+            } else {
+                None
+            };
             for &row in &live {
                 let spec = input.spec(row);
-                let plan = UnitPlan::from_row(&classes[row], &spec).couple(config.coupling);
+                let mut plan = UnitPlan::from_row(&classes[row], &spec).couple(config.coupling);
+                if let Some(c) = matched {
+                    let w = c * plan.w_corr;
+                    plan = plan.with_loading(w);
+                }
                 let n_unit = grid_length_for(plan.support(), h);
                 let (base, rows) = if one_unit || exact_path {
                     (marginal_pmf(&plan, h, n_unit), 1)
@@ -1478,6 +1512,7 @@ pub fn multiunit_views(
     let mut moments: Vec<Vec<f64>> =
         if config.first_moments { (0..terms.len()).map(|_| vec![0.0; n]).collect() } else { Vec::new() };
     let mut moment_identity = 0.0_f64;
+    let mut matched_shortfall: Vec<MatchedEntry> = Vec::new();
     let mut fold = |partials: Vec<Result<ChunkPartial, Error>>| -> Result<(), Error> {
         for partial in partials {
             let partial = partial?;
@@ -1510,6 +1545,7 @@ pub fn multiunit_views(
                 }
             }
             moment_identity = moment_identity.max(partial.moment_identity);
+            matched_shortfall.extend(partial.matched_shortfall);
         }
         Ok(())
     };
@@ -1587,6 +1623,7 @@ pub fn multiunit_views(
         valid_events,
         one_unit_events,
         homer_excess_mean: if config.coupling == Coupling::Homer { Some(homer_excess.value()) } else { None },
+        matched_shortfall: if config.coupling == Coupling::Matched { Some(matched_shortfall) } else { None },
         diagnostics,
         roll_up: if config.roll_up_diagnostic { Some(roll_up) } else { None },
         max_mass_error,

@@ -640,3 +640,31 @@ parked, had already been closed as superseded in `dev/done/` on 2026-10-25; noth
   report). Adding it to the `dev` group so that CI runs them is Steve's call.
 - `notebooks/multiunit_homer_example.ipynb`: Homer's Table 11 end to end; its last cell needs the
   aggregate package.
+
+### [matched] and [parity] 2.10.0, 2026-10-26
+
+- `coupling="matched"` on both entry points and both backends: `matched_scale` brackets $c$ on
+  $[0, 1/\max_i w_i]$ and bisects to $10^{-7}$ relative in the variance, the variance from
+  `total_variance` (conditional means and variances of the bucketed rows at the rule's nodes or
+  strata, no convolution); `UnitPlan::with_loading` applies the scaled loading, a beta at loading
+  one taking the comonotone kind. Saturation (the target beyond the largest loading at one, every
+  loading zero, or the independent variance already above the target) is reported per event in
+  `MultiMeta.matched_shortfall` and for the joint in `JointMeta.matched`. Each evaluation rebuilds
+  every unit's conditional matrix at the trial loading, so the coupling costs about thirty times
+  the default per event; it is the optional step and the docstring says so.
+- The article's `tbl-matched`: the two-unit joint under `matched` reproduces the article's root
+  $c$ (its own 64-node Gauss-Hermite construction, `brentq` to $10^{-6}$) within $5\times10^{-3}$
+  on case A and Homer's events 1 and 3, the difference of the rules; event 2 saturates on both.
+  Test 25's `matched` clause holds at $10^{-6}$ relative in the variance.
+- [parity]: README milestone rows and API block per bump; `benchmarks/run_multiunit.py` gains the
+  midpoint, `comonotone` and `homer` runs; the rerun is `benchmarks/report-2.10.0.md`: 8.4 s for
+  all four views under the default against 2.0 s (midpoint 32) and 1.9 s (Gauss-Hermite 32),
+  0.38 s for the exact paths, 14.4x on 16 cores. **Acceptance not met on speed:** the plan allows
+  the 1.11.0 figures scaled by $Q$ (2.4 times for 76 strata); the default is 4.3 times, so 1.8
+  times over the line, the bivariate normal construction being the excess. Options for Steve: a
+  cheaper default ladder (ratio 2, 54 strata, tails $1.2\times10^{-2}$), `z_nodes=8` (52 strata,
+  5.6 s, the same tails), the node rules for portfolios with loadings well below one, or a
+  [ferocious] follow-up on the construction (the Φ₂ table per unit is the cost; a coarser
+  Gauss-Legendre order for $|\rho| < 0.925$ and skipping edges where the unit's cdf is 0 or 1 are
+  the obvious moves). Every other acceptance item holds: tests 25 to 29 on both backends, exact
+  marginals at loading one, determinism bitwise, no negative weight, the one-row route untouched.

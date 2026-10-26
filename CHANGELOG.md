@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.10.0] - 2026-10-26
+
+### Added
+
+- [matched] `coupling="matched"` on `multiunit_views` and `joint_two_units`: Burke's loadings scaled by a common factor per event so that the event total's variance equals the roll-up convention's `(sd_I,R + sd_C,R)^2`, the one alternative loading with a rationale and no published source (spec section 4A). The factor is found by bisection on the variance from the units' conditional moments at the rule's strata, about thirty evaluations per event; where the target is out of reach the largest loading saturates at one and the event is listed in `meta.matched_shortfall` with its scale and the two standard deviations (`meta.matched` on the joint). Spec test 25's `matched` clause on both backends; the multi-unit article's `tbl-matched` reproduced within 5e-3 on the scale, event 2 of Homer and Li saturating as there.
+- [parity] `benchmarks/run_multiunit.py` measures the midpoint rule and the `comonotone` and `homer` paths beside the default; `benchmarks/report-2.10.0.md` is the rerun of the 0.91M unit-row portfolio: all four views in 8.4 s under the stratified default (76 strata), 2.0 s under midpoint 32 and 1.9 s under Gauss-Hermite 32, 0.38 s under the exact `comonotone` and `homer` paths; 14.4x on 16 cores, bitwise identical across thread counts. The default is 1.8 times over the plan's speed line (the 1.11.0 figures scaled by the strata count), the bivariate normal construction being the excess.
+
 ## [2.9.0] - 2026-10-26
 
 ### Added

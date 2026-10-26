@@ -802,6 +802,79 @@ def test_coupling_homer_is_the_rolled_table(multi):
     assert x2[np.nonzero(pmf.sum(axis=0))[0][-1]] > c1[3]  # allocated beyond the exposure
 
 
+def article_total_sd(u1, u2, c, h=H):
+    """The article's ``sd_at`` (chunk `tbl-matched`): the sd of the event total
+    at Burke's loadings scaled by ``c`` (capped at one), on 64 Gauss-Hermite
+    nodes."""
+    from scipy.special import ndtr, ndtri
+
+    def cond(unit, w, n, z):
+        edges = (np.arange(n + 1) - 0.5) * h
+        cdf = article_unit_cdf(unit, edges)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            y = ndtri(np.clip(cdf, 0, 1))
+            out = ndtr((y[None, :] - w * z[:, None]) / math.sqrt(1 - w**2)) if w < 1 \
+                else (y[None, :] >= z[:, None]).astype(float)
+        out[:, 0], out[:, -1] = 0.0, 1.0
+        return np.diff(out, axis=1)
+
+    z, w = np.polynomial.hermite_e.hermegauss(64)
+    w = w / w.sum()
+    loads = [min(c * u[2] / math.hypot(u[1], u[2]), 1.0) for u in (u1, u2)]
+    n1, n2 = int(u1[3] / h) + 1, int(u2[3] / h) + 1
+    joint = (cond(u1, loads[0], n1, z) * w[:, None]).T @ cond(u2, loads[1], n2, z)
+    idx = np.add.outer(np.arange(n1), np.arange(n2)).ravel()
+    total = np.bincount(idx, weights=joint.ravel(), minlength=n1 + n2 - 1)
+    xs = h * np.arange(total.size)
+    mean = total @ xs
+    return math.sqrt(max(total @ xs**2 - mean**2, 0.0))
+
+
+def test_coupling_matched(multi):
+    # Spec test 25, `matched`: the variance of each event total equals the
+    # roll-up convention's (sd_I,R + sd_C,R)^2 within 1e-6 relative, or the
+    # event is reported with its shortfall at saturated loadings; the
+    # multi-unit article's `tbl-matched` (case A and Homer's events) within
+    # the difference of its 64 Gauss-Hermite nodes from the stratified rule.
+    from scipy import optimize
+
+    cases = {"A": (U1, U2), **{f"H{e}": (rm.Unit(*p), rm.Unit(*c)) for e, (p, c) in HOMER.items()}}
+    for name, (a, b) in cases.items():
+        n1, n2 = int(a.max_loss / H) + 1, int(b.max_loss / H) + 1
+        pmf, x1, x2, meta = multi.joint(a, b, bucket_size=H, n1=n1, n2=n2, coupling="matched")
+        assert meta.coupling == "matched" and meta.matched is not None
+        target = math.hypot(a.sd_indep, b.sd_indep) + a.sd_corr + b.sd_corr
+        idx = np.add.outer(np.arange(n1), np.arange(n2)).ravel()
+        total = np.bincount(idx, weights=pmf.ravel(), minlength=n1 + n2 - 1)
+        _, sd, _ = moments(H * np.arange(total.size), total)
+        assert math.isclose(meta.matched["sd_target"], target, rel_tol=1e-12)
+        assert math.isclose(meta.matched["sd_achieved"], sd, rel_tol=1e-9), name
+        w_max = max(a.sd_corr / math.hypot(a.sd_indep, a.sd_corr), b.sd_corr / math.hypot(b.sd_indep, b.sd_corr))
+        if name == "H2":
+            # Event 2: the personal line is a two-point row and the commercial
+            # line nearly comonotone with the factor already; the target is
+            # out of reach and the loadings saturate.
+            assert meta.matched["saturated"] and sd < target
+            assert math.isclose(meta.matched["scale"], 1.0 / w_max, rel_tol=1e-12)
+        else:
+            assert not meta.matched["saturated"]
+            assert math.isclose(sd * sd, target * target, rel_tol=1e-6), name
+            # The article's root by its own construction.
+            c_article = optimize.brentq(lambda c: article_total_sd(tuple(a), tuple(b), c) - target,
+                                        0.0, 1.0 / w_max, xtol=1e-6)
+            assert math.isclose(meta.matched["scale"], c_article, rel_tol=5e-3), (name, c_article)
+    # The views route: the shortfall list names event 2 only, the other
+    # events reconcile in variance, and the per-event scale agrees with the
+    # joint's.
+    rows = homer_rows()
+    views, v_meta = run_multi(multi, rows, bucket_size=H, views=("ground_up",), coupling="matched")
+    assert v_meta.coupling == "matched"
+    assert [e["event_id"] for e in v_meta.matched_shortfall] == ["e2"]
+    assert math.isclose(views["ground_up"].sum(), v_meta.total_rate, rel_tol=1e-12)
+    _, m_burke = run_multi(multi, rows, bucket_size=H, views=("ground_up",))
+    assert m_burke.matched_shortfall is None
+
+
 def test_coupling_errors_and_echo(multi):
     rows = [("e", "a", 0.01, *U1), ("e", "b", 0.01, *U2)]
     with pytest.raises(multi.base_error):

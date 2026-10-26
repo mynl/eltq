@@ -555,6 +555,17 @@ fn joint_two_units<'py>(
     let dict = PyDict::new(py);
     dict.set_item("bucket_size", meta.bucket_size)?;
     dict.set_item("coupling", meta.coupling.as_str())?;
+    match &meta.matched {
+        None => dict.set_item("matched", py.None())?,
+        Some(m) => {
+            let d = PyDict::new(py);
+            d.set_item("scale", m.scale)?;
+            d.set_item("sd_target", m.sd_target)?;
+            d.set_item("sd_achieved", m.sd_achieved)?;
+            d.set_item("saturated", m.saturated)?;
+            dict.set_item("matched", d)?;
+        }
+    }
     dict.set_item("z_nodes", meta.z_nodes)?;
     dict.set_item("z_rule", meta.z_rule.as_str())?;
     dict.set_item("z_strata", meta.z_strata)?;
@@ -717,6 +728,23 @@ fn multiunit_views<'py>(
     dict.set_item("valid_events", meta.valid_events)?;
     dict.set_item("one_unit_events", meta.one_unit_events)?;
     dict.set_item("homer_excess_mean", meta.homer_excess_mean)?;
+    match &meta.matched_shortfall {
+        None => dict.set_item("matched_shortfall", py.None())?,
+        Some(entries) => {
+            let list: Vec<Bound<'py, PyDict>> = entries
+                .iter()
+                .map(|e| {
+                    let d = PyDict::new(py);
+                    d.set_item("event_row", e.event_row)?;
+                    d.set_item("scale", e.scale.scale)?;
+                    d.set_item("sd_target", e.scale.sd_target)?;
+                    d.set_item("sd_achieved", e.scale.sd_achieved)?;
+                    Ok(d)
+                })
+                .collect::<PyResult<_>>()?;
+            dict.set_item("matched_shortfall", list)?;
+        }
+    }
     let diagnostics = PyDict::new(py);
     for (category, issues) in meta.diagnostics.iter_nonzero() {
         let entry = PyDict::new(py);

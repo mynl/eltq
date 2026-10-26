@@ -2003,5 +2003,264 @@
         "label": "quantiles, default rule"
       }
     ]
+  },
+  {
+    "suite": "multiunit",
+    "timestamp": "2026-10-26T14:11:11.792621+00:00",
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.10.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "events": 100000,
+    "units": 10,
+    "rows": 909937,
+    "bucket_size": 40000.0,
+    "runs": {
+      "all4 auto q32": {
+        "seconds": 8.363,
+        "rows_per_s": 108799,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {}
+      },
+      "ground_up only q32": {
+        "seconds": 7.039,
+        "rows_per_s": 129274,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.3988810110276972e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {
+          "views": [
+            "ground_up"
+          ]
+        }
+      },
+      "all4 auto q8": {
+        "seconds": 5.644,
+        "rows_per_s": 161226,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.0880185641326534e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.0004294929595399091,
+        "options": {
+          "z_nodes": 8
+        }
+      },
+      "all4 direct q32": {
+        "seconds": 8.47,
+        "rows_per_s": 107437,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "direct"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {
+          "convolution": "direct"
+        }
+      },
+      "all4 fft q32": {
+        "seconds": 19.419,
+        "rows_per_s": 46859,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 0,
+          "fft_paths": 97926,
+          "convolution": "fft"
+        },
+        "max_view_mean_rel_error": 0.0004294929595393125,
+        "options": {
+          "convolution": "fft"
+        }
+      },
+      "all4 gauss_hermite q32": {
+        "seconds": 1.893,
+        "rows_per_s": 480635,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 2.220446049250313e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.000406774784226861,
+        "options": {
+          "z_rule": "gauss_hermite"
+        }
+      },
+      "all4 midpoint q32": {
+        "seconds": 1.971,
+        "rows_per_s": 461649,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 2.1094237467877974e-15,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00040674972703902423,
+        "options": {
+          "z_rule": "midpoint"
+        }
+      },
+      "all4 comonotone": {
+        "seconds": 0.377,
+        "rows_per_s": 2410901,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 4.440892098500626e-16,
+          "direct_paths": 9945,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295954050566,
+        "options": {
+          "coupling": "comonotone"
+        }
+      },
+      "all4 homer": {
+        "seconds": 0.376,
+        "rows_per_s": 2418390,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 2.6645352591003757e-15,
+          "direct_paths": 9945,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 5.217770811295089e-06,
+        "options": {
+          "coupling": "homer"
+        }
+      },
+      "all4 auto threads=1": {
+        "seconds": 123.644,
+        "rows_per_s": 7359,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {
+          "threads": 1
+        }
+      },
+      "all4 auto threads=2": {
+        "seconds": 63.88,
+        "rows_per_s": 14245,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {
+          "threads": 2
+        }
+      },
+      "all4 auto threads=4": {
+        "seconds": 33.176,
+        "rows_per_s": 27428,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {
+          "threads": 4
+        }
+      },
+      "all4 auto threads=32": {
+        "seconds": 8.615,
+        "rows_per_s": 105626,
+        "grid_length": 877,
+        "valid_rows": 885296,
+        "valid_events": 97926,
+        "engine": {
+          "max_mass_error": 1.4432899320127035e-14,
+          "direct_paths": 97926,
+          "fft_paths": 0,
+          "convolution": "auto"
+        },
+        "max_view_mean_rel_error": 0.00042949295953951134,
+        "options": {
+          "threads": 32
+        }
+      }
+    },
+    "thread_scaling_seconds": {
+      "1": 123.644,
+      "2": 63.88,
+      "4": 33.176,
+      "32": 8.615
+    },
+    "deterministic_across_threads": true,
+    "joint_two_units": {
+      "1001": {
+        "seconds": 0.0162,
+        "mass": 1.0000000000000062
+      },
+      "4001": {
+        "seconds": 0.0623,
+        "mass": 1.0000000000000582
+      }
+    },
+    "peak_rss_mb": 728.3
   }
 ]

@@ -37,7 +37,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.9.0"
+__version__ = "2.10.0"
 
 try:
     from eltq._eltq import (
@@ -778,6 +778,10 @@ def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_leng
     if roll_up is not None:
         for entry in roll_up:
             entry["event_id"] = event_labels[entry.pop("event_row")]
+    matched_shortfall = meta_dict.pop("matched_shortfall")
+    if matched_shortfall is not None:
+        for entry in matched_shortfall:
+            entry["event_id"] = event_labels[entry.pop("event_row")]
     meta = MultiMeta(
         views=tuple(meta_dict.pop("views")),
         unit_ids=tuple(unit_ids),
@@ -785,6 +789,7 @@ def _rust_multiunit(event_id, unit_id, columns, *, terms, bucket_size, grid_leng
         unused_terms=tuple(uid for uid in parsed if uid not in set(unit_ids)),
         diagnostics=diagnostics,
         roll_up=roll_up,
+        matched_shortfall=matched_shortfall,
         **meta_dict,
     )
     del event_uniques
@@ -892,7 +897,7 @@ def multiunit_views(
     convolution : {"auto", "direct", "fft"}, default "auto"
         How units are convolved across an event on the Rust backend: by
         estimated cost, or forced. Ignored by the reference backend.
-    coupling : {"burke", "comonotone", "independent", "homer"}, default "burke"
+    coupling : {"burke", "comonotone", "independent", "homer", "matched"}, default "burke"
         The coupling rule of spec section 4A, applied to every event.
         ``burke``: the loading ``sd_corr / hypot(sd_indep, sd_corr)`` on the
         common factor (Burke 2016). ``comonotone``: every loading one, one
@@ -903,7 +908,13 @@ def multiunit_views(
         published (a unit can be allocated more than its exposed value;
         ``meta.homer_excess_mean`` reports the expected excess), the rolled
         row bucketed directly and pushed through the composed allocation map
-        per view. Echoed as ``meta.coupling``.
+        per view. ``matched``: Burke's loadings scaled by a common factor
+        per event so that the event total's variance equals the roll-up
+        convention's ``(sd_I,R + sd_C,R)^2`` (the one alternative with a
+        rationale; no published source), saturating at the largest loading
+        one, with the events out of reach in ``meta.matched_shortfall``; it
+        costs a bisection of about thirty variance evaluations per event.
+        Echoed as ``meta.coupling``.
 
     Returns
     -------

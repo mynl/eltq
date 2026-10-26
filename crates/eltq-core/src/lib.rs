@@ -46,8 +46,11 @@ pub use config::{
 };
 pub use diagnostics::{Category, Diagnostics, MAX_EXAMPLES, Meta, QuantizeResult, RowIssues};
 pub use error::Error;
-pub use multiunit::{Coupling, JointConfig, JointMeta, JointResult, UnitKind, UnitPlan, UnitSpec, joint_two_units};
+pub use multiunit::{Coupling, JointConfig, JointMeta, JointResult, MatchedScale, UnitKind, UnitPlan, UnitSpec, joint_two_units};
 pub use quadrature::{FactorRule, ZRule, z_quadrature};
 pub use quantize::{Classified, EltInput, classify_rows, quantize};
 pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};
-pub use views::{Convolution, FirstMoments, MultiConfig, MultiInput, MultiMeta, MultiResult, PairResult, RollUpEntry, multiunit_views};
+pub use views::{
+    Convolution, FirstMoments, MatchedEntry, MultiConfig, MultiInput, MultiMeta, MultiResult, PairResult, RollUpEntry,
+    multiunit_views,
+};

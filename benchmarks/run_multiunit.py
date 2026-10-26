@@ -150,6 +150,10 @@ def main() -> None:
         measure("all4 direct q32", convolution="direct")
         measure("all4 fft q32", convolution="fft")
         measure("all4 gauss_hermite q32", z_rule="gauss_hermite")
+        measure("all4 midpoint q32", z_rule="midpoint")
+        # The exact paths of 2.8.0: no factor rule, one row per unit.
+        measure("all4 comonotone", coupling="comonotone")
+        measure("all4 homer", coupling="homer")
 
     # Thread scaling.
     cores = machine_info()["logical_cores"] or 1

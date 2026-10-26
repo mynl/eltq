@@ -97,6 +97,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [one-unit] events with one contributing unit bucketed directly, outside the mixture; `one_unit_events` | 2.7.0 | done |
 | [coupling] `coupling=` burke, comonotone, independent, homer; the comonotone and Homer paths exact with no factor rule; the Homer allocation uncapped with `homer_excess_mean` | 2.8.0 | done |
 | [joint] `occurrence_pair_joint`, `occurrence_unit_first_moment` and `annual_conditional_mean`: the joint aggregate route's inputs and the conditional means by the Mecke identity | 2.9.0 | done |
+| [matched] `coupling="matched"`, Burke's loadings scaled per event to the roll-up convention's variance, with `matched_shortfall`; [parity] the multi-unit benchmark rerun under the stratified default (`benchmarks/report-2.10.0.md`) | 2.10.0 | done |
 
 ## Layout
 
@@ -186,15 +187,17 @@ error each method's time buys, by band of the exceedance rate, and at K = 32
 the quantiles method is wrong by its whole value from the hundred-year band
 on where the survival method is within 1e-5 (`benchmarks/report-2.4.2.md`).
 
-Multi-unit route (`benchmarks/report-1.11.0.md`, same laptop): ~0.91M unit
-rows (100k events x 10 units, typical term sparsity) with all four views at
-Q = 32 in 22.5 s, ground_up only in 15.2 s, Q = 8 in 7.9 s; bitwise identical
-across thread counts (whole-event chunks, default 2048 rows); the two-unit
-joint at reference accuracy (Q = 1001) in 10 ms. These figures are for local
-builds with `target-cpu=native` on that machine. On an AMD Ryzen 9 9950X3D2
-(Zen 5, 16C/32T) the 1M-row headline takes 0.92 s, and the `x86-64-v3` wheel
-matches or beats a native build except on the multi-unit route, where it is
-3% to 9% slower (`dev/done/plan-pypi-release.md`, `benchmarks/report-2.4.2.md`).
+Multi-unit route (`benchmarks/report-2.10.0.md`, the Zen 5 desktop,
+`x86-64-v3` build): ~0.91M unit rows (100k events x 10 units, typical term
+sparsity) with all four views under the stratified default (76 strata) in
+8.4 s, ground_up only in 7.0 s, `z_nodes=8` in 5.6 s; the midpoint and
+Gauss-Hermite rules at Q = 32 in 2.0 s and 1.9 s; the exact `comonotone` and
+`homer` paths in 0.38 s; bitwise identical across thread counts (whole-event
+chunks, default 2048 rows), 14.4x on 16 cores. The stratified default buys
+exact marginals and tails within 7e-3 for 4.3 times the node rules' time
+(`benchmarks/z-convergence-2.6.0.md`). The `x86-64-v3` wheel matches or
+beats a native build except on the multi-unit route, where it is 3% to 9%
+slower (`dev/done/plan-pypi-release.md`, `benchmarks/report-2.4.2.md`).
 
 ## Python API
 

@@ -72,6 +72,11 @@ pub enum Coupling {
     /// Homer and Li 2017, section 3.2.2: the event's rows rolled into one,
     /// its loss allocated pro rata to the means, uncapped as published.
     Homer,
+    /// Burke's loadings scaled by a common factor per event so that the
+    /// event total's variance equals the roll-up convention's `(sd_I,R +
+    /// sd_C,R)^2`; saturated at the largest loading one when the target is
+    /// out of reach (the multi-unit article; no published source).
+    Matched,
 }
 
 impl Coupling {
@@ -81,6 +86,7 @@ impl Coupling {
             "comonotone" => Ok(Coupling::Comonotone),
             "independent" => Ok(Coupling::Independent),
             "homer" => Ok(Coupling::Homer),
+            "matched" => Ok(Coupling::Matched),
             other => Err(Error::BadCoupling(other.to_string())),
         }
     }
@@ -91,6 +97,7 @@ impl Coupling {
             Coupling::Comonotone => "comonotone",
             Coupling::Independent => "independent",
             Coupling::Homer => "homer",
+            Coupling::Matched => "matched",
         }
     }
 }
@@ -161,10 +168,110 @@ impl UnitPlan {
                 }
                 _ => {}
             },
-            Coupling::Burke | Coupling::Homer => {}
+            // Matched: the scale is found per event in the engine
+            // (`matched_scale`) and applied through `with_loading`.
+            Coupling::Burke | Coupling::Homer | Coupling::Matched => {}
         }
         self
     }
+
+    /// The plan at loading `w` on the common factor (`w_indep = sqrt(1 -
+    /// w^2)`), the kind following the loading for beta units.
+    pub fn with_loading(mut self, w: f64) -> UnitPlan {
+        if matches!(self.kind, UnitKind::Beta | UnitKind::Comonotone | UnitKind::TwoPoint) {
+            let w = w.clamp(0.0, 1.0);
+            self.w_corr = w;
+            self.w_indep = ((1.0 - w) * (1.0 + w)).sqrt();
+            if self.kind != UnitKind::TwoPoint {
+                self.kind = if w >= 1.0 { UnitKind::Comonotone } else { UnitKind::Beta };
+            }
+        }
+        self
+    }
+}
+
+/// The roll-up convention's standard deviation of the event total,
+/// `sqrt(sum sd_indep^2) + sum sd_corr` (Homer and Li 2017; Mitchell-Wallace
+/// et al. 2017), the target of the `matched` coupling.
+pub fn roll_up_sd(specs: &[UnitSpec]) -> f64 {
+    let r = rolled_spec(specs);
+    r.sd_indep + r.sd_corr
+}
+
+/// Variance of the event total of the units' bucketed conditional laws under
+/// the rule, from the conditional means and variances alone: `sum_s w_s
+/// (sum_i Var(X_i | s) + (sum_i E[X_i | s])^2) - (sum_i E[X_i])^2`, the units
+/// independent given the node or stratum.
+pub fn total_variance(plans: &[UnitPlan], bucket_size: f64, rule: &FactorRule) -> Result<f64, Error> {
+    let q = rule.len();
+    let mut cond_var = vec![0.0_f64; q];
+    let mut cond_mean = vec![0.0_f64; q];
+    let mut mean = 0.0;
+    for plan in plans {
+        let n = grid_length_for(plan.support(), bucket_size);
+        let unit_rule = if plan.depends_on_factor() { rule } else { &FactorRule::single() };
+        let matrix = conditional_matrix(plan, bucket_size, n, unit_rule)?;
+        for s in 0..q {
+            let row = if unit_rule.len() == 1 { &matrix[..n] } else { &matrix[s * n..(s + 1) * n] };
+            let m1: f64 = row.iter().enumerate().map(|(k, &p)| p * k as f64 * bucket_size).sum();
+            let m2: f64 = row.iter().enumerate().map(|(k, &p)| p * (k as f64 * bucket_size).powi(2)).sum();
+            cond_mean[s] += m1;
+            cond_var[s] += (m2 - m1 * m1).max(0.0);
+            mean += rule.weights[s] * m1;
+        }
+    }
+    let second: f64 = (0..q).map(|s| rule.weights[s] * (cond_var[s] + cond_mean[s] * cond_mean[s])).sum();
+    Ok((second - mean * mean).max(0.0))
+}
+
+/// The common scale of the `matched` coupling for one event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedScale {
+    /// The factor `c` on Burke's loadings, `w_i = min(c w_i^B, 1)`.
+    pub scale: f64,
+    pub sd_target: f64,
+    pub sd_achieved: f64,
+    /// The target was out of reach: `scale` saturates the largest loading at
+    /// one (or every loading is zero), and `sd_achieved` falls short.
+    pub saturated: bool,
+}
+
+/// Bracket `c` on `[0, 1 / max_i w_i]` for `Var(sum X_i) = sd_target^2`, the
+/// variance from `total_variance` increasing continuously in `c`; bisection
+/// to `1e-7` relative in the variance. Returns the saturated end when the
+/// target is not reached before the largest loading is one, or `c = 0` when
+/// the independent variance already exceeds it.
+pub fn matched_scale(plans: &[UnitPlan], bucket_size: f64, rule: &FactorRule, sd_target: f64) -> Result<MatchedScale, Error> {
+    let w_max = plans.iter().map(|p| p.w_corr).fold(0.0_f64, f64::max);
+    let target = sd_target * sd_target;
+    let at = |c: f64| -> Result<f64, Error> {
+        let scaled: Vec<UnitPlan> = plans.iter().map(|p| p.clone().with_loading(c * p.w_corr)).collect();
+        total_variance(&scaled, bucket_size, rule)
+    };
+    let (mut lo, mut hi) = (0.0_f64, if w_max > 0.0 { 1.0 / w_max } else { 0.0 });
+    let var_lo = at(lo)?;
+    if var_lo >= target {
+        return Ok(MatchedScale { scale: 0.0, sd_target, sd_achieved: var_lo.sqrt(), saturated: var_lo > target });
+    }
+    let var_hi = at(hi)?;
+    if var_hi < target {
+        return Ok(MatchedScale { scale: hi, sd_target, sd_achieved: var_hi.sqrt(), saturated: true });
+    }
+    let mut achieved = var_hi;
+    let mut c = hi;
+    for _ in 0..60 {
+        c = 0.5 * (lo + hi);
+        achieved = at(c)?;
+        if (achieved - target).abs() <= 1e-7 * target {
+            break;
+        }
+        if achieved < target {
+            lo = c;
+        } else {
+            hi = c;
+        }
+    }
+    Ok(MatchedScale { scale: c, sd_target, sd_achieved: achieved.sqrt(), saturated: false })
 }
 
 /// The comonotone sum of bucketed marginals on one grid. Every unit is a
@@ -835,6 +942,8 @@ impl JointConfig {
 pub struct JointMeta {
     pub bucket_size: f64,
     pub coupling: Coupling,
+    /// The `matched` coupling's scale and saturation for this event.
+    pub matched: Option<MatchedScale>,
     pub z_nodes: usize,
     pub z_rule: ZRule,
     /// Nodes or strata the rule actually used (`z_nodes` body strata plus
@@ -886,6 +995,15 @@ pub fn joint_two_units(units: [UnitSpec; 2], config: &JointConfig) -> Result<Joi
         let plan = prepare_unit(spec, &format!("unit {}", i + 1), config.variance_policy)?.couple(config.coupling);
         plans.push(plan);
     }
+    let matched = if config.coupling == Coupling::Matched {
+        let scale = matched_scale(&plans, h, &rule, roll_up_sd(&units))?;
+        for p in plans.iter_mut() {
+            *p = p.clone().with_loading(scale.scale * p.w_corr);
+        }
+        Some(scale)
+    } else {
+        None
+    };
     // Under the homer coupling unit k receives s_k X_R up to s_k M_R, which
     // exceeds M_k whenever its share of the mean exceeds its share of the
     // exposure; its grid must cover that.
@@ -1026,6 +1144,7 @@ pub fn joint_two_units(units: [UnitSpec; 2], config: &JointConfig) -> Result<Joi
     let meta = JointMeta {
         bucket_size: h,
         coupling: config.coupling,
+        matched,
         z_nodes: config.z_nodes,
         z_rule: config.z_rule,
         z_strata: rule.len(),

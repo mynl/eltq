@@ -205,6 +205,9 @@ class JointMeta:
     bucket_size: float
     #: The coupling rule of spec section 4A.
     coupling: str
+    #: Under ``coupling="matched"``: ``scale``, ``sd_target``,
+    #: ``sd_achieved`` and ``saturated`` for the event; None otherwise.
+    matched: dict | None
     z_nodes: int
     z_rule: str
     #: Nodes or strata the rule actually used (``z_nodes`` body strata plus
@@ -309,6 +312,10 @@ class MultiMeta:
     #: the units' exposures, ``sum_j lambda_j P(sum_k (s_k X_R - M_k)^+)``;
     #: None otherwise.
     homer_excess_mean: float | None
+    #: Under ``coupling="matched"`` the events whose target variance was out
+    #: of reach, each ``{"event_id", "scale", "sd_target", "sd_achieved"}``
+    #: at saturation; None otherwise.
+    matched_shortfall: list | None
     unit_ids: tuple
     terms_echo: dict
     unused_terms: tuple
