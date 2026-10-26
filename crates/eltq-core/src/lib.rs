@@ -27,6 +27,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod kernel;
 pub mod law;
+pub mod moments;
 pub mod multiunit;
 pub mod normal;
 pub mod quadrature;
@@ -41,7 +42,7 @@ pub use curve::{
     TAIL_RATE_FLOOR, build_curve,
 };
 pub use config::{
-    Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA,
+    ClassifyOptions, Config, DEFAULT_CHUNK_ROWS, DEFAULT_CLAMP_FACTOR, DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA,
     DEFAULT_QUADRATURE_POINTS, DEFAULT_SURVIVAL_CHUNK_ROWS, DEFAULT_WAVE_MEMORY_BYTES, MIN_QUANTILES_CHUNK_ROWS,
     Method, Overflow, QUANTILES_CHUNK_DIVISOR, QUANTILES_CHUNK_GRID_DIVISOR, VariancePolicy,
 };
@@ -49,7 +50,8 @@ pub use diagnostics::{Category, Diagnostics, MAX_EXAMPLES, Meta, QuantizeResult,
 pub use error::Error;
 pub use multiunit::{Coupling, JointConfig, JointMeta, JointResult, MatchedScale, UnitKind, UnitPlan, UnitSpec, joint_two_units};
 pub use quadrature::{FactorRule, ZRule, z_quadrature};
-pub use quantize::{Classified, EltInput, classify_rows, quantize};
+pub use quantize::{Classified, EltInput, classify_rows, classify_rows_with, quantize};
+pub use moments::{ModelMoments, RowLaw, model_moments};
 pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};
 pub use views::{
     Convolution, FirstMoments, MatchedEntry, MultiConfig, MultiInput, MultiMeta, MultiResult, PairResult, RollUpEntry,

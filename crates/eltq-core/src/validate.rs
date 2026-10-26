@@ -1,6 +1,6 @@
 //! Row validation and classification.
 
-use crate::config::{Config, VariancePolicy};
+use crate::config::{ClassifyOptions, VariancePolicy};
 use crate::diagnostics::{Category, Diagnostics};
 use crate::error::Error;
 
@@ -51,7 +51,7 @@ pub fn classify_row(
     mean_loss: f64,
     sd_indep: f64,
     sd_corr: f64,
-    config: &Config,
+    config: &ClassifyOptions,
     diagnostics: &mut Diagnostics,
 ) -> Result<RowPlan, Error> {
     if !(rate.is_finite()
@@ -160,6 +160,7 @@ pub fn classify_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     fn classify(
         rate: f64,
@@ -169,7 +170,7 @@ mod tests {
         config: &Config,
     ) -> (Result<RowPlan, Error>, Diagnostics) {
         let mut diag = Diagnostics::default();
-        let plan = classify_row(0, rate, m, mu, s, 0.0, config, &mut diag);
+        let plan = classify_row(0, rate, m, mu, s, 0.0, &config.classify_options(), &mut diag);
         (plan, diag)
     }
 
@@ -243,14 +244,14 @@ mod tests {
         // sigma = 3 + 4 = 7, variance 49 (not 3^2 + 4^2 = 25).
         let c = Config::new(1.0);
         let mut diag = Diagnostics::default();
-        let plan = classify_row(0, 0.1, 100.0, 40.0, 3.0, 4.0, &c, &mut diag).unwrap();
+        let plan = classify_row(0, 0.1, 100.0, 40.0, 3.0, 4.0, &c.classify_options(), &mut diag).unwrap();
         assert_eq!(plan.kind, RowKind::Beta);
         assert_eq!(plan.sd, 7.0);
         // Each component alone is admissible; their sum is not: 30 + 25 = 55,
         // 55^2 = 3025 >= 40 * 60 = 2400, so the variance policy engages.
         let (plan, diag) = {
             let mut diag = Diagnostics::default();
-            let plan = classify_row(0, 0.1, 100.0, 40.0, 30.0, 25.0, &c, &mut diag).unwrap();
+            let plan = classify_row(0, 0.1, 100.0, 40.0, 30.0, 25.0, &c.classify_options(), &mut diag).unwrap();
             (plan, diag)
         };
         assert_eq!(plan.kind, RowKind::Bernoulli);

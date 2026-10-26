@@ -743,3 +743,23 @@ Divergences:
   already used; the plan named the classification only. The reference's clamp is also in ratios.
 - `atom_by_resolution` applies in `prepare_unit` too, so the two-unit joint and the rolled row of
   the `homer` coupling and of the roll-up diagnostic classify the same way.
+
+### [Eltq-Model-Moments], one-row ELTs, 2.11.0
+
+`moments_arrays` on both backends; `ModelMoments` in `_meta.py`; `crates/eltq-core/src/moments.rs`
+(`RowLaw`, `model_moments`); `ClassifyOptions` and `classify_rows_with` on the core, through which
+`quantize` now classifies. Test 35 in `tests/test_moments.py`, 22 cases on both backends, and the
+fallback subprocess calls the function. A million rows take 20 ms. Divergences:
+
+- No `threads` keyword: the pass is the serial classification `quantize` already makes plus a few
+  multiplications per row (20 ms per million rows), so parallel chunks would buy nothing and the
+  result is trivially a function of the input. The plan's determinism check is therefore moot.
+- Field names: `moment_overflow` (a flag per order; the moment itself is infinite) for the plan's
+  "flagged", `achieved_error` for the integration error of $C_2$ and $C_3$, and `rtol` None for a
+  closed form. `support` is NaN on dropped rows, so that the array lines up with the input.
+- The 60-digit values of the tests are embedded, computed with mpmath 1.4.1: CI installs
+  `[reference]`, `pytest` and `pandas` but not mpmath. Found on the way, not changed: test 23 in
+  `tests/test_survival.py` imports mpmath unguarded, so CI's wheel tests would fail on it unless
+  something else installs mpmath (open item for Steve).
+- The plan's consistency check (grid moments approaching $C_r$ as $h$ halves) is in the test with
+  the measured figures in the spec.

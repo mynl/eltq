@@ -15,9 +15,9 @@ use eltq_core::csv_input::{CsvColumns, read_elt_csv};
 use std::sync::Arc;
 
 use eltq_core::{
-    Clause, Config, Convolution, Coupling, Curve, EltInput, Error as CoreError, JointConfig, Meta, Method,
-    MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule,
-    build_curve, classify_rows, joint_two_units as core_joint_two_units,
+    ClassifyOptions, Clause, Config, Convolution, Coupling, Curve, EltInput, Error as CoreError, JointConfig, Meta,
+    Method, MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule, build_curve,
+    classify_rows, joint_two_units as core_joint_two_units, model_moments,
     multiunit_views as core_multiunit_views, quantize,
 };
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
@@ -505,6 +505,55 @@ fn exceedance_curve<'py>(
     })
 }
 
+/// Model moments of a one-row ELT with no grid (spec section 4B): a dict
+/// of the total rate, the rate-weighted raw moments, the zero rate, the
+/// per-row support, the counts by effective law, the overflow flags and the
+/// diagnostics (0-based rows, translated by the Python wrapper).
+#[pyfunction]
+#[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *,
+    mean_is_loss_rate=false, variance_policy="bernoulli"))]
+#[allow(clippy::too_many_arguments)]
+fn moments_arrays<'py>(
+    py: Python<'py>,
+    rate: PyReadonlyArray1<'py, f64>,
+    max_loss: PyReadonlyArray1<'py, f64>,
+    mean_loss: PyReadonlyArray1<'py, f64>,
+    sd_indep: PyReadonlyArray1<'py, f64>,
+    sd_corr: PyReadonlyArray1<'py, f64>,
+    mean_is_loss_rate: bool,
+    variance_policy: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let options = ClassifyOptions {
+        mean_is_loss_rate,
+        variance_policy: parse_one_row_variance_policy(variance_policy)?,
+    };
+    let input = EltInput {
+        rate: contiguous("rate", &rate)?,
+        max_loss: contiguous("max_loss", &max_loss)?,
+        mean_loss: contiguous("mean_loss", &mean_loss)?,
+        sd_indep: contiguous("sd_indep", &sd_indep)?,
+        sd_corr: contiguous("sd_corr", &sd_corr)?,
+    };
+    let m = py
+        .detach(|| model_moments(&input, &options))
+        .map_err(|e| to_py_err(py, e))?;
+    let dict = PyDict::new(py);
+    dict.set_item("total_rate", m.total_rate)?;
+    dict.set_item("raw_moments", m.raw_moments.to_vec())?;
+    dict.set_item("rate_at_zero", m.rate_at_zero)?;
+    dict.set_item("max_support", m.max_support)?;
+    dict.set_item("input_rows", m.input_rows)?;
+    dict.set_item("valid_rows", m.valid_rows)?;
+    dict.set_item("atom_rows", m.atom_rows)?;
+    dict.set_item("beta_rows", m.beta_rows)?;
+    dict.set_item("two_point_rows", m.two_point_rows)?;
+    dict.set_item("dropped_rows", m.dropped_rows)?;
+    dict.set_item("moment_overflow", m.moment_overflow.to_vec())?;
+    dict.set_item("diagnostics", diagnostics_to_dict(py, &m.diagnostics, None)?)?;
+    dict.set_item("support", m.support.into_pyarray(py))?;
+    Ok(dict)
+}
+
 type JointReturn<'py> = (
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray1<f64>>,
@@ -797,5 +846,6 @@ fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(exceedance_curve, m)?)?;
     m.add_function(wrap_pyfunction!(joint_two_units, m)?)?;
     m.add_function(wrap_pyfunction!(multiunit_views, m)?)?;
+    m.add_function(wrap_pyfunction!(moments_arrays, m)?)?;
     Ok(())
 }

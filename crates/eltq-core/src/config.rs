@@ -168,7 +168,47 @@ pub struct Config {
     pub wave_memory_bytes: usize,
 }
 
+/// The options row classification reads (spec section 4): the convention
+/// of the mean and the variance policy. No grid option is among them, so a
+/// classification made from these alone (the model moments and tail
+/// measures of spec section 4B) cannot depend on a bucket size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClassifyOptions {
+    pub mean_is_loss_rate: bool,
+    pub variance_policy: VariancePolicy,
+}
+
+impl Default for ClassifyOptions {
+    fn default() -> Self {
+        ClassifyOptions {
+            mean_is_loss_rate: false,
+            variance_policy: VariancePolicy::default(),
+        }
+    }
+}
+
+impl ClassifyOptions {
+    /// Reject a clamp factor outside (0, 1); the one-row route refuses the
+    /// clamp itself row by row (`Error::ClampPolicyRemoved`).
+    pub fn validate(&self) -> Result<(), Error> {
+        if let VariancePolicy::ClampSigma { factor } = self.variance_policy
+            && !(factor.is_finite() && factor > 0.0 && factor < 1.0)
+        {
+            return Err(Error::BadClampFactor(factor));
+        }
+        Ok(())
+    }
+}
+
 impl Config {
+    /// The classification options of this configuration.
+    pub fn classify_options(&self) -> ClassifyOptions {
+        ClassifyOptions {
+            mean_is_loss_rate: self.mean_is_loss_rate,
+            variance_policy: self.variance_policy,
+        }
+    }
+
     pub fn new(bucket_size: f64) -> Self {
         Config {
             bucket_size,

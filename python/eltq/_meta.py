@@ -153,6 +153,50 @@ class Meta:
 
 
 @dataclass
+class ModelMoments:
+    """Model moments of an ELT with no loss grid (spec section 4B).
+
+    ``raw_moments`` are the rate-weighted ``C_r = sum lambda P(X^r)`` for
+    ``r = 1, 2, 3``, the annual cumulants under compound Poisson occurrence;
+    ``severity_moments`` are ``C_r / total_rate``, the severity's raw
+    moments (NaN when the total rate is zero); ``analytic_aal`` is ``C_1``;
+    ``rate_at_zero`` is ``sum lambda P(X = 0)``, so the probability of a year
+    without loss is ``exp(-(total_rate - rate_at_zero))``. ``support`` is the
+    largest loss of each row's effective law (``mu`` for an atom, the exposed
+    value otherwise; NaN for a dropped row), and ``max_support`` its
+    maximum. An order whose moment leaves double precision is infinite and
+    flagged in ``moment_overflow``. Diagnostic examples are event ids when
+    available, 0-based row indices otherwise.
+
+    The integration fields describe how the moments were obtained:
+    ``method`` is ``closed_form`` for a one-row ELT, whose moments are exact
+    (``achieved_error`` zero, ``converged`` True).
+    """
+
+    total_rate: float
+    raw_moments: tuple
+    severity_moments: tuple
+    analytic_aal: float
+    rate_at_zero: float
+    max_support: float
+    support: object
+    input_rows: int
+    valid_rows: int
+    atom_rows: int
+    beta_rows: int
+    two_point_rows: int
+    dropped_rows: int
+    moment_overflow: tuple
+    diagnostics: dict[str, RowIssues]
+    method: str = "closed_form"
+    #: Requested relative tolerance on ``C_2`` and ``C_3`` (None when closed form).
+    rtol: float | None = None
+    #: Achieved relative errors of ``C_2`` and ``C_3``.
+    achieved_error: tuple = (0.0, 0.0)
+    converged: bool = True
+
+
+@dataclass
 class CurveMeta:
     """Metadata of an exceedance curve: its node range and count, the
     sampled interpolation error, the totals over the contributing rows and

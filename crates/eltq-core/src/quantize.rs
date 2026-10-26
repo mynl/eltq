@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use crate::batched::{MidpointScores, beta_midpoint_quantiles_scored};
 use crate::beta::beta_params;
-use crate::config::{Config, Method, Overflow};
+use crate::config::{ClassifyOptions, Config, Method, Overflow};
 use crate::curve::{Workers, build_curve_with, run_waves};
 use crate::deposit::{OverflowAccumulator, place};
 use crate::diagnostics::{Diagnostics, Meta, QuantizeResult};
@@ -103,6 +103,13 @@ pub struct Classified {
 /// touch neither output nor the grid's natural length, so this precedes
 /// everything.
 pub fn classify_rows(input: &EltInput<'_>, config: &Config) -> Result<Classified, Error> {
+    config.validate()?;
+    classify_rows_with(input, &config.classify_options())
+}
+
+/// The same classification from the classification options alone, with no
+/// grid option to validate or depend on (spec section 4B).
+pub fn classify_rows_with(input: &EltInput<'_>, config: &ClassifyOptions) -> Result<Classified, Error> {
     config.validate()?;
     let n_rows = input.validated_len()?;
     let mut diagnostics = Diagnostics::default();

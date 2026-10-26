@@ -3,6 +3,13 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.11.0] - 2026-10-26
+
+### Added
+
+- [model-moments] `moments_arrays(rate, max_loss, mean_loss, sd_indep, sd_corr, *, mean_is_loss_rate, variance_policy, event_ids)` returns a `ModelMoments` with no grid (spec section 4B): the total rate, the rate-weighted raw moments `C_1` to `C_3` (the annual cumulants under compound Poisson occurrence) and `C_r / total_rate`, the zero rate, the support of every row's effective law and its maximum, the counts by law (atom, beta, two-point, dropped) and the diagnostics. Each law has closed-form moments (the beta's as `mu` times ratios at most `M`, so they hold at every parameter size), so nothing depends on a bucket size; an order whose moment leaves double precision is infinite and flagged in `moment_overflow`. For the aggregate package, which sizes its grid from these before any grid exists.
+- The classification is the grid route's: `classify_rows_with` and `ClassifyOptions` on the Rust core classify from the mean's convention and the variance policy alone, and `quantize` classifies through them, so rate, expected annual loss and diagnostics agree with `quantize_arrays` on the same input. Spec test 35 on both backends: the aggregate package's oracle rows, the two regression rows against 60-digit arithmetic within 1e-14, scaling by `s^r` at 1e100 and 1e-100, the overflow flag at 1e105, and the survival grid's moments approaching the model's as `h` halves.
+
 ## [2.10.1] - 2026-10-26
 
 ### Fixed

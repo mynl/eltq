@@ -99,6 +99,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [joint] `occurrence_pair_joint`, `occurrence_unit_first_moment` and `annual_conditional_mean`: the joint aggregate route's inputs and the conditional means by the Mecke identity | 2.9.0 | done |
 | [matched] `coupling="matched"`, Burke's loadings scaled per event to the roll-up convention's variance, with `matched_shortfall`; [parity] the multi-unit benchmark rerun under the stratified default (`benchmarks/report-2.10.0.md`) | 2.10.0 | done |
 | [narrow-units] beta units past the continued fraction's regime evaluated by the narrow kernel, no NaN; units below the resolution are atoms; the reference's unit classification in ratios | 2.10.1 | done |
+| [model-moments] `moments_arrays`: the one-row ELT's rate, raw moments, zero rate and support with no grid, classified as the grid route classifies | 2.11.0 | done |
 
 ## Layout
 
@@ -231,6 +232,10 @@ curve.exceedance(x)                            # Lambda(x), atoms included
 curve.oep_pml([10, 100, 250])                  # OEP losses, Poisson occurrence
 secondary, gmeta = curve.grid(bucket_size, grid_length=None, overflow="top_bucket")
     # any bucket_size >= 2 min_loss; what quantize(method="survival") returns
+moments = eltq.moments_arrays(rate, max_loss, mean_loss, sd_indep, sd_corr,
+    *, mean_is_loss_rate=False, variance_policy="bernoulli", event_ids=None)
+    # ModelMoments with no grid: total_rate, raw_moments (C_1..C_3), severity_moments,
+    # rate_at_zero, support per row, counts by law, diagnostics (spec section 4B)
 ```
 
 `source` for the last two: a CSV path, a DataFrame with canonical columns, or

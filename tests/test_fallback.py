@@ -39,6 +39,12 @@ FALLBACK_SCRIPT = textwrap.dedent(
     assert math.isclose(secondary.sum(), 0.03, rel_tol=1e-12)
     assert meta.grid_length == 201
 
+    # The model moments (spec section 4B) from the reference.
+    moments = eltq.moments_arrays(
+        [0.1], [100.0], [50.0], [10.0], [10.0], event_ids=["a"])
+    assert math.isclose(moments.raw_moments[1], 290.0, rel_tol=1e-14)
+    assert moments.method == "closed_form"
+
     # CSV fallback route with the canonical fixture.
     raw_c, secondary_c, meta_c = eltq.quantize_csv(
         sys.argv[1], bucket_size=0.5, quadrature_points=8)

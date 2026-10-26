@@ -29,7 +29,7 @@ import numpy as np
 from scipy.special import betainc, betaincc, betaln, ndtri, erfc
 from scipy.stats import beta as beta_dist
 
-from eltq._meta import (ATOM_RESOLUTION, DEFAULT_NODES_PER_DECADE,
+from eltq._meta import (ATOM_RESOLUTION, ModelMoments, DEFAULT_NODES_PER_DECADE,
                         DEFAULT_NODES_PER_SIGMA, LARGE_PARAMETER_FROM, NARROW_MIN_PARAMETER,
                         NARROW_NORMAL_FROM, NARROW_STEPS,
                         TAIL_FINE_ZONE, TAIL_INTERVALS, TAIL_POWER_LAW_LIMIT, TAIL_RATE_FLOOR,
@@ -1082,6 +1082,117 @@ def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
             sd_eff[j] = sigma
         max_contrib_loss = max(max_contrib_loss, m)
     return kinds, mu_eff, sd_eff, max_contrib_loss, diagnostics
+
+
+def law_moments(kind: int, mu: float, sd: float, m: float) -> tuple:
+    """``(P X, P X^2, P X^3)`` of a contributing row's effective law (spec
+    section 4B): an atom at ``mu``; the beta, as ``mu`` times the ratios
+    ``P X^(k+1) / P X^k = M (alpha + k) / (alpha + beta + k)``, each at most
+    ``M``, so that no intermediate exceeds the larger of ``M`` and the
+    result; or the two-point law, ``mu M^(r-1)``. The same arithmetic as the
+    engine's ``RowLaw::raw_moments``."""
+    if kind == _ATOM:
+        second = mu * mu
+        return mu, second, second * mu
+    if kind == _BETA:
+        alpha, beta = beta_params(m, mu, sd)
+        second = mu * (m * ((alpha + 1.0) / (alpha + beta + 1.0)))
+        return mu, second, second * (m * ((alpha + 2.0) / (alpha + beta + 2.0)))
+    second = mu * m
+    return mu, second, second * m
+
+
+def _law_support(kind: int, mu: float, m: float) -> float:
+    """The largest loss of a contributing row's effective law."""
+    return mu if kind == _ATOM else m
+
+
+def _law_zero_probability(kind: int, mu: float, m: float) -> float:
+    """``P(X = 0)`` of a contributing row's effective law."""
+    if kind == _ATOM:
+        return 1.0 if mu == 0.0 else 0.0
+    if kind == _BETA:
+        return 0.0
+    return (m - mu) / m
+
+
+def _exact_sum(terms) -> tuple:
+    """``(sum, overflowed)``: the correctly rounded sum of nonnegative terms,
+    or infinity and True when a term or the sum leaves double precision."""
+    if not all(map(math.isfinite, terms)):
+        return math.inf, True
+    try:
+        total = math.fsum(terms)
+    except OverflowError:
+        return math.inf, True
+    return (total, False) if math.isfinite(total) else (math.inf, True)
+
+
+def moments_reference(rate, max_loss, mean_loss, sd_indep, sd_corr, *, mean_is_loss_rate=False,
+                      variance_policy="bernoulli", event_ids=None) -> ModelMoments:
+    """Model moments of a one-row ELT with no grid (spec section 4B).
+
+    The classification is ``quantize_reference``'s, so the rate, the
+    expected annual loss and the diagnostics equal the grid route's on the
+    same input; each contributing row adds its law's closed-form moments,
+    and the sums are exact (``math.fsum``).
+
+    Returns
+    -------
+    ModelMoments
+    """
+    rate = np.asarray(rate, dtype=np.float64)
+    max_loss = np.asarray(max_loss, dtype=np.float64)
+    mean_loss = np.asarray(mean_loss, dtype=np.float64)
+    sd_indep = np.asarray(sd_indep, dtype=np.float64)
+    sd_corr = np.asarray(sd_corr, dtype=np.float64)
+    n_rows = rate.size
+    for name, arr in (("max_loss", max_loss), ("mean_loss", mean_loss),
+                      ("sd_indep", sd_indep), ("sd_corr", sd_corr)):
+        if arr.size != n_rows:
+            raise EltqError(f"column {name} has {arr.size} rows, expected {n_rows}")
+    if event_ids is None:
+        event_ids = list(range(n_rows))
+    _check_variance_policy(variance_policy)
+    kinds, mu_eff, sd_eff, _, diagnostics = _classify_rows(
+        rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
+        mean_is_loss_rate, variance_policy)
+    rates, zeros, terms = [], [], ([], [], [])
+    support = np.full(n_rows, np.nan)
+    counts = {_ATOM: 0, _BETA: 0, _BERNOULLI: 0}
+    for j in range(n_rows):
+        kind = int(kinds[j])
+        if kind == _DROP:
+            continue
+        lam, mu, m = float(rate[j]), float(mu_eff[j]), float(max_loss[j])
+        counts[kind] += 1
+        moments = law_moments(kind, mu, float(sd_eff[j]), m)
+        rates.append(lam)
+        zeros.append(lam * _law_zero_probability(kind, mu, m))
+        for r in range(3):
+            terms[r].append(lam * moments[r])
+        support[j] = _law_support(kind, mu, m)
+    total_rate = math.fsum(rates)
+    sums = [_exact_sum(t) for t in terms]
+    raw = tuple(value for value, _ in sums)
+    valid = sum(counts.values())
+    return ModelMoments(
+        total_rate=total_rate,
+        raw_moments=raw,
+        severity_moments=tuple(c / total_rate if total_rate > 0.0 else math.nan for c in raw),
+        analytic_aal=raw[0],
+        rate_at_zero=math.fsum(zeros),
+        max_support=float(np.nanmax(support)) if valid else 0.0,
+        support=support,
+        input_rows=n_rows,
+        valid_rows=valid,
+        atom_rows=counts[_ATOM],
+        beta_rows=counts[_BETA],
+        two_point_rows=counts[_BERNOULLI],
+        dropped_rows=n_rows - valid,
+        moment_overflow=tuple(flag for _, flag in sums),
+        diagnostics=diagnostics,
+    )
 
 
 def exceedance_curve_reference(

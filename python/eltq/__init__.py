@@ -33,11 +33,11 @@ import numpy as np
 
 from eltq._meta import (
     DEFAULT_NODES_PER_DECADE, DEFAULT_NODES_PER_SIGMA, CurveMeta, FirstMomentMeta, GridMeta, JointMeta, Meta,
-    MultiMeta, PairMeta, RowIssues,
+    ModelMoments, MultiMeta, PairMeta, RowIssues,
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.10.1"
+__version__ = "2.11.0"
 
 try:
     from eltq._eltq import (
@@ -65,6 +65,10 @@ try:
         from eltq._eltq import exceedance_curve as _rust_exceedance_curve
     except ImportError:  # extension older than 1.17.0
         _rust_exceedance_curve = None
+    try:
+        from eltq._eltq import moments_arrays as _rust_moments_arrays
+    except ImportError:  # extension older than 2.11.0
+        _rust_moments_arrays = None
 
     BACKEND = "rust"
 except ImportError:
@@ -83,6 +87,7 @@ except ImportError:
     _rust_joint_two_units = None
     _rust_multiunit_views = None
     _rust_exceedance_curve = None
+    _rust_moments_arrays = None
 
 if BACKEND == "rust":
     try:
@@ -112,6 +117,8 @@ __all__ = [
     "quantize_to_npy",
     "exceedance_curve",
     "ExceedanceCurve",
+    "moments_arrays",
+    "ModelMoments",
     "CurveMeta",
     "GridMeta",
     "joint_two_units",
@@ -334,6 +341,79 @@ def quantize_arrays(
         )
         return raw, secondary, _build_meta(meta_dict, ids)
     return _reference.quantize_reference(*cols, **common, **survival, event_ids=ids)
+
+
+def moments_arrays(
+    rate,
+    max_loss,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    *,
+    mean_is_loss_rate=False,
+    variance_policy="bernoulli",
+    event_ids=None,
+) -> ModelMoments:
+    """Model moments of a one-row ELT with no loss grid (spec section 4B).
+
+    Classifies the rows exactly as ``quantize_arrays`` does and returns the
+    total rate, the rate-weighted raw moments ``C_r = sum lambda P(X^r)``
+    for ``r = 1, 2, 3`` (the annual cumulants under compound Poisson
+    occurrence), the severity moments ``C_r / total_rate``, the zero rate,
+    the support of every row's effective law, the counts by law and the
+    diagnostics. Each row is an atom (``P X^r = mu^r``), a beta
+    (``mu M^(r-1) prod_{k<r} (alpha + k) / (alpha + beta + k)``) or a
+    two-point Bernoulli row (``mu M^(r-1)``), all closed forms, so there is
+    no bucket size or grid length and nothing depends on a future grid.
+
+    Parameters
+    ----------
+    rate, max_loss, mean_loss, sd_indep, sd_corr : array_like
+        One-dimensional numeric columns of equal length, as
+        ``quantize_arrays`` takes them.
+    mean_is_loss_rate : bool, default False
+        Interpret mean_loss as a rate on [0, 1], scaled by max_loss.
+    variance_policy : {"bernoulli", "error", "drop", "atom"}, default "bernoulli"
+        Treatment of rows with inadmissible beta variance, as in
+        ``quantize_arrays``.
+    event_ids : sequence, optional
+        Per-row identifiers used in diagnostic examples (audit only).
+
+    Returns
+    -------
+    ModelMoments
+        ``method`` is ``closed_form``; an order whose moment leaves double
+        precision is infinite and flagged in ``moment_overflow``.
+    """
+    cols = tuple(
+        _column(name, values)
+        for name, values in zip(
+            _CANONICAL_COLUMNS, (rate, max_loss, mean_loss, sd_indep, sd_corr)
+        )
+    )
+    ids = list(event_ids) if event_ids is not None else None
+    if _rust_moments_arrays is None:
+        from eltq import reference as _ref
+
+        return _ref.moments_reference(*cols, mean_is_loss_rate=mean_is_loss_rate,
+                                      variance_policy=variance_policy, event_ids=ids)
+    out = _rust_moments_arrays(*cols, mean_is_loss_rate=mean_is_loss_rate, variance_policy=variance_policy)
+    diagnostics = {}
+    for category, entry in out.pop("diagnostics").items():
+        examples = entry["examples"]
+        if ids is not None:
+            examples = [ids[row] for row in examples]
+        diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
+    total_rate = out["total_rate"]
+    raw = tuple(out.pop("raw_moments"))
+    return ModelMoments(
+        raw_moments=raw,
+        severity_moments=tuple(c / total_rate if total_rate > 0.0 else float("nan") for c in raw),
+        analytic_aal=raw[0],
+        moment_overflow=tuple(out.pop("moment_overflow")),
+        diagnostics=diagnostics,
+        **out,
+    )
 
 
 def quantize_csv(
