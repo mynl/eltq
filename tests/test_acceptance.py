@@ -90,7 +90,7 @@ def test_05_symmetry(impl):
 ])
 def test_06_beta_parameterization_moments(m, mu, frac):
     var = frac * mu * (m - mu)
-    a, b = reference.beta_params(m, mu, var)
+    a, b = reference.beta_params(m, mu, math.sqrt(var))
     assert a > 0 and b > 0
     mean_back = m * a / (a + b)
     var_back = m * m * a * b / ((a + b) ** 2 * (a + b + 1.0))
@@ -135,24 +135,40 @@ def test_09_mean_conservation(impl):
 # [10] Scale invariance: scaling all loss quantities and h leaves weights
 # unchanged (bitwise for a dyadic factor under the quantiles method; the
 # survival method's geometric nodes are not dyadic in the loss, so there the
-# invariance holds to rounding).
+# invariance holds to rounding). At factors 1e160 and 1e-200 the squared
+# standard deviation and mu (M - mu) overflow and underflow while every
+# field stays finite; the admissibility test and the shape parameters are
+# formed in ratios, so the classification and the grids match the unit
+# scale's (peer review, finding I3; until 2.4.0 the admissible row
+# (M, mu, sigma) = (1, 0.4, 0.1) was a Bernoulli row at 1e160 and an atom at
+# 1e-200).
 def test_10_scale_invariance(impl):
     df = load_fixture("small")
     for method, exact_dyadic in (("quantiles", True), ("survival", False)):
-        base_raw, base_sec, _ = run(impl, df, bucket_size=0.5, quadrature_points=8,
-                                    method=method)
-        for c, exact in ((64.0, exact_dyadic), (3.0, False)):
+        base_raw, base_sec, base_meta = run(impl, df, bucket_size=0.5, quadrature_points=8,
+                                            method=method)
+        for c, exact in ((64.0, exact_dyadic), (3.0, False), (1e160, False), (1e-200, False)):
             scaled = df.copy()
             for col in ("max_loss", "mean_loss", "sd_indep", "sd_corr"):
                 scaled[col] *= c
-            raw, sec, _ = run(impl, scaled, bucket_size=0.5 * c, quadrature_points=8,
-                              method=method)
+            raw, sec, meta = run(impl, scaled, bucket_size=0.5 * c, quadrature_points=8,
+                                 method=method)
+            assert meta.valid_rows == base_meta.valid_rows
+            assert {k: v.count for k, v in meta.diagnostics.items()} == \
+                {k: v.count for k, v in base_meta.diagnostics.items()}
             if exact:
                 assert np.array_equal(raw, base_raw)
                 assert np.array_equal(sec, base_sec)
             else:
                 assert np.allclose(raw, base_raw, rtol=1e-9, atol=1e-15)
                 assert np.allclose(sec, base_sec, rtol=1e-9, atol=1e-12)
+    # The review's row at the three scales, both methods: a beta each time.
+    for method in ("quantiles", "survival"):
+        for c in (1.0, 1e160, 1e-200):
+            _, sec, meta = run(impl, elt([(1.0, c, 0.4 * c, 0.1 * c, 0.0)]),
+                               bucket_size=0.1 * c, grid_length=11, method=method)
+            assert meta.valid_rows == 1 and not meta.diagnostics, (method, c)
+            assert sec[0] < 1e-3 and sec[10] < 1e-3 and sec.sum() == pytest.approx(1.0, rel=1e-14)
 
 
 # [11] Invalid beta moments follow the selected policy and appear in

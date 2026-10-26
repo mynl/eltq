@@ -140,7 +140,7 @@ proptest! {
         prop_assume!(mu > 0.0 && mu < m);
         let var = f * mu * (m - mu);
         prop_assume!(var > 0.0);
-        let (a, b) = eltq_core::beta::beta_params(m, mu, var);
+        let (a, b) = eltq_core::beta::beta_params(m, mu, var.sqrt());
         prop_assert!(a > 0.0 && b > 0.0);
         let mean_back = m * a / (a + b);
         let var_back = m * m * a * b / ((a + b) * (a + b) * (a + b + 1.0));

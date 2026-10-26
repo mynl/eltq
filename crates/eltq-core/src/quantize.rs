@@ -85,13 +85,13 @@ struct Outcome {
     sec_over: OverflowAccumulator,
 }
 
-/// The classification pass: every row's kind, effective mean and variance,
-/// the largest contributing loss, and the diagnostics.
+/// The classification pass: every row's kind, effective mean and standard
+/// deviation, the largest contributing loss, and the diagnostics.
 #[derive(Debug, Clone)]
 pub struct Classified {
     pub kinds: Vec<RowKind>,
     pub mu_eff: Vec<f64>,
-    pub var_eff: Vec<f64>,
+    pub sd_eff: Vec<f64>,
     pub max_contrib_loss: f64,
     pub diagnostics: Diagnostics,
 }
@@ -105,7 +105,7 @@ pub fn classify_rows(input: &EltInput<'_>, config: &Config) -> Result<Classified
     let mut diagnostics = Diagnostics::default();
     let mut kinds = vec![RowKind::Drop; n_rows];
     let mut mu_eff = vec![0.0_f64; n_rows];
-    let mut var_eff = vec![0.0_f64; n_rows];
+    let mut sd_eff = vec![0.0_f64; n_rows];
     let mut max_contrib_loss = 0.0_f64;
     for row in 0..n_rows {
         let plan = classify_row(
@@ -120,7 +120,7 @@ pub fn classify_rows(input: &EltInput<'_>, config: &Config) -> Result<Classified
         )?;
         kinds[row] = plan.kind;
         mu_eff[row] = plan.mu;
-        var_eff[row] = plan.var;
+        sd_eff[row] = plan.sd;
         if plan.kind != RowKind::Drop {
             max_contrib_loss = max_contrib_loss.max(input.max_loss[row]);
         }
@@ -128,7 +128,7 @@ pub fn classify_rows(input: &EltInput<'_>, config: &Config) -> Result<Classified
     Ok(Classified {
         kinds,
         mu_eff,
-        var_eff,
+        sd_eff,
         max_contrib_loss,
         diagnostics,
     })
@@ -141,7 +141,7 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
     let Classified {
         ref kinds,
         ref mu_eff,
-        ref var_eff,
+        ref sd_eff,
         max_contrib_loss,
         ..
     } = classified;
@@ -180,7 +180,7 @@ pub fn quantize(input: &EltInput<'_>, config: &Config) -> Result<QuantizeResult,
 
     let chunk_rows = config.resolved_chunk_rows();
     let outcome = match config.method {
-        Method::Quantiles => quantiles_pass(input, config, kinds, mu_eff, var_eff, n, h, chunk_rows)?,
+        Method::Quantiles => quantiles_pass(input, config, kinds, mu_eff, sd_eff, n, h, chunk_rows)?,
         Method::Survival => {
             // The curve from e_0 = h / 2, its grid, and the raw grid.
             let curve = build_curve(input, config, &classified, 0.5 * h)?;
@@ -285,7 +285,7 @@ fn quantiles_pass(
     config: &Config,
     kinds: &[RowKind],
     mu_eff: &[f64],
-    var_eff: &[f64],
+    sd_eff: &[f64],
     n: usize,
     h: f64,
     chunk_rows: usize,
@@ -335,7 +335,7 @@ fn quantiles_pass(
                 place(&mut partial.secondary, m, lam * p, inv_h, top_edge, top_node, policy, &mut partial.sec_over);
                 quad_acc.add(lam * mu);
             } else {
-                let (alpha, beta) = beta_params(m, mu, var_eff[row]);
+                let (alpha, beta) = beta_params(m, mu, sd_eff[row]);
                 beta_midpoint_quantiles(alpha, beta, &mut quantiles)
                     .map_err(|_| Error::KernelFailure { row, alpha, beta })?;
                 let w = lam / k as f64;

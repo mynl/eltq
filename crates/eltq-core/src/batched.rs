@@ -63,7 +63,9 @@ impl Cumulants {
     fn of(a: f64, b: f64) -> Self {
         let s = a + b;
         let mean = a / s;
-        let sd = (a * b / (s * s * (s + 1.0))).sqrt();
+        // In ratios: the denominator of `a b / (s^2 (s + 1))` overflowed
+        // from s = 1e103, inside the 1e150 range (peer review, finding I3).
+        let sd = ((a / s) * (b / s) / (s + 1.0)).sqrt();
         // (b - a) / sqrt(a b), the shape factor of the odd cumulants.
         let r = (b / a).sqrt() - (a / b).sqrt();
         let skew = 2.0 * r * (s + 1.0).sqrt() / (s + 2.0);
@@ -525,6 +527,18 @@ mod tests {
             beta_quantiles(a, b, &[u], &mut out).unwrap();
             assert_eq!(out[0], got);
         }
+    }
+
+    // [ratios] The standard deviation at the range limit: s = 1e150 with
+    // p = 1 - 1e-50 has sd = sqrt(p (1 - p) / (s + 1)) = 1e-100, which the
+    // product form returned as 0 (its denominator overflowed from s = 1e103).
+    #[test]
+    fn cumulants_sd_holds_at_the_range_limit() {
+        let c = Cumulants::of(1e150, 1e100);
+        assert!((c.sd / 1e-100 - 1.0).abs() <= 1e-12, "{}", c.sd);
+        let c = Cumulants::of(1e150, 1e150);
+        assert!((c.sd / (0.5 / 2e150_f64.sqrt()) - 1.0).abs() <= 1e-12, "{}", c.sd);
+        assert!(c.skew == 0.0 && c.kurt.is_finite());
     }
 
     #[test]

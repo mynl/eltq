@@ -3,6 +3,14 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.4.1] - 2026-10-26
+
+### Fixed
+
+- [ratios] The admissibility test `sigma^2 >= mu (M - mu)` and the shape parameters are formed in ratios of the row's fields on both backends, so that no product of two monetary amounts appears. Scaled by 1e160 the admissible row (M, mu, sigma) = (1, 0.4, 0.1) was a Bernoulli row and scaled by 1e-200 an atom, every field finite; both are now the beta the unit-scale row is (peer review, finding I3; spec test 10 extended to those scales). The same test on the multi-unit route. Grids at ordinary scales move by rounding only (the goldens hold at 1e-9).
+- The Cornish-Fisher cumulants' standard deviation is formed in ratios: the product form's denominator overflowed from `alpha + beta = 1e103`, inside the quantiles method's stated 1e150 range, and returned 0 for asymmetric shapes there.
+- Documented, not changed: an atom in a windowed grid's top half-bucket goes to the top node and its displacement is not overflow (spec section 6, README); below the switch point the incomplete beta's survival is a complement with absolute error of order epsilon, which loses relative precision only for alpha below about 1e-12, where the event's whole contribution is below the 1e-12 floor (spec section 5A).
+
 ## [2.4.0] - 2026-10-26
 
 ### Added

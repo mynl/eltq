@@ -70,7 +70,7 @@ fn bench_beta_params(c: &mut Criterion) {
             let mut acc = 0.0;
             for i in 1..1024 {
                 let mu = i as f64 * 0.09;
-                let (a, b) = beta_params(black_box(100.0), black_box(mu), black_box(4.0 + mu));
+                let (a, b) = beta_params(black_box(100.0), black_box(mu), black_box((4.0 + mu).sqrt()));
                 acc += a + b;
             }
             acc

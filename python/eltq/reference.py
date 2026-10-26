@@ -104,14 +104,18 @@ _BETA = 2    # atom at mu in raw; a beta on [0, M] in secondary
 _BERNOULLI = 3  # atom at mu in raw; rate (1 - p) at 0 and rate p at M in secondary
 
 
-def beta_params(max_loss: float, mean_loss: float, variance: float):
-    """Return ``(alpha, beta)`` for admissible ``(M, mu, sigma^2)``.
+def beta_params(max_loss: float, mean_loss: float, sd: float):
+    """Return ``(alpha, beta)`` for admissible ``(M, mu, sigma)``.
 
-    Uses ``kappa = mu (M - mu) / sigma^2 - 1`` to avoid forming ``M**2``.
-    Caller must ensure ``0 < mu < M`` and ``0 < sigma^2 < mu (M - mu)``.
+    ``kappa = mu (M - mu) / sigma^2 - 1`` formed in ratios,
+    ``((M - mu) / mu) / (sigma / mu)^2 - 1``, so that no product of two
+    monetary amounts appears (``sigma^2`` alone overflows from a scale of
+    about 1e154 and underflows below about 1e-154; peer review, finding
+    I3). Caller must ensure ``0 < mu < M`` and ``0 < sigma^2 < mu (M - mu)``.
     """
     p = mean_loss / max_loss
-    kappa = mean_loss * (max_loss - mean_loss) / variance - 1.0
+    cv = sd / mean_loss
+    kappa = ((max_loss - mean_loss) / mean_loss) / (cv * cv) - 1.0
     return p * kappa, (1.0 - p) * kappa
 
 
@@ -1012,13 +1016,13 @@ def build_survival_curve(beta_rows, atoms, min_loss: float,
 def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
                    mean_is_loss_rate, variance_policy):
     """Classify every row (spec section 4): kinds, effective mean and
-    variance, the largest contributing loss, and the diagnostics. Dropped
-    rows never touch an output."""
+    standard deviation, the largest contributing loss, and the diagnostics.
+    Dropped rows never touch an output."""
     n_rows = rate.size
     diagnostics: dict[str, RowIssues] = {}
     kinds = np.empty(n_rows, dtype=np.int8)
     mu_eff = np.empty(n_rows, dtype=np.float64)
-    var_eff = np.empty(n_rows, dtype=np.float64)
+    sd_eff = np.empty(n_rows, dtype=np.float64)
     max_contrib_loss = 0.0
     for j in range(rate.size):
         lam, m, mu, s_i, s_c = (rate[j], max_loss[j], mean_loss[j],
@@ -1040,9 +1044,8 @@ def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
         # Total conditional sd is the arithmetic sum of the two components
         # (Burke, Rau-Chaplin, Varghese 2016, section III.E, step i).
         sigma = s_i + s_c
-        sigma2 = sigma * sigma
         mu_eff[j] = mu
-        if m == 0.0 or sigma2 == 0.0 or mu == 0.0 or mu == m:
+        if m == 0.0 or sigma == 0.0 or mu == 0.0 or mu == m:
             # Boundary/degenerate treatment: a single atom at mu. (For a
             # boundary mean with sigma > 0 the variance is formally
             # inadmissible; the specified degenerate treatment resolves it.)
@@ -1054,12 +1057,15 @@ def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
             kinds[j] = _ATOM
             _note(diagnostics, "atom_by_resolution", event_ids[j])
         else:
-            v_max = mu * (m - mu)
-            if sigma2 >= v_max:
+            # The admissibility test in ratios, (sigma / mu)^2 against
+            # M / mu - 1, so that no product of two monetary amounts is
+            # formed (peer review, finding I3); `beta_params` likewise.
+            bound = (m - mu) / mu
+            if (sigma / mu) ** 2 >= bound:
                 if variance_policy == "error":
                     raise VarianceError(
-                        f"row {event_ids[j]}: sigma^2 = {sigma2} >= "
-                        f"mu (M - mu) = {v_max} is inadmissible for a beta"
+                        f"row {event_ids[j]}: sigma^2 = {sigma * sigma} >= "
+                        f"mu (M - mu) = {mu * (m - mu)} is inadmissible for a beta"
                     )
                 if variance_policy == "drop":
                     _note(diagnostics, "variance_dropped", event_ids[j])
@@ -1069,13 +1075,13 @@ def _classify_rows(rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
                     _note(diagnostics, "variance_atom", event_ids[j])
                 else:  # bernoulli
                     kinds[j] = _BERNOULLI
-                    sigma2 = v_max
+                    sigma = mu * math.sqrt(bound)  # sqrt(mu (M - mu))
                     _note(diagnostics, "variance_bernoulli", event_ids[j])
             else:
                 kinds[j] = _BETA
-            var_eff[j] = sigma2
+            sd_eff[j] = sigma
         max_contrib_loss = max(max_contrib_loss, m)
-    return kinds, mu_eff, var_eff, max_contrib_loss, diagnostics
+    return kinds, mu_eff, sd_eff, max_contrib_loss, diagnostics
 
 
 def exceedance_curve_reference(
@@ -1120,7 +1126,7 @@ def exceedance_curve_reference(
         raise EltqError(f"nodes_per_decade must be >= 1, got {npd}")
     nps = _check_nodes_per_sigma(nodes_per_sigma)
     _check_variance_policy(variance_policy)
-    kinds, mu_eff, var_eff, _, diagnostics = _classify_rows(
+    kinds, mu_eff, sd_eff, _, diagnostics = _classify_rows(
         rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
         mean_is_loss_rate, variance_policy)
     rates_kept, aal_terms, beta_rows, atoms = [], [], [], []
@@ -1140,8 +1146,8 @@ def exceedance_curve_reference(
             atoms.append((0.0, lam * (1.0 - p)))
             atoms.append((m, lam * p))
         else:
-            a, b = beta_params(m, mu, var_eff[j])
-            beta_rows.append((lam, m, a, b, mu, math.sqrt(var_eff[j])))
+            a, b = beta_params(m, mu, sd_eff[j])
+            beta_rows.append((lam, m, a, b, mu, sd_eff[j]))
     curve = build_survival_curve(beta_rows, atoms, x0, npd, nps)
     curve.total_rate = math.fsum(rates_kept)
     curve.analytic_aal = math.fsum(aal_terms)
@@ -1270,7 +1276,7 @@ def quantize_reference(
             f"unknown overflow {overflow!r} (expected top_bucket, drop, or error)")
     _check_variance_policy(variance_policy)
 
-    kinds, mu_eff, var_eff, max_contrib_loss, diagnostics = _classify_rows(
+    kinds, mu_eff, sd_eff, max_contrib_loss, diagnostics = _classify_rows(
         rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
         mean_is_loss_rate, variance_policy)
 
@@ -1330,7 +1336,7 @@ def quantize_reference(
             atoms.append((0.0, lam * (1.0 - p)))
             atoms.append((m, lam * p))
         else:
-            a, b = beta_params(m, mu, var_eff[j])
+            a, b = beta_params(m, mu, sd_eff[j])
             if method == "quantiles":
                 if min(a, b) >= LARGE_PARAMETER_FROM:
                     xs = m * large_parameter_quantiles(a, b, u)
@@ -1341,7 +1347,7 @@ def quantize_reference(
                     sec_overflow.place(secondary, x, w)
                 quad_terms.append(w * math.fsum(xs))
             else:
-                beta_rows.append((lam, m, a, b, mu, math.sqrt(var_eff[j])))
+                beta_rows.append((lam, m, a, b, mu, sd_eff[j]))
 
     curve = None
     interpolation_error = None

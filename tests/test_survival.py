@@ -211,7 +211,7 @@ def test_19_k_point_cut(impl):
         sigma = row["sd_indep"] + row["sd_corr"]
         if lam == 0.0 or sigma == 0.0 or sigma * sigma >= mu * (m - mu):
             continue
-        a, b = reference.beta_params(m, mu, sigma * sigma)
+        a, b = reference.beta_params(m, mu, sigma)
         cut = m * reference.beta_dist.ppf(1.0 - 1.0 / 64.0, a, b)
         _, sec_one, meta_one = run(
             impl, elt([(lam, m, mu, row["sd_indep"], row["sd_corr"])]),
@@ -334,7 +334,7 @@ def test_23_large_beta_parameters():
             sd = big_m * math.sqrt(alpha * beta / ((alpha + beta) ** 2 * (alpha + beta + 1.0)))
             cols = tuple(np.array([v]) for v in (1.0, big_m, mu, sd, 0.0))
             # The parameters both backends recover from (M, mu, sd).
-            a, b = reference.beta_params(big_m, mu, sd * sd)
+            a, b = reference.beta_params(big_m, mu, sd)
             switch = (a + 1.0) / (a + b + 2.0)
             ref_curve, _ = reference.exceedance_curve_reference(*cols, min_loss=0.25 * mu)
             curve = eltq.exceedance_curve(*cols, min_loss=0.25 * mu)
@@ -504,7 +504,10 @@ def test_30_kernel_validity_routing():
     # measured at min(alpha, beta) = 1e5), so the backends agree within 1e-8;
     # at and above it the narrow route, whatever the density, where both
     # backends integrate the same kernel and agree within 1e-10.
-    for small in (1e4, 1e5, LARGE_PARAMETER_FROM, 1e6, 1e9):
+    # The threshold case sits 1e-12 above the line: the engine reconstructs
+    # the parameters from (mu, sigma) to a few ulps, and a row placed exactly
+    # on the line can round below it.
+    for small in (1e4, 1e5, LARGE_PARAMETER_FROM * (1.0 + 1e-12), 1e6, 1e9):
         for ratio in (1.0, 20.0):
             a, b = small, small * ratio
             cols = beta_row(a, b)

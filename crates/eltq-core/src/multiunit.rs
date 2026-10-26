@@ -120,14 +120,15 @@ pub fn prepare_unit(
         plan.notes.push("degenerate_atom");
         return Ok(plan);
     }
-    let v_max = mu * (m - mu);
-    if sigma * sigma >= v_max {
+    // In ratios, as `validate::classify_row` (peer review, finding I3).
+    let bound = (m - mu) / mu;
+    if (sigma / mu) * (sigma / mu) >= bound {
         match policy {
             VariancePolicy::Error => {
                 return Err(Error::UnitInadmissibleVariance {
                     unit: label.to_string(),
                     sigma2: sigma * sigma,
-                    v_max,
+                    v_max: mu * (m - mu),
                 });
             }
             VariancePolicy::Drop => {
@@ -140,14 +141,14 @@ pub fn prepare_unit(
                 return Ok(plan);
             }
             VariancePolicy::ClampSigma { factor } => {
-                sigma = factor * v_max.sqrt();
+                sigma = factor * mu * bound.sqrt();
                 plan.sigma_used = sigma;
                 plan.notes.push("sigma_clamped");
             }
             VariancePolicy::Bernoulli => return Err(Error::BernoulliPolicyUnavailable),
         }
     }
-    let (alpha, beta) = beta_params(m, mu, sigma * sigma);
+    let (alpha, beta) = beta_params(m, mu, sigma);
     plan.alpha = alpha;
     plan.beta = beta;
     let t = s_i.hypot(s_c);
@@ -210,14 +211,15 @@ pub fn classify_unit_row(
             sigma,
         });
     }
-    let v_max = mu * (m - mu);
+    // In ratios, as `validate::classify_row` (peer review, finding I3).
+    let bound = (m - mu) / mu;
     let nondegenerate = if s_i == 0.0 { UnitKind::Comonotone } else { UnitKind::Beta };
-    if sigma * sigma >= v_max {
+    if (sigma / mu) * (sigma / mu) >= bound {
         return match policy {
             VariancePolicy::Error => Err(Error::InadmissibleVariance {
                 row,
                 sigma2: sigma * sigma,
-                v_max,
+                v_max: mu * (m - mu),
             }),
             VariancePolicy::Drop => {
                 diagnostics.note(Category::VarianceDropped, row);
@@ -236,7 +238,7 @@ pub fn classify_unit_row(
                 Ok(RowClass {
                     kind: nondegenerate,
                     mu,
-                    sigma: factor * v_max.sqrt(),
+                    sigma: factor * mu * bound.sqrt(),
                 })
             }
             VariancePolicy::Bernoulli => Err(Error::BernoulliPolicyUnavailable),
@@ -265,7 +267,7 @@ impl UnitPlan {
             notes: Vec::new(),
         };
         if matches!(class.kind, UnitKind::Beta | UnitKind::Comonotone) {
-            let (alpha, beta) = beta_params(spec.max_loss, class.mu, class.sigma * class.sigma);
+            let (alpha, beta) = beta_params(spec.max_loss, class.mu, class.sigma);
             plan.alpha = alpha;
             plan.beta = beta;
             let t = spec.sd_indep.hypot(spec.sd_corr);

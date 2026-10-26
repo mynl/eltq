@@ -36,7 +36,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 try:
     from eltq._eltq import (

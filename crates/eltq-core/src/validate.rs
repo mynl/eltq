@@ -18,18 +18,20 @@ pub enum RowKind {
     Bernoulli,
 }
 
-/// Classification outcome: kind plus the effective mean and variance.
+/// Classification outcome: kind plus the effective mean and standard
+/// deviation (the sd rather than the variance, so that nothing downstream
+/// holds a product of two monetary amounts).
 #[derive(Debug, Clone, Copy)]
 pub struct RowPlan {
     pub kind: RowKind,
     pub mu: f64,
-    pub var: f64,
+    pub sd: f64,
 }
 
 const DROP: RowPlan = RowPlan {
     kind: RowKind::Drop,
     mu: 0.0,
-    var: 0.0,
+    sd: 0.0,
 };
 
 /// Classify one row, recording any diagnostic. Only the strict variance
@@ -82,8 +84,7 @@ pub fn classify_row(
     // (Burke, Rau-Chaplin, Varghese 2016, section III.E, step i); the
     // admissibility test then compares sigma^2 against mu (M - mu).
     let sigma = sd_indep + sd_corr;
-    let sigma2 = sigma * sigma;
-    if max_loss == 0.0 || sigma2 == 0.0 || mu == 0.0 || mu == max_loss {
+    if max_loss == 0.0 || sigma == 0.0 || mu == 0.0 || mu == max_loss {
         // Boundary/degenerate treatment: a single atom at mu. (For a boundary
         // mean with sigma > 0 the variance is formally inadmissible; the
         // specified degenerate treatment is the resolution.)
@@ -91,7 +92,7 @@ pub fn classify_row(
         return Ok(RowPlan {
             kind: RowKind::Atom,
             mu,
-            var: 0.0,
+            sd: 0.0,
         });
     }
     // A standard deviation below 2^-48 of the mean (sixteen ulps of the loss
@@ -104,21 +105,34 @@ pub fn classify_row(
         return Ok(RowPlan {
             kind: RowKind::Atom,
             mu,
-            var: 0.0,
+            sd: 0.0,
         });
     }
-    let v_max = mu * (max_loss - mu);
-    if sigma2 >= v_max {
+    // The test sigma^2 >= mu (M - mu) in ratios, (sigma / mu)^2 against
+    // M / mu - 1, so that no product of two monetary amounts is formed:
+    // sigma^2 overflows from a scale of about 1e154 and underflows below
+    // about 1e-154 while every field stays finite, and the row was then a
+    // Bernoulli row or an atom that its unit-scale twin is not (peer review,
+    // finding I3). `beta_params` forms the shape parameters from the same
+    // ratios. The error carries the two sides in monetary units as before.
+    let cv = sigma / mu;
+    let bound = (max_loss - mu) / mu;
+    if cv * cv >= bound {
         return match config.variance_policy {
             VariancePolicy::Bernoulli => {
                 diagnostics.note(Category::VarianceBernoulli, row);
                 Ok(RowPlan {
                     kind: RowKind::Bernoulli,
                     mu,
-                    var: v_max,
+                    // sqrt(mu (M - mu)), the maximizer's sd, in ratios.
+                    sd: mu * bound.sqrt(),
                 })
             }
-            VariancePolicy::Error => Err(Error::InadmissibleVariance { row, sigma2, v_max }),
+            VariancePolicy::Error => Err(Error::InadmissibleVariance {
+                row,
+                sigma2: sigma * sigma,
+                v_max: mu * (max_loss - mu),
+            }),
             VariancePolicy::Drop => {
                 diagnostics.note(Category::VarianceDropped, row);
                 Ok(DROP)
@@ -128,7 +142,7 @@ pub fn classify_row(
                 Ok(RowPlan {
                     kind: RowKind::Atom,
                     mu,
-                    var: 0.0,
+                    sd: 0.0,
                 })
             }
             // The clamp stays in the enum for the multi-unit route; the
@@ -139,7 +153,7 @@ pub fn classify_row(
     Ok(RowPlan {
         kind: RowKind::Beta,
         mu,
-        var: sigma2,
+        sd: sigma,
     })
 }
 
@@ -201,7 +215,7 @@ mod tests {
         let plan = plan.unwrap();
         assert_eq!(plan.kind, RowKind::Bernoulli);
         assert_eq!(plan.mu, mu);
-        assert!((plan.var - 0.24).abs() < 1e-15);
+        assert!((plan.sd - 0.24_f64.sqrt()).abs() < 1e-15);
         assert_eq!(diag.get(Category::VarianceBernoulli).count, 1);
 
         c.variance_policy = VariancePolicy::clamp_default();
@@ -231,7 +245,7 @@ mod tests {
         let mut diag = Diagnostics::default();
         let plan = classify_row(0, 0.1, 100.0, 40.0, 3.0, 4.0, &c, &mut diag).unwrap();
         assert_eq!(plan.kind, RowKind::Beta);
-        assert_eq!(plan.var, 49.0);
+        assert_eq!(plan.sd, 7.0);
         // Each component alone is admissible; their sum is not: 30 + 25 = 55,
         // 55^2 = 3025 >= 40 * 60 = 2400, so the variance policy engages.
         let (plan, diag) = {
@@ -249,7 +263,7 @@ mod tests {
         let (plan, diag) = classify(0.1, 100.0, 40.0, 15.0, &c);
         let plan = plan.unwrap();
         assert_eq!(plan.kind, RowKind::Beta);
-        assert_eq!(plan.var, 225.0);
+        assert_eq!(plan.sd, 15.0);
         assert!(diag.iter_nonzero().next().is_none());
     }
 
@@ -272,11 +286,36 @@ mod tests {
         let (plan, diag) = classify(1.0, 1.0, 0.5, 1e-16, &c);
         let plan = plan.unwrap();
         assert_eq!(plan.kind, RowKind::Atom);
-        assert_eq!(plan.var, 0.0);
+        assert_eq!(plan.sd, 0.0);
         assert_eq!(diag.get(Category::AtomByResolution).count, 1);
         assert_eq!(diag.get(Category::DegenerateAtom).count, 0);
         let (plan, diag) = classify(1.0, 1.0, 0.5, 0.5 * ATOM_RESOLUTION * (1.0 + 1e-12), &c);
         assert_eq!(plan.unwrap().kind, RowKind::Beta);
         assert_eq!(diag.get(Category::AtomByResolution).count, 0);
+    }
+
+    // [ratios] The classification is the same at a monetary scale of 1e160
+    // (sigma^2 and mu (M - mu) overflow) and 1e-200 (both underflow): the
+    // admissible row stays a beta, the inadmissible one a Bernoulli row, and
+    // the degenerate tests act on the fields themselves (peer review,
+    // finding I3).
+    #[test]
+    fn classification_is_scale_invariant_across_the_double_range() {
+        let c = Config::new(1.0);
+        for scale in [1.0, 1e160, 1e-200] {
+            let (plan, diag) = classify(0.1, scale, 0.4 * scale, 0.1 * scale, &c);
+            let plan = plan.unwrap();
+            assert_eq!(plan.kind, RowKind::Beta, "{scale}");
+            assert_eq!(plan.sd, 0.1 * scale);
+            assert!(diag.iter_nonzero().next().is_none());
+            let (plan, diag) = classify(0.1, scale, 0.4 * scale, 0.5 * scale, &c);
+            let plan = plan.unwrap();
+            assert_eq!(plan.kind, RowKind::Bernoulli, "{scale}");
+            assert!((plan.sd / (0.24_f64.sqrt() * scale) - 1.0).abs() < 1e-15);
+            assert_eq!(diag.get(Category::VarianceBernoulli).count, 1);
+            let (plan, diag) = classify(0.1, scale, 0.4 * scale, 0.0, &c);
+            assert_eq!(plan.unwrap().kind, RowKind::Atom);
+            assert_eq!(diag.get(Category::DegenerateAtom).count, 1);
+        }
     }
 }

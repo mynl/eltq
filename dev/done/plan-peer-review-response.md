@@ -510,3 +510,15 @@ Calibration (`benchmarks/run_accuracy.py`, in `benchmarks/report-2.4.0.md`): at 
 The mixture's cost is the fine evaluations: 105,779 of its events are requesting (10.6%), about 7 microseconds each, which is roughly 130 incomplete-beta evaluations; with the fine mesh off (`nodes_per_sigma=1`) the build takes 1.00 s. Half of those events have coefficients of variation between 0.14 and 0.28 and ask for two pieces per base interval (about 40 extra nodes each); the quarter below 0.07 ask for five to twelve (about 100 each). The cost is intrinsic to the contract: it buys the accuracy exactly where the shared cubic was wrong, in proportion to how wrong it was, and nowhere else. Steve's ruling, 2026-10-26: accept the cost ("unlikely to feel it in reality"); the 15% ceiling of decision 2 is replaced for this step by the measured table above, and `nodes_per_sigma=1` remains the route back to the 2.3.6 speed. Committed as 2.4.0.
 
 Gates: `cargo test -p eltq-core --release` (88 lib tests, goldens regenerated); `uv run pytest` after the rebuild (186 passed, 1 skipped).
+
+### [ratios] 2.4.1 (2026-10-26)
+
+Landed as planned, with these notes:
+
+- **The row plan carries the standard deviation, not the variance** (`RowPlan::sd`, `Classified::sd_eff`, and `beta_params(M, mu, sigma)` on both backends). The plan asked only for the test in ratios, but a classification that passes a row at $10^{160}$ then hands `beta_params` a variance that is `inf`, and at $10^{-200}$ one that is `0`; the parameters had to come from the same ratios, $\kappa=\bigl((M-\mu)/\mu\bigr)/(\sigma/\mu)^2-1$, and the cleanest way to keep every product of two monetary amounts out of the pipeline was to never form the variance. The Bernoulli plan's sd is $\mu\sqrt{M/\mu-1}=\sqrt{\mu(M-\mu)}$ in the same form. The typed error still reports $\sigma^2$ and $\mu(M-\mu)$ in monetary units, formed on the error path only.
+- **The multi-unit route takes the same ratio test** (two sites in `multiunit.rs`, including the clamp's $\sigma$), so the spec's section 4A claim that a unit row is classified exactly as a one-row row is true at every scale. Not in the plan's file list; three lines each.
+- **Rounding moved one test off a knife edge.** Test 30 placed a row exactly at `LARGE_PARAMETER_FROM` by reconstructing $(\mu,\sigma)$ from $(2\times10^5, 4\times10^6)$; the new $\kappa$ rounds that $\alpha$ to $199{,}999.99999999994$, below the line, where the old form gave $200{,}000$ exactly. Neither is more right: the parameters come back from the moments to a few ulps either way. The threshold case now sits $10^{-12}$ above the line (spec test 30 says so). No golden moved beyond its $10^{-9}$ tolerance.
+- **Test 10 compares diagnostics and valid-row counts as well as grids** at the four factors, and adds the review's row at the three scales on both methods.
+- The cumulants' sd and the two documentation items (top half-bucket, tiny-$\alpha$ complement) as planned.
+
+Gates: `cargo test -p eltq-core --release` (91 lib tests); `uv run pytest` after the rebuild (186 passed, 1 skipped).

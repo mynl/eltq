@@ -12,8 +12,9 @@ spaced, rate-weighted loss-grid distributions:
   x_k = M·Q(α, β; (k+½)/K) of versions before 2.0.0 remains selectable.
 
 Atoms and the raw grid use a linear deposit rule that preserves mass and first
-moment exactly; the survival grid is exact in rate and reports its first-moment
-error. The exceedance curve is public (`exceedance_curve`). The mathematical
+moment exactly (on a windowed grid, an atom in the top half-bucket goes to the
+top node and is not overflow; spec section 6); the survival grid is exact in
+rate and reports its first-moment error. The exceedance curve is public (`exceedance_curve`). The mathematical
 contract is `secondary-uncertainty-mathematical-specification.md`; the
 implementation plans are `dev/done/plan-implementation.md` (1.0.0-1.5.0),
 `dev/done/plan-multiunit.md` (1.6.0-1.11.0: joint multi-unit secondary
@@ -87,6 +88,7 @@ identical.
 | [overflow] the windowed grid's excess moment from the integral of the curve, so events whose endpoint survival underflows keep theirs | 2.3.5 | done |
 | [tails] the endpoint ladder's power law gated on its asymptotic criterion, the one edge below it evaluated exactly, quarter-octave steps across the transition | 2.3.6 | done |
 | [mesh] bell-shaped events on a fine curve of `nodes_per_sigma` nodes per standard deviation; the accuracy contract of spec test 33 | 2.4.0 | done |
+| [ratios] the admissibility test, the shape parameters and the cumulants' sd formed in ratios, so a row classifies the same at every monetary scale; the top half-bucket and the tiny-alpha complement documented | 2.4.1 | done |
 
 ## Layout
 

@@ -827,12 +827,11 @@ pub fn build_curve(
         if kinds[row] != RowKind::Beta || input.max_loss[row] <= min_loss {
             continue;
         }
-        let (m, mu, var) = (input.max_loss[row], classified.mu_eff[row], classified.var_eff[row]);
-        let (alpha, beta) = beta_params(m, mu, var);
+        let (m, mu, sigma) = (input.max_loss[row], classified.mu_eff[row], classified.sd_eff[row]);
+        let (alpha, beta) = beta_params(m, mu, sigma);
         if !(alpha > 1.0 && beta > 1.0) {
             continue;
         }
-        let sigma = var.sqrt();
         let density = t_sigma * std::f64::consts::LN_10 * mu / sigma;
         let quadrature_ok = alpha.min(beta) >= NARROW_MIN_PARAMETER;
         if quadrature_ok && (alpha.min(beta) >= crate::batched::LARGE_PARAMETER_FROM || sigma < mu * narrow_ratio) {
@@ -912,7 +911,7 @@ pub fn build_curve(
                         // beta rate, nothing to interpolate.
                         continue;
                     }
-                    let (alpha, beta) = beta_params(m, mu, classified.var_eff[row]);
+                    let (alpha, beta) = beta_params(m, mu, classified.sd_eff[row]);
                     let bf = BetaFn::new(alpha, beta);
                     // A NaN from the kernel is an unconverged continued
                     // fraction: a typed error, never a value (spec section 8).
@@ -933,7 +932,7 @@ pub fn build_curve(
                     // NARROW_NORMAL_FROM the kernel is the normal law (a row
                     // narrower than the resolution of its mean never gets
                     // here: `validate` made it an atom).
-                    let sigma = classified.var_eff[row].sqrt();
+                    let sigma = classified.sd_eff[row];
                     if routes[row] == Route::Narrow {
                         let kernel = NarrowKernel::new(alpha, beta);
                         let bulk = narrow_bulk(&kernel, m, mu, sigma, lam, narrow_floor)
@@ -1617,7 +1616,7 @@ mod tests {
         let mu = 2.5e5;
         for (cv, check) in [(1e-2, true), (3e-3, true), (1e-5, false)] {
             let sd = cv * mu;
-            let (alpha, beta) = beta_params(m, mu, sd * sd);
+            let (alpha, beta) = beta_params(m, mu, sd);
             let kernel = NarrowKernel::new(alpha, beta);
             let (lower, stop) = narrow_bulk(&kernel, m, mu, sd, 1.0, 1e-20, ).unwrap();
             let norm = kernel.integral(lower / m, stop / m);
@@ -1702,7 +1701,7 @@ mod tests {
         }
         for sigma in [1e-8, 2e-8, 1e-10, 1e-12] {
             let mu = 0.5;
-            let (alpha, beta) = beta_params(m, mu, sigma * sigma);
+            let (alpha, beta) = beta_params(m, mu, sigma);
             let kernel = NarrowKernel::new(alpha, beta);
             let (lower, stop) = narrow_bulk(&kernel, m, mu, sigma, 1.0, 1e-20).unwrap();
             let norm = kernel.integral(lower / m, stop / m);
@@ -1893,7 +1892,7 @@ mod tests {
         let betas: Vec<(f64, f64, f64, f64)> = [0, 1, 2, 5]
             .iter()
             .map(|&r| {
-                let (a, b) = beta_params(rows[r][1], rows[r][2], (rows[r][3] + rows[r][4]).powi(2));
+                let (a, b) = beta_params(rows[r][1], rows[r][2], rows[r][3] + rows[r][4]);
                 (rows[r][0], rows[r][1], a, b)
             })
             .collect();
