@@ -7,9 +7,15 @@
 //! fdlibm port, below one ulp) at 1e-15 by the tests. The quantile is
 //! Wichura's AS241 (PPND16), a rational approximation accurate to about
 //! 1e-16 relative over the open unit interval, used once per half-bucket
-//! edge when building a unit's edge scores.
+//! edge when building a unit's edge scores. The bivariate cdf
+//! (`bivariate_cdf`, 2.6.0) is Genz's `bvnu`: Drezner and Wesolowsky's
+//! integral over the correlation by Gauss-Legendre, with the transformed
+//! integrand of Genz 2004 ("Numerical computation of rectangular bivariate
+//! and trivariate normal and t probabilities", Statistics and Computing 14)
+//! for |rho| >= 0.925; absolute accuracy about 5e-16, held against the
+//! reference's Owen's T form by the tests.
 
-use std::f64::consts::SQRT_2;
+use std::f64::consts::{PI, SQRT_2};
 
 /// Phi(x), with the infinities mapping to exactly 0 and 1.
 #[inline]
@@ -171,6 +177,199 @@ fn poly(coefficients: &[f64], x: f64) -> f64 {
     coefficients.iter().rev().fold(0.0, |acc, &c| acc * x + c)
 }
 
+/// `Phi_2(h, k; rho) = P(X <= h, Y <= k)` for standard normals with
+/// correlation `rho` in [-1, 1]. The infinities and `rho = +-1` are exact;
+/// otherwise Genz's `bvnu` on the complementary event (module notes).
+pub fn bivariate_cdf(h: f64, k: f64, rho: f64) -> f64 {
+    bivariate_upper(-h, -k, rho)
+}
+
+// Gauss-Legendre nodes and weights on [-1, 1] by |rho|: 6 points below 0.3,
+// 12 below 0.75, 20 otherwise (Genz 2004); the symmetric pairs are formed
+// in the loops.
+const GL6_X: [f64; 3] = [0.932_469_514_203_152_2, 0.661_209_386_466_264_7, 0.238_619_186_083_197_0];
+const GL6_W: [f64; 3] = [0.171_324_492_379_170_5, 0.360_761_573_048_138_4, 0.467_913_934_572_690_4];
+const GL12_X: [f64; 6] = [
+    0.981_560_634_246_719_1,
+    0.904_117_256_370_475_0,
+    0.769_902_674_194_305_0,
+    0.587_317_954_286_617_1,
+    0.367_831_498_998_180_2,
+    0.125_233_408_511_469_2,
+];
+const GL12_W: [f64; 6] = [
+    0.047_175_336_386_511_77,
+    0.106_939_325_995_318_3,
+    0.160_078_328_543_346_4,
+    0.203_167_426_723_065_9,
+    0.233_492_536_538_354_7,
+    0.249_147_045_813_402_9,
+];
+const GL20_X: [f64; 10] = [
+    0.993_128_599_185_094_9,
+    0.963_971_927_277_913_8,
+    0.912_234_428_251_325_9,
+    0.839_116_971_822_218_8,
+    0.746_331_906_460_150_8,
+    0.636_053_680_726_515_0,
+    0.510_867_001_950_827_1,
+    0.373_706_088_715_419_6,
+    0.227_785_851_141_645_1,
+    0.076_526_521_133_497_33,
+];
+const GL20_W: [f64; 10] = [
+    0.017_614_007_139_152_12,
+    0.040_601_429_800_386_94,
+    0.062_672_048_334_109_06,
+    0.083_276_741_576_704_75,
+    0.101_930_119_817_240_4,
+    0.118_194_531_961_518_4,
+    0.131_688_638_449_176_6,
+    0.142_096_109_318_382_1,
+    0.149_172_986_472_603_7,
+    0.152_753_387_130_725_9,
+];
+
+/// `P(X > dh, Y > dk)`, Genz's `bvnu`: the upper-tail probability computed
+/// directly, so small values keep their relative accuracy (the cdf's
+/// complement would not).
+pub fn bivariate_upper(dh: f64, dk: f64, r: f64) -> f64 {
+    BivariateUpper::new(r).eval(dh, dk)
+}
+
+/// Genz's `bvnu` at a fixed correlation, with everything that depends on
+/// the correlation alone (the Gauss-Legendre nodes transformed through the
+/// arcsine or the square root) computed once: a unit's stratum table
+/// evaluates it at every edge and stratum boundary with one correlation.
+#[derive(Debug, Clone)]
+pub struct BivariateUpper {
+    r: f64,
+    /// Per node and sign: `(sn, 1 / (1 - sn^2), w)` for |r| < 0.925.
+    arcs: Vec<(f64, f64, f64)>,
+    /// Per node and sign: `(xs, rs, w)` for |r| >= 0.925.
+    roots: Vec<(f64, f64, f64)>,
+    asr: f64,
+    a_sq: f64,
+    a_half: f64,
+}
+
+impl BivariateUpper {
+    pub fn new(r: f64) -> Self {
+        let (xs, ws): (&[f64], &[f64]) = if r.abs() < 0.3 {
+            (&GL6_X, &GL6_W)
+        } else if r.abs() < 0.75 {
+            (&GL12_X, &GL12_W)
+        } else {
+            (&GL20_X, &GL20_W)
+        };
+        let mut this = BivariateUpper {
+            r,
+            arcs: Vec::new(),
+            roots: Vec::new(),
+            asr: 0.0,
+            a_sq: 0.0,
+            a_half: 0.0,
+        };
+        if r.abs() >= 1.0 || r == 0.0 || !r.is_finite() {
+            return this;
+        }
+        if r.abs() < 0.925 {
+            this.asr = r.asin();
+            for (&x, &w) in xs.iter().zip(ws) {
+                for sign in [-1.0, 1.0] {
+                    let sn = (this.asr * (sign * x + 1.0) / 2.0).sin();
+                    this.arcs.push((sn, 1.0 / (1.0 - sn * sn), w));
+                }
+            }
+        } else {
+            this.a_sq = (1.0 - r) * (1.0 + r);
+            this.a_half = this.a_sq.sqrt() / 2.0;
+            for (&x, &w) in xs.iter().zip(ws) {
+                for sign in [-1.0, 1.0] {
+                    let xs2 = (this.a_half * (sign * x + 1.0)).powi(2);
+                    this.roots.push((xs2, (1.0 - xs2).sqrt(), w));
+                }
+            }
+        }
+        this
+    }
+
+    /// `P(X > dh, Y > dk)`.
+    pub fn eval(&self, dh: f64, dk: f64) -> f64 {
+        let r = self.r;
+        if dh == f64::INFINITY || dk == f64::INFINITY {
+            return 0.0;
+        }
+        if dh == f64::NEG_INFINITY {
+            return if dk == f64::NEG_INFINITY { 1.0 } else { cdf(-dk) };
+        }
+        if dk == f64::NEG_INFINITY {
+            return cdf(-dh);
+        }
+        if r == 0.0 {
+            return cdf(-dh) * cdf(-dk);
+        }
+        if r >= 1.0 {
+            // Y = X.
+            return cdf(-dh.max(dk));
+        }
+        if r <= -1.0 {
+            // Y = -X: h < X < -k.
+            return (cdf(-dk) - cdf(dh)).max(0.0);
+        }
+        let two_pi = 2.0 * PI;
+        let h = dh;
+        let mut k = dk;
+        let mut hk = h * k;
+        let mut bvn = 0.0;
+        if r.abs() < 0.925 {
+            let hs = (h * h + k * k) / 2.0;
+            for &(sn, inv, w) in &self.arcs {
+                bvn += w * ((sn * hk - hs) * inv).exp();
+            }
+            bvn * self.asr / (2.0 * two_pi) + cdf(-h) * cdf(-k)
+        } else {
+            if r < 0.0 {
+                k = -k;
+                hk = -hk;
+            }
+            let a_sq = self.a_sq;
+            let a = 2.0 * self.a_half;
+            let bs = (h - k) * (h - k);
+            let c = (4.0 - hk) / 8.0;
+            let d = (12.0 - hk) / 16.0;
+            let asr = -(bs / a_sq + hk) / 2.0;
+            if asr > -100.0 {
+                bvn = a * asr.exp() * (1.0 - c * (bs - a_sq) * (1.0 - d * bs / 5.0) / 3.0 + c * d * a_sq * a_sq / 5.0);
+            }
+            if -hk < 100.0 {
+                let b = bs.sqrt();
+                bvn -= (-hk / 2.0).exp() * two_pi.sqrt() * cdf(-b / a) * b * (1.0 - c * bs * (1.0 - d * bs / 5.0) / 3.0);
+            }
+            for &(xs2, rs, w) in &self.roots {
+                let asr = -(bs / xs2 + hk) / 2.0;
+                if asr > -100.0 {
+                    bvn += self.a_half
+                        * w
+                        * asr.exp()
+                        * ((-hk * xs2 / (2.0 * (1.0 + rs) * (1.0 + rs))).exp() / rs - (1.0 + c * xs2 * (1.0 + d * xs2)));
+                }
+            }
+            bvn = -bvn / two_pi;
+            if r > 0.0 {
+                bvn + cdf(-h.max(k))
+            } else {
+                bvn = -bvn;
+                if k > h {
+                    bvn += cdf(k) - cdf(h);
+                }
+                bvn
+            }
+        }
+        .clamp(0.0, 1.0)
+    }
+}
+
 const A: [f64; 8] = [
     3.387_132_872_796_366_608e0,
     1.331_416_678_917_843_774_5e2,
@@ -235,6 +434,41 @@ const F: [f64; 8] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Values from the reference's Owen's T form (`scipy.special.owens_t`),
+    // which agrees with `scipy.stats.multivariate_normal` to 2e-16.
+    #[test]
+    fn bivariate_cdf_matches_owens_t() {
+        for (h, k, rho, want) in [
+            (0.5, -0.3, 0.6, 0.3436225301112108),
+            (-1.2, 2.1, -0.4, 0.10778388950627904),
+            (2.0, 2.5, 0.95, 0.9770151325239155),
+            (-0.7, -0.2, 0.99, 0.2419610603918873),
+            (0.0, 0.8, 0.7, 0.47671405388326504),
+            (1.5, 1.5, 0.2, 0.8749963563637859),
+            (-3.0, 1.0, -0.9, 1.7848133859743598e-08),
+            (0.3, 0.3, 0.999, 0.6111064740895027),
+            (0.0, 0.0, 0.3, 0.29849334201033917),
+        ] {
+            let got = bivariate_cdf(h, k, rho);
+            assert!((got - want).abs() < 5e-15, "({h}, {k}, {rho}): {got} vs {want}");
+        }
+        // Exact limits: independence, the infinities, rho = +-1.
+        assert_eq!(bivariate_cdf(0.4, -1.1, 0.0), cdf(0.4) * cdf(-1.1));
+        assert_eq!(bivariate_cdf(0.4, f64::INFINITY, 0.5), cdf(0.4));
+        assert_eq!(bivariate_cdf(f64::INFINITY, 0.4, -0.5), cdf(0.4));
+        assert_eq!(bivariate_cdf(0.4, f64::NEG_INFINITY, 0.5), 0.0);
+        assert_eq!(bivariate_cdf(f64::INFINITY, f64::INFINITY, 0.5), 1.0);
+        assert_eq!(bivariate_cdf(0.4, 1.1, 1.0), cdf(0.4));
+        assert!((bivariate_cdf(0.4, 1.1, -1.0) - (cdf(0.4) + cdf(1.1) - 1.0)).abs() < 1e-15);
+        // Symmetry in the arguments and the telescoping over a partition.
+        assert!((bivariate_cdf(0.7, -0.4, 0.85) - bivariate_cdf(-0.4, 0.7, 0.85)).abs() < 1e-15);
+        let edges: Vec<f64> = (0..=16).map(|i| quantile(i as f64 / 16.0)).collect();
+        for y in [-2.0, 0.0, 0.3, 4.0] {
+            let total: f64 = edges.windows(2).map(|e| bivariate_cdf(y, e[1], 0.9) - bivariate_cdf(y, e[0], 0.9)).sum();
+            assert!((total - cdf(y)).abs() < 1e-15, "{y}: {total}");
+        }
+    }
 
     #[test]
     fn erfc_matches_libm_to_1e15() {

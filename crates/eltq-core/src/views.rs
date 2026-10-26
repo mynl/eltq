@@ -44,7 +44,7 @@ use crate::multiunit::{
     LayerMeans, RowClass, UnitKind, UnitPlan, UnitSpec, classify_unit_row, conditional_matrix,
     grid_length_for, marginal_pmf, prepare_unit,
 };
-use crate::quadrature::{ZRule, z_quadrature};
+use crate::quadrature::{FactorRule, ZRule};
 use crate::sum::{Neumaier, grid_moment, sum};
 use crate::terms::{UnitTerms, View, ViewMap, check_grid_alignment};
 
@@ -136,7 +136,7 @@ impl Convolution {
 pub struct MultiConfig {
     pub bucket_size: f64,
     pub grid_length: Option<usize>,
-    /// Shared-factor quadrature nodes Q.
+    /// Shared-factor nodes Q, or body strata under the stratified rule.
     pub z_nodes: usize,
     pub z_rule: ZRule,
     /// Views to compute, in output order.
@@ -157,7 +157,7 @@ impl MultiConfig {
             bucket_size,
             grid_length: None,
             z_nodes: 32,
-            z_rule: ZRule::Midpoint,
+            z_rule: ZRule::Stratified,
             views: View::ALL.to_vec(),
             normalize: false,
             variance_policy: VariancePolicy::default(),
@@ -222,6 +222,8 @@ pub struct MultiMeta {
     pub grid_length: usize,
     pub z_nodes: usize,
     pub z_rule: ZRule,
+    /// Nodes or strata the rule actually used.
+    pub z_strata: usize,
     pub views: Vec<View>,
     pub normalized: bool,
     pub total_rate: f64,
@@ -349,10 +351,9 @@ impl UnitSpectra {
     }
 }
 
-/// Per-worker state: quadrature, FFT plans, compiled view maps, scratch.
+/// Per-worker state: the factor rule, FFT plans, compiled view maps, scratch.
 struct Worker<'a> {
-    z: &'a [f64],
-    w: &'a [f64],
+    rule: &'a FactorRule,
     h: f64,
     fft: FftCache,
     maps: HashMap<(usize, usize, View), ViewMap>,
@@ -428,7 +429,7 @@ impl Worker<'_> {
     /// Estimated multiply-add counts of the direct and FFT paths for the
     /// computed views (mirrors the loops in `direct_views` / `fft_views`).
     fn estimate(&self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View]) -> (f64, f64) {
-        let q = self.z.len();
+        let q = self.rule.len();
         let bare_exists = units.iter().any(|u| u.bare);
         let shared_needed = uses_shared_block(units, computed);
         let mut direct = 0.0;
@@ -509,7 +510,7 @@ impl Worker<'_> {
 
     /// Direct path: fill `pmfs[v]` for every computed view.
     fn direct_views(&mut self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View], pmfs: &mut [Vec<f64>]) {
-        let q = self.z.len();
+        let q = self.rule.len();
         let bare_exists = units.iter().any(|u| u.bare);
         let shared_corr_units: Vec<usize> = (0..units.len()).filter(|&i| units[i].bare && units[i].rows > 1).collect();
         // Shared bare block: independent part once, correlated part per z;
@@ -591,7 +592,7 @@ impl Worker<'_> {
                     convolve_direct(&self.acc, &self.pmf, &mut self.tmp);
                     std::mem::swap(&mut self.acc, &mut self.tmp);
                 }
-                let wq = self.w[zi];
+                let wq = self.rule.weights[zi];
                 for (o, a) in out.iter_mut().zip(&self.acc) {
                     *o += wq * a;
                 }
@@ -602,7 +603,7 @@ impl Worker<'_> {
     /// FFT path: one event-wide size, every (unit, row set, z) spectrum
     /// transformed once, spectra accumulated over z, one inverse per view.
     fn fft_views(&mut self, units: &[LiveUnit], terms: &[UnitTerms], computed: &[View], pmfs: &mut [Vec<f64>]) {
-        let q = self.z.len();
+        let q = self.rule.len();
         let bare_exists = units.iter().any(|u| u.bare);
         // Event-wide size from the largest view total.
         let mut max_total = 1;
@@ -681,7 +682,7 @@ impl Worker<'_> {
                         *a *= b;
                     }
                 }
-                let wq = if any_corr { self.w[zi] } else { 1.0 };
+                let wq = if any_corr { self.rule.weights[zi] } else { 1.0 };
                 for (a, p) in self.spec_acc.iter_mut().zip(&self.spec_prod) {
                     *a += wq * p;
                 }
@@ -748,7 +749,8 @@ pub fn multiunit_views(
     for t in terms {
         check_grid_alignment(t, h)?;
     }
-    let (z, w) = z_quadrature(config.z_nodes, config.z_rule)?;
+    let rule = FactorRule::new(config.z_nodes, config.z_rule)?;
+    let single = FactorRule::single();
 
     // Pass 1: structure, classification, event spans.
     let mut diagnostics = Diagnostics::default();
@@ -895,8 +897,7 @@ pub fn multiunit_views(
         let mut aal_acc = Neumaier::default();
         let mut analytic_acc: Vec<Neumaier> = vec![Neumaier::default(); n_views];
         let mut worker = Worker {
-            z: &z,
-            w: &w,
+            rule: &rule,
             h,
             fft: FftCache::default(),
             maps: HashMap::new(),
@@ -932,8 +933,8 @@ pub fn multiunit_views(
                 let spec = input.spec(row);
                 let plan = UnitPlan::from_row(&class, &spec);
                 let n_unit = grid_length_for(plan.support(), h);
-                let nodes: &[f64] = if plan.depends_on_factor() { &z } else { &[0.0] };
-                let base = conditional_matrix(&plan, h, n_unit, nodes).map_err(|_| Error::KernelFailure {
+                let unit_rule = if plan.depends_on_factor() { &rule } else { &single };
+                let base = conditional_matrix(&plan, h, n_unit, unit_rule).map_err(|_| Error::KernelFailure {
                     row,
                     alpha: plan.alpha,
                     beta: plan.beta,
@@ -945,7 +946,7 @@ pub fn multiunit_views(
                     row,
                     code,
                     plan,
-                    rows: nodes.len(),
+                    rows: unit_rule.len(),
                     sets: [base, Vec::new(), Vec::new(), Vec::new()],
                     lens: [n_unit, 0, 0, 0],
                     bare: !t.has_policy_terms() && !t.has_reinsurance(),
@@ -1108,6 +1109,7 @@ pub fn multiunit_views(
         grid_length: n,
         z_nodes: config.z_nodes,
         z_rule: config.z_rule,
+        z_strata: rule.len(),
         views: config.views.clone(),
         normalized: config.normalize,
         total_rate,

@@ -32,8 +32,13 @@ Discretization conventions, chosen to match eltq's deposit rule:
   comonotone units' per-z atoms, and every transformed view value) use the
   linear mass- and mean-preserving deposit;
 - the shared factor is integrated by midpoint quantile nodes
-  ``z_q = Phi^{-1}((q + 1/2) / Q)`` with equal weights (default) or
-  Gauss-Hermite nodes and weights (``z_rule="gauss_hermite"``).
+  ``z_q = Phi^{-1}((q + 1/2) / Q)`` with equal weights, by Gauss-Hermite
+  nodes and weights (``z_rule="gauss_hermite"``), or by the stratified rule
+  (``z_rule="stratified"``, 2.6.0): ``Q`` equal-probability strata of
+  ``Z_c``, each unit's conditional law averaged over the stratum exactly
+  (through the bivariate normal cdf below loading one, through the marginal
+  restricted to the stratum at loading one), the units independent given
+  the stratum; every marginal is then exact at any ``Q``.
 
 Fresh ``(Z_c, Z_i)`` per occurrence make occurrences iid, so the
 rate-weighted mixture severity plus a Poisson frequency reproduces the
@@ -49,11 +54,13 @@ from collections import namedtuple
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.special import betainc
+from scipy.special import betainc, owens_t
 from scipy.stats import beta as beta_dist
 from scipy.stats import norm
 
-from eltq._meta import JointMeta, MultiMeta, RowIssues
+from eltq._meta import (
+    STRATA_BODY_TOP, STRATA_TAIL_FLOOR, STRATA_TAIL_RATIO, JointMeta, MultiMeta, RowIssues,
+)
 from eltq.reference import (
     DEFAULT_CLAMP_FACTOR,
     MAX_EXAMPLES,
@@ -65,7 +72,7 @@ from eltq.reference import (
 from eltq.terms import VIEWS, TermsError, UnitTerms, check_grid_alignment, parse_terms
 
 VARIANCE_POLICIES = ("bernoulli", "clamp", "error", "drop", "atom")
-Z_RULES = ("midpoint", "gauss_hermite")
+Z_RULES = ("midpoint", "gauss_hermite", "stratified")
 
 CLAMP_DEPRECATION = (
     "the clamp variance policy on the multi-unit route is deprecated from 2.5.0 "
@@ -220,6 +227,8 @@ def z_quadrature(n_z: int, rule: str = "midpoint"):
     ``midpoint``: ``z_q = Phi^{-1}((q + 1/2) / n_z)`` with equal weights, the
     midpoint-quantile style of the one-unit specification. ``gauss_hermite``:
     probabilists' Gauss-Hermite nodes with weights normalized to sum to one.
+    The stratified rule has no nodes and is refused here (see
+    :class:`FactorRule`).
     """
     q_n = int(n_z)
     if q_n < 1:
@@ -229,7 +238,115 @@ def z_quadrature(n_z: int, rule: str = "midpoint"):
         return z, np.full(q_n, 1.0 / q_n)
     if rule == "gauss_hermite":
         return _gauss_hermite(q_n)
+    if rule == "stratified":
+        raise EltqError("the stratified rule has strata, not nodes; use FactorRule")
     raise EltqError(f"unknown z_rule {rule!r}; expected one of {Z_RULES}")
+
+
+def stratum_edges(n_z: int) -> np.ndarray:
+    """Boundaries in probability of the default stratified partition:
+    ``n_z`` equal strata over ``[0, STRATA_BODY_TOP]``, then tail
+    probabilities ``(1 - STRATA_BODY_TOP) / STRATA_TAIL_RATIO**k`` for ``k =
+    1, 2, ...`` down to the floor, then 1 (mirrors ``stratum_edges`` in
+    ``quadrature.rs``)."""
+    body = STRATA_BODY_TOP * np.arange(n_z + 1) / n_z
+    tails = []
+    k = 1
+    while True:
+        tail = (1.0 - STRATA_BODY_TOP) * STRATA_TAIL_RATIO ** (-k)
+        if tail <= STRATA_TAIL_FLOOR:
+            break
+        tails.append(1.0 - tail)
+        k += 1
+    return np.concatenate([body, tails, [1.0]])
+
+
+@dataclass
+class FactorRule:
+    """The shared factor's rule as the conditional pmfs consume it: ``Q``
+    nodes with weights (the node rules), or strata with their boundaries in
+    probability (``edges_u``) and in ``z`` (``edges_z``, from ``-inf`` to
+    ``+inf``) and their widths as weights (the stratified rule)."""
+
+    rule: str
+    nodes: np.ndarray
+    weights: np.ndarray
+    edges_u: np.ndarray
+    edges_z: np.ndarray
+
+    @classmethod
+    def new(cls, n_z: int, rule: str = "stratified") -> FactorRule:
+        """The rule with ``n_z`` nodes, or ``n_z`` body strata plus the tail
+        ladder."""
+        q_n = int(n_z)
+        if rule == "stratified":
+            if q_n < 1:
+                raise EltqError(f"z_nodes must be >= 1, got {n_z}")
+            return cls.from_edges(stratum_edges(q_n))
+        z, w = z_quadrature(q_n, rule)
+        return cls(rule, z, w, np.empty(0), np.empty(0))
+
+    @classmethod
+    def from_edges(cls, edges_u) -> FactorRule:
+        """The stratified rule on explicit boundaries in probability,
+        ascending from 0 to 1 (the convergence study's equal strata)."""
+        edges_u = np.asarray(edges_u, dtype=np.float64)
+        return cls("stratified", np.empty(0), np.diff(edges_u), edges_u, norm.ppf(edges_u))
+
+    @classmethod
+    def single(cls) -> FactorRule:
+        """One node at ``z = 0`` with weight one: a unit independent of the
+        factor."""
+        return cls("midpoint", np.zeros(1), np.ones(1), np.empty(0), np.empty(0))
+
+    def __len__(self) -> int:
+        return self.weights.size
+
+    @property
+    def stratified(self) -> bool:
+        return self.rule == "stratified"
+
+
+def bivariate_normal_cdf(h, k, rho: float):
+    """``Phi_2(h, k; rho) = P(X <= h, Y <= k)`` for standard normals with
+    correlation ``rho``, elementwise over broadcast ``h`` and ``k``.
+
+    Owen (1956): ``Phi_2 = (Phi(h) + Phi(k)) / 2 - T(h, a_h) - T(k, a_k) -
+    beta`` with Owen's T function, ``a_h = (k - rho h) / (h sqrt(1 -
+    rho^2))``, ``a_k`` likewise, and ``beta`` 1/2 when ``h k < 0`` or ``h k =
+    0`` with ``h + k < 0``, else 0; ``T(0, a) = atan(a) / (2 pi)`` and the
+    infinities and ``rho = +-1`` are the exact limits. Agrees with
+    ``scipy.stats.multivariate_normal`` to 2e-16.
+    """
+    h = np.asarray(h, dtype=np.float64)
+    k = np.asarray(k, dtype=np.float64)
+    h, k = np.broadcast_arrays(h, k)
+    if rho >= 1.0:
+        return norm.cdf(np.minimum(h, k))
+    if rho <= -1.0:
+        return np.maximum(norm.cdf(h) + norm.cdf(k) - 1.0, 0.0)
+    s = math.sqrt((1.0 - rho) * (1.0 + rho))
+    out = np.empty(h.shape)
+    finite = np.isfinite(h) & np.isfinite(k)
+    # The infinities: -inf on either axis gives 0, +inf the other marginal.
+    out[~finite] = np.where(
+        (h[~finite] == -np.inf) | (k[~finite] == -np.inf), 0.0,
+        np.where(h[~finite] == np.inf, norm.cdf(k[~finite]), norm.cdf(h[~finite])))
+    hf, kf = h[finite], k[finite]
+
+    def term(x, y):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            a = (y - rho * x) / (x * s)
+        t = np.where(x == 0.0, 0.0, owens_t(np.where(x == 0.0, 1.0, x), np.where(x == 0.0, 0.0, a)))
+        # T(0, a) with a = sign(y) inf: +-1/4; both zero: the limit below.
+        return np.where(x == 0.0, np.where(y > 0.0, 0.25, np.where(y < 0.0, -0.25, 0.0)), t)
+
+    beta = np.where((hf * kf < 0.0) | ((hf * kf == 0.0) & (hf + kf < 0.0)), 0.5, 0.0)
+    value = 0.5 * (norm.cdf(hf) + norm.cdf(kf)) - term(hf, kf) - term(kf, hf) - beta
+    both_zero = (hf == 0.0) & (kf == 0.0)
+    value = np.where(both_zero, 0.25 + math.asin(rho) / (2.0 * math.pi), value)
+    out[finite] = np.clip(value, 0.0, 1.0)
+    return out
 
 
 def _gauss_hermite(n: int):
@@ -286,16 +403,40 @@ def two_point_conditional(p: float, w_corr: float, w_indep: float, z: np.ndarray
     return norm.sf((y0 - w_corr * z) / w_indep)
 
 
-def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z: np.ndarray) -> np.ndarray:
-    """Conditional bucket pmf of one unit for each shared-factor value.
+def edge_cdf(prep: _Prepped, bucket_size: float, n: int) -> np.ndarray:
+    """The unit's marginal distribution function at the ``n + 1`` half-bucket
+    edges: 0 below zero, 1 at or above M, the beta or the two-point step
+    between."""
+    edges = (np.arange(n + 1) - 0.5) * bucket_size
+    if prep.kind == _TWO_POINT:
+        return np.where(edges < 0.0, 0.0, np.where(edges < prep.max_loss, 1.0 - prep.two_point_p, 1.0))
+    return beta_dist.cdf(edges / prep.max_loss, prep.alpha, prep.beta)
 
-    Returns a ``(len(z), n)`` array whose row q is the pmf of the unit's loss
-    on buckets ``0, h, ..., (n - 1) h`` conditional on ``Z_c = z[q]``. Every
-    row sums to one. Beta units use cdf differences at half-bucket edges;
-    atoms, two-point units and comonotone units use the linear deposit of
-    their point values.
+
+def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z) -> np.ndarray:
+    """Conditional bucket pmf of one unit for each node or stratum.
+
+    ``z`` is a :class:`FactorRule` or an array of nodes. Returns a ``(Q, n)``
+    array whose row q is the pmf of the unit's loss on buckets ``0, h, ...,
+    (n - 1) h`` given ``Z_c = z[q]`` (a node rule) or given ``Phi(Z_c)`` in
+    the q-th stratum (the stratified rule). Every row sums to one. Beta units
+    use cdf differences at half-bucket edges; atoms, two-point units and
+    comonotone units use the linear deposit of their point values.
+
+    Under the stratified rule the stratum average of the conditional
+    distribution function at an edge score ``y`` is ``(Phi_2(y, z_{s+1}; w)
+    - Phi_2(y, z_s; w)) / (b_s - a_s)`` for a loading ``w`` below one, so the
+    rows telescope to the marginal exactly; at loading one the stratum's law
+    is the marginal restricted to the stratum, ``(clip(F(x), a, b) - a) /
+    (b - a)``.
     """
-    q_n = z.size
+    if isinstance(z, FactorRule):
+        rule = z
+        z = rule.nodes
+    else:
+        z = np.asarray(z, dtype=np.float64)
+        rule = None
+    q_n = len(rule) if rule is not None else z.size
     inv_h = 1.0 / bucket_size
     pmf = np.zeros((q_n, n))
     if prep.kind == _ATOM:
@@ -303,6 +444,25 @@ def conditional_pmfs(prep: _Prepped, bucket_size: float, n: int, z: np.ndarray) 
         _deposit(row, prep.mean_loss, 1.0, inv_h)
         pmf[:] = row
         return pmf
+    if rule is not None and rule.stratified:
+        f = edge_cdf(prep, bucket_size, n)
+        inv_width = (1.0 / rule.weights)[:, None]
+        if prep.kind == _COMONOTONE or prep.w_indep == 0.0:
+            a, b = rule.edges_u[:-1, None], rule.edges_u[1:, None]
+            clipped = np.clip(f[None, :], a, b)
+            return inv_width * np.diff(clipped, axis=1)
+        y = norm.ppf(f)
+        # U(y_e, z_s) = P(V <= y_e, Z_c > z_s) = Phi_2(y_e, -z_s; -w) over
+        # the (Q + 1) x (n + 1) table of boundaries and edges, the upper-tail
+        # form the engine uses so that the two agree in the narrow tail
+        # strata; U(y, -inf) = Phi(y), U(y, +inf) = 0, U(+inf, z) = Phi(-z).
+        table = np.zeros((q_n + 1, n + 1))
+        table[0] = norm.cdf(y)
+        for s in range(1, q_n):
+            table[s] = bivariate_normal_cdf(y, -rule.edges_z[s], -prep.w_corr)
+            table[s, -1] = norm.sf(rule.edges_z[s])
+        averaged = inv_width * (table[:-1] - table[1:])
+        return np.maximum(np.diff(averaged, axis=1), 0.0)
     if prep.kind == _TWO_POINT:
         at_max = two_point_conditional(prep.two_point_p, prep.w_corr, prep.w_indep, z)
         for q, a in enumerate(at_max):
@@ -368,7 +528,7 @@ class BivariateSU:
         return self.meta.bucket_size * np.arange(n1 + n2 - 1), ps
 
 
-def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoint",
+def secondary_two_units(units, bucket_size, n1, n2, *, n_z=32, z_rule="stratified",
                         variance_policy="bernoulli", clamp_factor=DEFAULT_CLAMP_FACTOR):
     """Joint bucketed loss distribution for one event across two units.
 
@@ -383,10 +543,10 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
         Grid lengths for unit 1 and unit 2. Each must cover its unit's
         maximum loss, ``(n - 1) h >= M``; anything less raises.
     n_z : int, optional
-        Number of shared-factor quadrature nodes. Accuracy control; raise it
-        when ``sd_corr`` dominates ``sd_indep``.
-    z_rule : {"midpoint", "gauss_hermite"}, optional
-        Quadrature rule for the shared factor.
+        Shared-factor nodes, or body strata under the stratified rule
+        (:class:`FactorRule`).
+    z_rule : {"midpoint", "gauss_hermite", "stratified"}, optional
+        Rule for the shared factor (:class:`FactorRule`).
     variance_policy : {"bernoulli", "clamp", "error", "atom"}, optional
         Treatment of a unit whose sd is inadmissible for a beta: the
         two-point law on 0 and M (the default), clamp sigma to
@@ -410,7 +570,8 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
     warn_if_clamp(variance_policy)
     if not (0.0 < clamp_factor < 1.0):
         raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
-    z, w = z_quadrature(n_z, z_rule)
+    rule = FactorRule.new(n_z, z_rule)
+    w = rule.weights
     lengths = (int(n1), int(n2))
     preps = []
     for i, (unit, n) in enumerate(zip(units, lengths), start=1):
@@ -425,8 +586,8 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
                 required_length=grid_length_for(prep.max_loss, h))
         preps.append(prep)
 
-    cond1 = conditional_pmfs(preps[0], h, lengths[0], z)
-    cond2 = conditional_pmfs(preps[1], h, lengths[1], z)
+    cond1 = conditional_pmfs(preps[0], h, lengths[0], rule)
+    cond2 = conditional_pmfs(preps[1], h, lengths[1], rule)
     pmf = np.einsum("q,qi,qj->ij", w, cond1, cond2)
 
     x1 = h * np.arange(lengths[0])
@@ -442,6 +603,7 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
         bucket_size=h,
         z_nodes=int(n_z),
         z_rule=z_rule,
+        z_strata=len(rule),
         alpha=tuple(p.alpha for p in preps),
         beta=tuple(p.beta for p in preps),
         sigma_used=tuple(p.sigma_used for p in preps),
@@ -454,6 +616,38 @@ def secondary_two_units(units, bucket_size, n1, n2, *, n_z=1001, z_rule="midpoin
         notes=tuple(tuple(p.notes) for p in preps),
     )
     return BivariateSU(pmf=pmf, x1=x1, x2=x2, meta=meta)
+
+
+def exact_two_unit_joint(units, bucket_size, n1, n2, *, variance_policy="bernoulli",
+                         clamp_factor=DEFAULT_CLAMP_FACTOR) -> np.ndarray:
+    """The joint bucket pmf of two units of one event with no quadrature over
+    the factor: the bivariate normal rectangle probabilities of the two
+    units' normal scores at the bucket edges (spec section 4A, the reference
+    of the convergence study and of spec test 28).
+
+    The scores ``(V_1, V_2)`` are standard normal with correlation ``w_1
+    w_2``, and ``X_i`` lies in bucket ``k`` exactly when ``V_i`` lies between
+    the edge scores ``y_i(e_k)`` and ``y_i(e_{k+1})``, so the cell
+    probability is the second difference of ``Phi_2`` over the edge scores.
+    Exact for beta and two-point units at any loadings, comonotone pairs
+    included (``rho = 1``); an atom is an outer product with its deposited
+    row.
+    """
+    h = float(bucket_size)
+    preps = [prepare_unit(u, f"unit {i}", variance_policy, clamp_factor)
+             for i, u in enumerate(units, start=1)]
+    lengths = (int(n1), int(n2))
+    if any(p.kind == _ATOM for p in preps):
+        rows = [marginal_pmf(p, h, n) if p.kind == _ATOM else None for p, n in zip(preps, lengths)]
+        if all(r is not None for r in rows):
+            return np.outer(rows[0], rows[1])
+        other = 1 if rows[0] is not None else 0
+        rows[other] = marginal_pmf(preps[other], h, lengths[other])
+        return np.outer(rows[0], rows[1])
+    scores = [norm.ppf(edge_cdf(p, h, n)) for p, n in zip(preps, lengths)]
+    rho = preps[0].w_corr * preps[1].w_corr
+    table = bivariate_normal_cdf(scores[0][:, None], scores[1][None, :], rho)
+    return np.maximum(np.diff(np.diff(table, axis=0), axis=1), 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +772,7 @@ def multiunit_views_reference(
     grid_length=None,
     views=VIEWS,
     z_nodes=32,
-    z_rule="midpoint",
+    z_rule="stratified",
     normalize=False,
     variance_policy="bernoulli",
     clamp_factor=DEFAULT_CLAMP_FACTOR,
@@ -608,7 +802,8 @@ def multiunit_views_reference(
     views : sequence of str
         Views to return, any of ground_up, gross, ceded, net.
     z_nodes, z_rule
-        Shared-factor quadrature (see :func:`z_quadrature`).
+        Shared-factor rule and its Q (see :class:`FactorRule`): ``midpoint``,
+        ``gauss_hermite`` or ``stratified``.
     normalize : bool
         Divide every view by the total contributing rate.
     variance_policy : {"bernoulli", "clamp", "error", "drop", "atom"}
@@ -656,7 +851,8 @@ def multiunit_views_reference(
     if not (0.0 < clamp_factor < 1.0):
         raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
     warn_if_clamp(variance_policy)
-    z, z_weights = z_quadrature(z_nodes, z_rule)
+    rule = FactorRule.new(z_nodes, z_rule)
+    z_weights = rule.weights
 
     try:
         term_table = parse_terms(terms)
@@ -757,7 +953,7 @@ def multiunit_views_reference(
             if t is None:
                 t = default_terms.setdefault(uid, UnitTerms(uid))
             unit_terms_list.append(t)
-            conds.append(conditional_pmfs(prep, h, grid_length_for(prep.support, h), z))
+            conds.append(conditional_pmfs(prep, h, grid_length_for(prep.support, h), rule))
         for view in views:
             rows = [_view_transform(c, h, t, view) for c, t in zip(conds, unit_terms_list)]
             pmf = _event_pmf(rows, z_weights)
@@ -784,6 +980,7 @@ def multiunit_views_reference(
         grid_length=n,
         z_nodes=int(z_nodes),
         z_rule=z_rule,
+        z_strata=len(rule),
         views=views,
         normalized=bool(normalize),
         total_rate=total_rate,

@@ -36,7 +36,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 try:
     from eltq._eltq import (
@@ -786,7 +786,7 @@ def multiunit_views(
     grid_length=None,
     views=VIEWS,
     z_nodes=32,
-    z_rule="midpoint",
+    z_rule="stratified",
     normalize=False,
     variance_policy="bernoulli",
     clamp_factor=0.999,
@@ -828,9 +828,17 @@ def multiunit_views(
     views : sequence of str, default all four
         Views to compute and return.
     z_nodes : int, default 32
-        Shared-factor quadrature nodes Q.
-    z_rule : {"midpoint", "gauss_hermite"}, default "midpoint"
-        Shared-factor quadrature rule.
+        Shared-factor nodes Q under a node rule; the number of equal body
+        strata under the stratified rule, whose upper-tail ladder is fixed
+        (``meta.z_strata`` reports the total).
+    z_rule : {"stratified", "midpoint", "gauss_hermite"}, default "stratified"
+        Shared-factor rule (spec section 4A). The stratified rule averages
+        each unit's conditional law over strata of the factor exactly, so
+        every marginal is exact; the units are independent given the
+        stratum, and the tail ladder holds that dependence error to about
+        3e-3 of the event total's exceedance at every level
+        (`benchmarks/z-convergence-2.6.0.md`). The node rules cut or miss
+        the tails of units with a loading near one.
     normalize : bool, default False
         Divide every view by the total contributing rate.
     variance_policy : {"bernoulli", "clamp", "error", "drop", "atom"}, default "bernoulli"
@@ -935,8 +943,8 @@ def joint_two_units(
     bucket_size,
     n1,
     n2,
-    z_nodes=1001,
-    z_rule="midpoint",
+    z_nodes=32,
+    z_rule="stratified",
     variance_policy="bernoulli",
     clamp_factor=0.999,
 ):
@@ -947,9 +955,9 @@ def joint_two_units(
     k]`` is the probability that unit 1 loses ``x1[j]`` and unit 2 loses
     ``x2[k]`` on the common grid of spacing ``bucket_size`` with ``n1`` and
     ``n2`` nodes (each must cover its unit's maximum loss); ``meta`` is a
-    ``JointMeta``. The shared factor is integrated by ``z_nodes`` quadrature
-    nodes (``z_rule`` midpoint or gauss_hermite); marginals of the pmf agree
-    with directly bucketing each beta up to quadrature error. A unit whose
+    ``JointMeta``. The shared factor is integrated by the stratified rule
+    (``z_nodes`` body strata plus the tail ladder; marginals exact) or by
+    ``z_nodes`` midpoint or Gauss-Hermite nodes, as ``multiunit_views``. A unit whose
     variance is inadmissible follows ``variance_policy`` as in
     ``multiunit_views`` (``bernoulli``, the deprecated ``clamp``, ``error``
     or ``atom``).

@@ -369,6 +369,136 @@ def test_z_quadrature_rules():
     assert z[0] == 0.0 and w[0] == 1.0
     with pytest.raises(rm.EltqError):
         rm.z_quadrature(0)
+    # Q = 4 body strata over [0, 3/4], the ladder 1/4 / sqrt(2)^k for k = 1
+    # to 43 (2^-24 is the floor) and the top stratum: 48 strata whose widths
+    # are the weights.
+    strata = rm.FactorRule.new(4, "stratified")
+    assert strata.stratified and len(strata) == 48 and strata.nodes.size == 0
+    assert np.allclose(strata.edges_u[:5], [0.0, 0.1875, 0.375, 0.5625, 0.75], rtol=0, atol=0)
+    assert math.isclose(strata.edges_u[5], 1.0 - 0.25 / math.sqrt(2.0), abs_tol=1e-15)
+    assert math.isclose(1.0 - strata.edges_u[-2], 0.25 * 2.0 ** -21.5, abs_tol=1e-15)
+    assert strata.edges_u[-1] == 1.0 and np.all(np.diff(strata.edges_u) > 0)
+    assert strata.edges_z[0] == -np.inf and strata.edges_z[-1] == np.inf
+    assert math.isclose(strata.weights.sum(), 1.0, abs_tol=1e-15)
+    assert len(rm.FactorRule.new(32, "stratified")) == 76
+    equal = rm.FactorRule.from_edges(np.arange(5) / 4)
+    assert equal.edges_z[2] == 0.0 and np.all(equal.weights == 0.25)
+    with pytest.raises(rm.EltqError):
+        rm.z_quadrature(4, "stratified")
+
+
+def test_bivariate_normal_cdf():
+    from scipy.stats import multivariate_normal
+
+    rng = np.random.default_rng(20261026)
+    for _ in range(200):
+        h, k = rng.normal(size=2) * 2.5
+        rho = rng.uniform(-0.999, 0.999)
+        want = multivariate_normal.cdf([h, k], mean=[0.0, 0.0], cov=[[1.0, rho], [rho, 1.0]])
+        assert abs(float(rm.bivariate_normal_cdf(h, k, rho)) - want) < 5e-16
+    # The zero arguments, the infinities and rho = +-1 are exact limits.
+    assert math.isclose(float(rm.bivariate_normal_cdf(0.0, 0.0, 0.3)), 0.25 + math.asin(0.3) / (2 * math.pi))
+    assert math.isclose(float(rm.bivariate_normal_cdf(0.0, 1.0, 0.5)), 0.4687429526451681, abs_tol=1e-15)
+    assert float(rm.bivariate_normal_cdf(np.inf, 0.4, 0.5)) == rm.norm.cdf(0.4)
+    assert float(rm.bivariate_normal_cdf(0.4, -np.inf, 0.5)) == 0.0
+    assert float(rm.bivariate_normal_cdf(0.4, 1.1, 1.0)) == rm.norm.cdf(0.4)
+    y = np.linspace(-3, 3, 7)
+    assert np.allclose(rm.bivariate_normal_cdf(y, np.inf, 0.7), rm.norm.cdf(y), rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# [z-rule] spec test 28: the stratified rule and the exact references (2.6.0).
+
+def test_stratified_marginals_are_exact(multi):
+    # Every unit's marginal from the joint equals its direct bucketing to
+    # rounding at any Q, loading one and two-point units included; the node
+    # rules leave a unit at loading one as Q atoms.
+    como = rm.Unit(200.0, 0.0, 250.0, 1000.0)
+    two_point = rm.Unit(30.0, 50.0, 30.0, 100.0)
+    step = rm.Unit(30.0, 0.0, 80.0, 100.0)
+    for q in (1, 8, 32):
+        for a, b, n1 in ((U1, U2, N1), (como, U2, N1), (two_point, U2, 11), (step, U2, 11),
+                         (U1._replace(sd_corr=0.0), U2, N1)):
+            pmf, _, _, meta = multi.joint(a, b, bucket_size=H, n1=n1, n2=N2, n_z=q,
+                                          z_rule="stratified")
+            assert meta.z_rule == "stratified"
+            assert math.isclose(pmf.sum(), 1.0, abs_tol=1e-12)
+            assert np.abs(pmf.sum(axis=1) - direct_marginal(a, n1)).max() < 1e-13, (q, a)
+            assert np.abs(pmf.sum(axis=0) - direct_marginal(b, N2)).max() < 1e-13, (q, a)
+            assert pmf.min() >= 0.0
+    pmf, _, _, _ = multi.joint(como, U2, bucket_size=H, n1=N1, n2=N2, n_z=8, z_rule="midpoint")
+    assert np.count_nonzero(pmf.sum(axis=1)) <= 16
+
+
+def exceedance_errors(got, exact, levels=(1e-2, 1e-3, 1e-4, 1e-5)):
+    """Relative error of the exceedance probability at the losses where the
+    exact exceedance is nearest each level (the study's tail metric); NaN
+    where the exact total never reaches the level."""
+    s_exact, s_got = 1.0 - np.cumsum(exact), 1.0 - np.cumsum(got)
+    out = []
+    for level in levels:
+        at = np.nonzero(s_exact >= level)[0]
+        if at.size == 0 or s_exact[at[-1]] > 10 * level:
+            out.append(math.nan)
+        else:
+            out.append((s_got[at[-1]] - s_exact[at[-1]]) / s_exact[at[-1]])
+    return np.array(out)
+
+
+def test_stratified_tails_against_the_exact_joint(multi):
+    # Spec test 28: cases A to D of the multi-unit article and the three
+    # Homer events against the bivariate normal rectangles. The tail ladder
+    # holds the event total's exceedance at the 1e-2 to 1e-5 levels within
+    # 1e-2 relative at the default (6.7e-3 measured, case B at 1e-4;
+    # `benchmarks/z-convergence-2.6.0.md`); case D, both loadings one, is
+    # exact beyond 1e-2 and within 2e-2 there, where the body meets the
+    # ladder; the independent case C is exact.
+    cases = {
+        "A": (U1, U2),
+        "B": (rm.Unit(200.0, 30.0, 220.0, 1000.0), rm.Unit(500.0, 60.0, 440.0, 2000.0)),
+        "C": (rm.Unit(200.0, 250.0, 0.0, 1000.0), rm.Unit(500.0, 500.0, 0.0, 2000.0)),
+        "D": (rm.Unit(200.0, 0.0, 250.0, 1000.0), rm.Unit(400.0, 0.0, 500.0, 2000.0)),
+        "H1": (rm.Unit(*HOMER[1][0]), rm.Unit(*HOMER[1][1])),
+        "H2": (rm.Unit(*HOMER[2][0]), rm.Unit(*HOMER[2][1])),
+        "H3": (rm.Unit(*HOMER[3][0]), rm.Unit(*HOMER[3][1])),
+    }
+    for name, (a, b) in cases.items():
+        n1, n2 = int(a.max_loss / H) + 1, int(b.max_loss / H) + 1
+        idx = np.add.outer(np.arange(n1), np.arange(n2)).ravel()
+
+        def total(pmf):
+            return np.bincount(idx, weights=pmf.ravel(), minlength=n1 + n2 - 1)
+
+        exact = rm.exact_two_unit_joint([a, b], H, n1, n2)
+        assert math.isclose(exact.sum(), 1.0, abs_tol=1e-12)
+        assert np.abs(exact.sum(axis=1) - direct_marginal(a, n1)).max() < 1e-13
+        pmf, _, _, meta = multi.joint(a, b, bucket_size=H, n1=n1, n2=n2)
+        assert (meta.z_rule, meta.z_nodes, meta.z_strata) == ("stratified", 32, 76)
+        errors = exceedance_errors(total(pmf), total(exact))
+        measured = errors[~np.isnan(errors)]
+        if name == "C":
+            assert np.abs(measured).max() < 1e-9, name  # rounding at the 1e-5 level
+        elif name == "D":
+            assert abs(errors[0]) < 2e-2 and np.abs(measured[1:]).max() < 1e-10, (name, errors)
+        else:
+            assert np.abs(measured).max() < 1e-2, (name, errors)
+        # The ladder, not the body count, sets the tail: Q = 8 does as well.
+        pmf8, _, _, _ = multi.joint(a, b, bucket_size=H, n1=n1, n2=n2, n_z=8)
+        errors8 = exceedance_errors(total(pmf8), total(exact))
+        assert np.nanmax(np.abs(errors8 - errors)[1:]) < 1e-3, (name, errors8)
+
+
+def test_stratified_views_agree_across_backends():
+    reference, package = MULTI_IMPLS
+    df, terms = load_multi_fixture()
+    want, m_want = run_multi(reference, df, terms=terms, bucket_size=10.0, z_nodes=16,
+                             z_rule="stratified")
+    got, m_got = run_multi(package, df, terms=terms, bucket_size=10.0, z_nodes=16,
+                           z_rule="stratified")
+    for view in m_want.views:
+        assert np.allclose(got[view], want[view], rtol=0.0, atol=1e-12 * m_want.total_rate), view
+        assert math.isclose(m_got.view_mass[view], m_want.total_rate, rel_tol=1e-12), view
+        assert got[view].min() >= 0.0
 
 
 def test_terms_line_is_reusable_in_engine(multi):

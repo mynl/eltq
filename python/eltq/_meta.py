@@ -80,6 +80,18 @@ ATOM_RESOLUTION = 2.0 ** -48
 LARGE_PARAMETER_FROM = 2e5
 
 
+#: Multi-unit route, the stratified factor rule (spec section 4A): the
+#: probability of the factor covered by the ``z_nodes`` equal body strata;
+#: above it the upper tail is a geometric ladder of ratio
+#: ``STRATA_TAIL_RATIO`` down to ``STRATA_TAIL_FLOOR`` (2^-24). Shared by
+#: both backends; mirror ``STRATA_BODY_TOP``, ``STRATA_TAIL_RATIO`` and
+#: ``STRATA_TAIL_FLOOR`` in ``crates/eltq-core/src/quadrature.rs``
+#: (`benchmarks/z-convergence-2.6.0.md`).
+STRATA_BODY_TOP = 0.75
+STRATA_TAIL_RATIO = 2.0 ** 0.5
+STRATA_TAIL_FLOOR = 2.0 ** -24
+
+
 def _zero_per_output() -> dict:
     return {"raw": 0.0, "secondary": 0.0}
 
@@ -193,6 +205,9 @@ class JointMeta:
     bucket_size: float
     z_nodes: int
     z_rule: str
+    #: Nodes or strata the rule actually used (``z_nodes`` body strata plus
+    #: the tail ladder under the stratified rule).
+    z_strata: int
     alpha: tuple
     beta: tuple
     sigma_used: tuple
@@ -222,6 +237,8 @@ class MultiMeta:
     grid_length: int
     z_nodes: int
     z_rule: str
+    #: Nodes or strata the rule actually used.
+    z_strata: int
     views: tuple
     normalized: bool
     total_rate: float

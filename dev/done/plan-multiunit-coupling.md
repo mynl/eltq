@@ -493,3 +493,63 @@ parked, had already been closed as superseded in `dev/done/` on 2026-10-25; noth
 - No golden moved: the multi-unit fixture has no inadmissible row (the generator's comment on
   e4/b said "clamped"; $900^2 < 600\times1400$, and the comment is corrected).
 - Spec: section 4's `clamp` bullet and test 26's last clause amended as the step says.
+
+### [z-rule] 2.6.0, 2026-10-26
+
+- The plan's 8-point Gauss-Legendre stratum average in the probability scale was measured first
+  (scratch probe, not committed) and falls short everywhere, not only near loading one: marginal
+  errors of $3\times10^{-5}$ at $w = 0.3$ to $4\times10^{-3}$ at $w = 0.999$, from the two end
+  strata, where $\Phi^{-1}$ is singular in $u$. Per the step's own fallback the closed form went
+  into the engine: `normal::bivariate_cdf` and `BivariateUpper` (Genz 2004, `bvnu`: Drezner and
+  Wesolowsky's integral by Gauss-Legendre, 6, 12 or 20 points by $|\rho|$, the transformed
+  integrand from $|\rho| = 0.925$), held to the reference's Owen's $T$ form
+  (`reference_multiunit.bivariate_normal_cdf`, `scipy.special.owens_t`) within $5\times10^{-15}$,
+  which itself agrees with `scipy.stats.multivariate_normal` to $2\times10^{-16}$. The stratum
+  average is formed as a difference of upper-tail probabilities $U(y, z) = \mathsf P(V \le y, Z_c >
+  z)$ on both backends, so the narrow tail strata keep their relative accuracy; the two backends
+  agree on the fixture's views within $10^{-12}$ of the total rate.
+- **Finding, and the decision it forced.** With $Q$ equal-probability strata, as the plan and
+  section 4A described the rule, the marginals are exact but the event total's exceedance at the
+  $10^{-4}$ and $10^{-5}$ levels is short by 50% to 99% even at $Q = 128$ in every dependent case:
+  the whole upper tail of the total lies inside the top stratum, where the units are treated as
+  independent. Equal strata are the wrong partition for tail metrics. A second probe (not
+  committed) measured strata refined geometrically in the upper tail of the factor, the one-row
+  survival method's ladder idea: the error is then set by the ratio alone, at every level
+  ($1.2\times10^{-2}$ at ratio 2, $3\times10^{-3}$ at $\sqrt2$, $7.5\times10^{-4}$ at $2^{1/4}$),
+  and the body count hardly matters. **Adopted:** `z_nodes` equal strata over $[0, 3/4]$, a
+  ladder of ratio $\sqrt2$ from $1/4$ down to $2^{-24}$ (44 strata) in the upper tail, then the top
+  stratum; 76 strata at the default `z_nodes = 32`. The lower tail keeps the body's width: every
+  view is nondecreasing in the loss, so every exceedance lives in the upper tail of the factor
+  (a symmetric ladder measured the same tails at 118 strata). Constants `STRATA_BODY_TOP`,
+  `STRATA_TAIL_RATIO`, `STRATA_TAIL_FLOOR` in `quadrature.rs` and `_meta.py`. Section 4A's
+  integral paragraph is rewritten accordingly; `z_strata` in `MultiMeta` and `JointMeta` reports
+  the count.
+- **Default** (decision 7): `z_rule="stratified"`, `z_nodes=32`, on `multiunit_views`,
+  `joint_two_units` and the reference; the joint's old default of 1001 midpoint nodes goes
+  (76 strata, exact marginals, tails within $7\times10^{-3}$; midpoint at 1001 had marginal errors
+  of $4\times10^{-5}$). Measured against the exact references in
+  `benchmarks/z-convergence-2.6.0.md`: worst tail error over the nine two-unit cases
+  $6.7\times10^{-3}$ (case B at $10^{-4}$), case D (both loadings one) $1.7\times10^{-2}$ at
+  $10^{-2}$ and exact beyond, standard deviations within $7\times10^{-4}$; Gauss-Hermite at 32 is
+  $10^{-9}$ on case A but $0.15$ off in the marginal of a unit at loading one; midpoint is off by
+  $10^{-1}$ to $1$ in every tail.
+- **Cost, the trade Steve should weigh.** On the 0.91M unit-row benchmark portfolio the
+  stratified default takes 8.6 s against 2.5 s (midpoint 32) and 2.0 s (Gauss-Hermite 32); it was
+  11.4 s before the bivariate normal's per-unit constants were hoisted into `BivariateUpper`
+  (which halved the two-unit joint's construction, 2.56 ms to 1.36 ms at $101 \times 201$).
+  `z_nodes=8` (52 strata) takes 6.6 s with the same tails. The plan's acceptance line allows the
+  1.11.0 figures scaled by $Q$, 2.4 times for 76 strata; the default is 3.4 times, the bivariate
+  normal construction being the excess. The node rules stay one keyword away for a portfolio
+  whose loadings are all well below one; [parity] records the final figures.
+- `z_quadrature` keeps its node-rule contract and refuses the stratified rule; `FactorRule`
+  (both backends) carries nodes or strata to the conditional matrices, with `from_edges` for
+  explicit partitions (the study's equal strata). The study, `benchmarks/z_convergence.py`, is
+  rewritten as the step says, with the exact two-unit reference `exact_two_unit_joint` (reference
+  backend) in place of the midpoint rule at $Q = 4001$; the fixture's reference is the stratified
+  rule at $Q = 4096$ body strata.
+- Goldens: `multiunit_small` regenerated under the new default (params `z_rule="stratified"`;
+  the e3 one-unit event and every mixture move by the rule's error); `joint_small` keeps its
+  explicit 1001 midpoint nodes and gains `z_strata` in its metadata.
+- `dev/plan-chebyshev-z.md`, closed before this plan started, stays closed: the rule's cost is
+  the strata count times the bivariate normal construction, and neither a hybrid node rule nor a
+  Chebyshev interpolant in $z$ addresses the within-stratum independence that the ladder fixes.

@@ -211,7 +211,7 @@ def write_golden(df: pd.DataFrame, name: str, params: dict, csv_name: str | None
 
 MULTI_COLUMNS = ["event_id", "unit_id", "rate", "mean_loss", "sd_indep",
                  "sd_corr", "max_loss"]
-MULTI_GOLDEN = {"bucket_size": 10.0, "z_nodes": 32, "z_rule": "midpoint"}
+MULTI_GOLDEN = {"bucket_size": 10.0, "z_nodes": 32, "z_rule": "stratified"}
 MULTI_TERMS = """\
 # Synthetic unit terms for fixtures/multiunit_small_elt.csv (1.7.0).
 unit a 750 xs 250 occurrence net of 50% po 400 xs 100 and 500 xs 500

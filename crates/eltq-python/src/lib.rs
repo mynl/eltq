@@ -516,8 +516,8 @@ type JointReturn<'py> = (
 /// Units are `(mean_loss, sd_indep, sd_corr, max_loss)` tuples; returns
 /// `(pmf[n1, n2], x1, x2, meta_dict)` matching `eltq.reference_multiunit`.
 #[pyfunction]
-#[pyo3(signature = (unit1, unit2, *, bucket_size, n1, n2, z_nodes=1001,
-    z_rule="midpoint", variance_policy="bernoulli",
+#[pyo3(signature = (unit1, unit2, *, bucket_size, n1, n2, z_nodes=32,
+    z_rule="stratified", variance_policy="bernoulli",
     clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR))]
 #[allow(clippy::too_many_arguments)]
 fn joint_two_units<'py>(
@@ -554,6 +554,7 @@ fn joint_two_units<'py>(
     dict.set_item("bucket_size", meta.bucket_size)?;
     dict.set_item("z_nodes", meta.z_nodes)?;
     dict.set_item("z_rule", meta.z_rule.as_str())?;
+    dict.set_item("z_strata", meta.z_strata)?;
     dict.set_item("alpha", (meta.alpha[0], meta.alpha[1]))?;
     dict.set_item("beta", (meta.beta[0], meta.beta[1]))?;
     dict.set_item("sigma_used", (meta.sigma_used[0], meta.sigma_used[1]))?;
@@ -587,7 +588,7 @@ type TermsSpec = Vec<(String, f64, f64, Vec<(f64, f64, f64)>)>;
 #[pyfunction]
 #[pyo3(signature = (event_code, unit_code, rate, mean_loss, sd_indep, sd_corr,
     max_loss, *, terms, bucket_size, grid_length=None, z_nodes=32,
-    z_rule="midpoint", views=None, normalize=false, variance_policy="bernoulli",
+    z_rule="stratified", views=None, normalize=false, variance_policy="bernoulli",
     clamp_factor=eltq_core::DEFAULT_CLAMP_FACTOR, threads=None,
     chunk_rows=None, roll_up_diagnostic=false, convolution="auto"))]
 #[allow(clippy::too_many_arguments)]
@@ -680,6 +681,7 @@ fn multiunit_views<'py>(
     dict.set_item("grid_length", meta.grid_length)?;
     dict.set_item("z_nodes", meta.z_nodes)?;
     dict.set_item("z_rule", meta.z_rule.as_str())?;
+    dict.set_item("z_strata", meta.z_strata)?;
     dict.set_item("views", names.clone())?;
     dict.set_item("normalized", meta.normalized)?;
     dict.set_item("total_rate", meta.total_rate)?;

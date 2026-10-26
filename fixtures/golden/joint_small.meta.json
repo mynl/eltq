@@ -2,6 +2,7 @@
   "bucket_size": 20.0,
   "z_nodes": 1001,
   "z_rule": "midpoint",
+  "z_strata": 1001,
   "alpha": [
     0.31200000000000006,
     0.5

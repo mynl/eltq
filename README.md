@@ -93,6 +93,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [schedule] the quantiles default chunk a rule of the row count, waves bounded by a 1 GiB memory budget, one thread pool per call | 2.4.2 | done |
 | [tidy] the survival grid walked with an interval cursor, the normal scores shared on the Cornish-Fisher route, the output scans combined; bitwise neutral | 2.4.3 | done |
 | [bernoulli] inadmissible unit rows are two-point units given the shared factor on the multi-unit route; the clamp deprecated there | 2.5.0 | done |
+| [z-rule] the stratified factor rule with a tail ladder is the default: exact marginals, the event total's tail within 7e-3; the bivariate normal in the engine; the convergence study with tail metrics | 2.6.0 | done |
 
 ## Layout
 
@@ -272,13 +273,13 @@ views, meta = eltq.multiunit_views(
     event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
     *, terms, bucket_size, grid_length=None,
     views=("ground_up", "gross", "ceded", "net"),
-    z_nodes=32, z_rule="midpoint", normalize=False,
+    z_nodes=32, z_rule="stratified", normalize=False,
     variance_policy="bernoulli", clamp_factor=0.999, roll_up_diagnostic=False)
 # views: dict view -> rate-weighted array on the grid i * h; meta: MultiMeta
 
 pmf, x1, x2, meta = eltq.joint_two_units(
     (mu1, sd_i1, sd_c1, M1), (mu2, sd_i2, sd_c2, M2),
-    *, bucket_size, n1, n2, z_nodes=1001, z_rule="midpoint")
+    *, bucket_size, n1, n2, z_nodes=32, z_rule="stratified")
 ```
 
 Rows of one event must be contiguous with one row per unit and a constant
@@ -297,9 +298,15 @@ overlaps allowed as long as the combined share stays ≤ 100% in every band, so
 ceded never exceeds gross); `net` = gross − ceded. A percent share is the fraction of
 the layer; a plain number is an amount of the layer limit (`100 po 400 xs
 100` cedes 25%). Breakpoints must be multiples of `bucket_size`. Units
-without a line get no terms. The shared factor is integrated by midpoint
-quantile nodes (default) or Gauss-Hermite; `benchmarks/z-convergence-1.7.0.md`
-records the convergence study behind the default. Both functions run in Rust
+without a line get no terms. The shared factor is integrated by the
+stratified rule (default from 2.6.0: `z_nodes` equal strata over the lower
+three quarters of the factor's probability and a geometric ladder of ratio
+√2 in the upper tail, 76 strata at `z_nodes=32`; every unit's marginal exact,
+the event total's exceedance within 7e-3 at the 1e-2 to 1e-5 levels) or by
+midpoint quantile or Gauss-Hermite nodes, which are 4 to 6 times faster and
+cut or miss the tails of units with a loading near one;
+`benchmarks/z-convergence-2.6.0.md` records the study behind the default and
+`meta.z_strata` the strata used. Both functions run in Rust
 on the compiled backend (`joint_two_units`: conditional matrices plus one
 GEMM, 1.8.0; `multiunit_views`: the per-event engine of 1.10.0, whole-event
 chunks folded bitwise-deterministically like `quantize`, direct or FFT

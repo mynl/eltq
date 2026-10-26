@@ -84,7 +84,7 @@ pub enum Error {
     KernelFailure { row: usize, alpha: f64, beta: f64 },
     #[error("z_nodes must be >= 1, got {0}")]
     BadZNodes(usize),
-    #[error("unknown z_rule {0:?} (expected midpoint or gauss_hermite)")]
+    #[error("unknown z_rule {0:?} (expected midpoint, gauss_hermite, or stratified)")]
     BadZRule(String),
     #[error("{unit}: {message}")]
     UnitInvalid { unit: String, message: String },

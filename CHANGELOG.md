@@ -3,6 +3,19 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.6.0] - 2026-10-26
+
+### Added
+
+- [z-rule] `z_rule="stratified"`, the default of `multiunit_views` and `joint_two_units` (spec section 4A): the shared factor is partitioned into strata of probability, `z_nodes` (default 32) of equal width over the lower three quarters and a geometric ladder of ratio √2 down to 2^-24 in the upper tail, 76 strata in all (`meta.z_strata`). Each unit's conditional law is averaged over the stratum exactly, through the bivariate normal cdf below loading one and through the marginal restricted to the stratum at loading one, so every unit's marginal and every view mean is exact at any `z_nodes`; the units are independent given the stratum, and the ladder holds that error on the event total's exceedance within 7e-3 at the 1e-2 to 1e-5 levels (`benchmarks/z-convergence-2.6.0.md`). The node rules stay selectable: midpoint at 32 was off by 10% to 100% in those tails, Gauss-Hermite at 32 is exact to 1e-9 where every loading is well below one and off by 0.15 in the marginal of a unit at loading one.
+- The bivariate normal cdf in the engine (`normal::bivariate_cdf`, Genz 2004) and in the reference (Owen's T), agreeing within 5e-15; `exact_two_unit_joint` in the reference, the two-unit joint with no quadrature over the factor, the convergence study's reference in place of the midpoint rule at 4001 nodes.
+- `benchmarks/z_convergence.py` rewritten with tail metrics (the event total's exceedance at the 1e-2 to 1e-5 levels), the three Homer events with their two-point rows, a lone unit at loadings 0.5 to 0.99, and units at loading one beside a partner; spec test 28 implemented on both backends.
+
+### Changed
+
+- The default factor rule moves from 32 midpoint nodes (and 1001 for the joint) to the stratified rule, so every multi-unit grid changes: the `multiunit_small` golden is regenerated. Equal-probability strata, the plan's first form of the rule, were measured and rejected: with the whole upper tail of a total inside one stratum the exceedance at 1e-4 and 1e-5 was short by 50% to 99% even at 128 strata.
+- Cost: on the 0.91M unit-row benchmark portfolio the default takes 8.6 s against 2.5 s under midpoint 32 and 2.0 s under Gauss-Hermite 32 (76 strata against 32 nodes, plus the bivariate normal per edge and stratum); `z_nodes=8` (52 strata) takes 6.6 s with the same tails.
+
 ## [2.5.0] - 2026-10-26
 
 ### Changed

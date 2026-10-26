@@ -166,7 +166,7 @@ def _available_multi_impls() -> list[MultiImpl]:
     ]
     import eltq
 
-    def eltq_joint(unit1, unit2, *, n_z=1001, **params):
+    def eltq_joint(unit1, unit2, *, n_z=32, **params):
         return eltq.joint_two_units(unit1, unit2, z_nodes=n_z, **params)
 
     impls.append(
