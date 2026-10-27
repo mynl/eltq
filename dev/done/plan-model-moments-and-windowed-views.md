@@ -795,3 +795,60 @@ Divergences:
   installed, as CI does not install it.
 - A beta row stops at the first edge, in ascending order, where its whole contribution is zero;
   atoms never stop early, since a later edge's node can still put them in its half bucket.
+
+### [Eltq-Model-Moments], shared events, 2.13.0
+
+`multiunit_moments` on both backends: `crates/eltq-core/src/event_moments.rs` (`ScoreTable`,
+`multiunit_moments`), the reference's `multiunit_moments_reference`, `ModelMoments`'s multi-unit
+fields; the shared pass 1 `views::event_pass`. Test 36 in `tests/test_moments.py` (both backends)
+against oracles from `fixtures/generate_moment_oracles.py`; `benchmarks/report-2.13.0.md`.
+
+The numerical design was settled by prototype before the engine was written, each version against a
+brute-force reference (nested adaptive quadrature over the factor and the unit's own score, with
+SciPy's beta quantile) on four cases (moderate shapes, $\alpha=10^{-4}$, loadings near one, the
+first regression row):
+
+- Per unit, $\ln y$ against the score $v$ on nodes placed by forward evaluations only, cubic
+  Hermite with exact slopes from the density: the tables were accurate to about three times their
+  tolerance in every case. Seeding at one node per seven decades left a table ending at $10^{-8}$;
+  seeding per decade fixed it.
+- The inner integral by Gauss-Hermite in the unit's own score failed for small $lpha$ ($10^{-4}$
+  relative at 16 nodes, $5\times10^{-8}$ at 48), the loss switching on abruptly far in the tail;
+  Gauss-Legendre over the nonzero range was worse. Pieces split at the table's breakpoints in the
+  kernel's standardized variable reached the table's accuracy everywhere.
+- Breakpoints by the rise of $\ln y$ missed the knee where a small-$\beta$ share approaches one
+  (Homer and Li's event 3, $\alpha=0.0028$, $\beta=0.054$: $-5.7\times10^{-4}$ at the first
+  level); the logit of $y$ in its place resolves both ends.
+- Cost: the first engine took 91 s on the 0.91M portfolio, 6.7e10 evaluations, because units with
+  loadings above about 0.9 are steep in the factor and every unit of their event was evaluated at
+  the dense nodes they need. Tuned on 29 sampled events against a tight run of the same scheme:
+  evaluating each beta unit at its own factor nodes and interpolating the logarithm onto the
+  event's nodes, 8-point inner pieces 2.5 wide, breakpoints every 3 in the logit, a reach of 8,
+  took the sample from 823k to 122k evaluations per event at an unchanged worst error of
+  $1.4\times10^{-8}$; a coarse level 1.5 times the fine level's widths is the cheapest that still
+  confirms convergence at the first comparison (at 2.5, half the events refined). The engine then
+  took 9.5 s.
+- A tolerance below about $10^{-10}$ ran the tables out of nodes, and depth-first refinement left
+  the right end of a table unrefined ($8\times10^{-5}$ off at `rtol=1e-10`); the tables are now
+  refined breadth-first with a node budget of 16,384 and a floor of $10^{-12}$ on their tolerance.
+
+Divergences:
+
+- The plan's budget (within one default `multiunit_views` run, 8.4 s) is missed by 13%: 9.5 s, at
+  40 times the requested accuracy. Steep units, inherent to Burke's loading wherever
+  $\sigma_I\ll\sigma_C$, set the cost. Open item for Steve: accept, or ask for a further pass.
+- The plan's Hoeffding check "to $10^{-10}$" holds at `rtol=1e-8` ($2\times10^{-12}$ measured); at
+  the default `rtol` the two betas are within $10^{-8}$, so test 36 states both. The three-unit
+  two-point check uses SciPy's quadrature over the factor rather than 60-digit arithmetic, and
+  the comonotone and Hoeffding oracles are SciPy computations converged by doubling, all embedded
+  with their generator; Homer's event 3 oracle is good to $10^{-7}$ in $C_3$ and the test says so.
+- `max_refinements` is a public keyword (default 3), so that a test can force an unconverged event;
+  the plan named only `rtol`. `ModelMoments` gained `unconverged_events` (a count) beside the
+  bounded `unconverged` examples.
+- The plan's "the gap between the grids' moments and the model recorded as two numbers" is
+  recorded as measured: the mean converges at first order in $h$ (the bucket-zero term), not the
+  plan's $O(h^2)$, and the second and third moments to the stratified rule's limits,
+  $-5.2\times10^{-4}$ and $-1.0\times10^{-3}$ on Homer and Li's three events.
+- `multiunit_views`'s pass 1 moved into `views::event_pass`, shared with the moments as the plan
+  asked; the views' outputs are unchanged.
+

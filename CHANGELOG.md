@@ -3,6 +3,18 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.13.0] - 2026-10-27
+
+### Added
+
+- [shared-moments] `multiunit_moments(event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *, coupling, variance_policy, rtol, max_refinements, threads)` returns a `ModelMoments` of the event totals with no grid (spec section 4B): the rate, `C_1` to `C_3` of the totals under the coupling, the zero rate, the support per event, the counts and diagnostics of `multiunit_views`'s classification, and the integration record (`method`, `achieved_error`, `marginal_residual`, `evaluations`, the unconverged events). One-unit events and the `independent` and `homer` couplings are closed forms; `burke` and `comonotone` add integrated cross parts to closed-form marginal parts (the first moment exact), each unit's conditional moments from a table of its share against its normal score; two levels of the rules are compared and refined until they agree within `rtol` (default 1e-6). These are the coupling's moments, not the stratified rule's approximation that the grids realize. `matched` is refused.
+- Spec test 36 on both backends against independent oracles (`fixtures/generate_moment_oracles.py`): two-point pairs exact to 1e-12, a triple to 1e-10, two betas against Hoeffding's identity within 1e-7 at the default and 1e-10 at `rtol=1e-8`, the comonotone quantile integral and Homer and Li's Table 11 within 1e-7; the grids' moments approach the model at first order in the mean and to the stratified rule's limit, -5.2e-4 and -1.0e-3, in the second and third.
+- On the 0.91M unit-row benchmark the default takes 9.5 s, 13% over a default four-view `multiunit_views` run (the plan's budget was within one), at 40 times the requested accuracy; comonotone 3.7 s, the closed forms 0.05 s (`benchmarks/report-2.13.0.md`, `run_moments.py --multiunit`).
+
+### Changed
+
+- `multiunit_views` validates and classifies events through the shared pass the moments use (`event_pass`); its outputs are unchanged (the goldens hold).
+
 ## [2.12.0] - 2026-10-26
 
 ### Added

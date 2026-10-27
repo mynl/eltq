@@ -2326,5 +2326,115 @@
       }
     },
     "peak_rss_mb": 191.5
+  },
+  {
+    "suite": "moments",
+    "timestamp": "2026-10-27T00:43:01.289427+00:00",
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.13.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "rows": 1000000,
+    "edges": 64,
+    "runs": {
+      "mixture": {
+        "moments_seconds": 0.0195,
+        "tails_seconds": 0.163,
+        "tails_seconds_one_thread": 3.221,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 979806,
+        "regimes": {
+          "incomplete_beta": 849522,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 90272,
+          "two_point": 40012
+        },
+        "max_support": 4999949.479549875
+      },
+      "small_alpha": {
+        "moments_seconds": 0.0196,
+        "tails_seconds": 0.285,
+        "tails_seconds_one_thread": 6.057,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 1000000,
+        "regimes": {
+          "incomplete_beta": 1000000,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 0,
+          "two_point": 0
+        },
+        "max_support": 1000000.0
+      },
+      "large_m": {
+        "moments_seconds": 0.0193,
+        "tails_seconds": 0.199,
+        "tails_seconds_one_thread": 4.208,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 1000000,
+        "regimes": {
+          "incomplete_beta": 1000000,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 0,
+          "two_point": 0
+        },
+        "max_support": 999987015.8879712
+      },
+      "multiunit": {
+        "rows": 909937,
+        "burke": {
+          "seconds": 9.492,
+          "evaluations": 9517255424,
+          "achieved_error": [
+            2.452338825223249e-08,
+            4.412260226779599e-08
+          ],
+          "unconverged": 0,
+          "marginal_residual": 4.192248960360701e-07
+        },
+        "comonotone": {
+          "seconds": 3.726,
+          "evaluations": 1802322536,
+          "achieved_error": [
+            2.364285201948692e-08,
+            4.878667798833504e-08
+          ],
+          "unconverged": 0,
+          "marginal_residual": 1.8062483210560996e-07
+        },
+        "independent": {
+          "seconds": 0.049,
+          "evaluations": 0,
+          "achieved_error": [
+            0.0,
+            0.0
+          ],
+          "unconverged": 0,
+          "marginal_residual": 0.0
+        },
+        "homer": {
+          "seconds": 0.047,
+          "evaluations": 0,
+          "achieved_error": [
+            0.0,
+            0.0
+          ],
+          "unconverged": 0,
+          "marginal_residual": 0.0
+        },
+        "burke_one_thread_seconds": 150.09,
+        "bitwise_across_threads": true,
+        "views_ground_up_seconds": 6.95
+      }
+    },
+    "peak_rss_mb": 303.1
   }
 ]

@@ -37,7 +37,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.12.0"
+__version__ = "2.13.0"
 
 try:
     from eltq._eltq import (
@@ -73,6 +73,10 @@ try:
         from eltq._eltq import tail_moments_arrays as _rust_tail_moments_arrays
     except ImportError:  # extension older than 2.12.0
         _rust_tail_moments_arrays = None
+    try:
+        from eltq._eltq import multiunit_moments as _rust_multiunit_moments
+    except ImportError:  # extension older than 2.13.0
+        _rust_multiunit_moments = None
 
     BACKEND = "rust"
 except ImportError:
@@ -93,6 +97,7 @@ except ImportError:
     _rust_exceedance_curve = None
     _rust_moments_arrays = None
     _rust_tail_moments_arrays = None
+    _rust_multiunit_moments = None
 
 if BACKEND == "rust":
     try:
@@ -126,6 +131,7 @@ __all__ = [
     "ModelMoments",
     "tail_moments_arrays",
     "TailMoments",
+    "multiunit_moments",
     "CurveMeta",
     "GridMeta",
     "joint_two_units",
@@ -1119,6 +1125,117 @@ def multiunit_views(
         views=views, z_nodes=z_nodes, z_rule=z_rule, normalize=normalize,
         variance_policy=variance_policy, clamp_factor=clamp_factor,
         roll_up_diagnostic=roll_up_diagnostic, coupling=coupling,
+    )
+
+
+def multiunit_moments(
+    event_id,
+    unit_id,
+    rate,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    max_loss,
+    *,
+    coupling="burke",
+    variance_policy="bernoulli",
+    clamp_factor=0.999,
+    rtol=1e-6,
+    max_refinements=3,
+    threads=None,
+    chunk_rows=None,
+) -> ModelMoments:
+    """Model moments of a multi-unit ELT's event totals, with no grid (spec
+    section 4B).
+
+    The rows are validated and classified exactly as ``multiunit_views``
+    does. Each event total ``S = sum_u X_u`` contributes its raw moments
+    ``P(S^r)``, ``r = 1, 2, 3``, rate-weighted: ``raw_moments`` are the annual
+    cumulants of the compound Poisson total. Given the shared factor the
+    units are independent, so the moments of ``S`` follow from adding the
+    units one at a time; the marginal parts are closed forms and the first
+    moment is exact. An event with one contributing unit, and every event
+    under ``independent`` or ``homer`` (the rolled row), takes closed forms;
+    under ``burke`` and ``comonotone`` the cross parts are integrated over
+    the factor (each unit's conditional moments from a table of its share
+    against its normal score), at two levels of the rules compared and
+    refined until they agree within ``rtol`` in ``C_2`` and ``C_3``. These
+    are the moments of the coupling's law, not of the stratified rule's
+    approximation of it that the ``multiunit_views`` grids realize.
+
+    Parameters
+    ----------
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss : array_like
+        As ``multiunit_views`` takes them.
+    coupling : {"burke", "comonotone", "independent", "homer"}, default "burke"
+        The coupling rule of spec section 4A. ``matched`` is refused: its
+        scale is defined through a grid (spec section 11).
+    variance_policy, clamp_factor : as ``multiunit_views``.
+    rtol : float, default 1e-6
+        Relative tolerance of ``C_2`` and ``C_3``, per event.
+    max_refinements : int, default 3
+        Rounds of refinement (each halving the rules' widths and tightening
+        the tables sixteenfold) before an event is reported unconverged.
+    threads : int, optional
+        Worker threads; None uses all cores. Results are bitwise identical
+        for any thread count. Ignored by the reference backend.
+    chunk_rows : int, optional
+        Rows per parallel chunk (rounded up to whole events; default 2048).
+        Ignored by the reference backend.
+
+    Returns
+    -------
+    ModelMoments
+        With ``support`` per event (the sum of its units' supports, raised to
+        the rolled row's under ``homer``; NaN where no unit contributes),
+        ``method`` ``factor_integration`` when some event was integrated,
+        ``achieved_error`` the rate-weighted differences of the two levels
+        relative to ``C_2`` and ``C_3``, ``marginal_residual``,
+        ``evaluations`` and the events that did not converge.
+    """
+    if _rust_multiunit_moments is None:
+        return _via_reference(
+            lambda module: module.multiunit_moments_reference,
+            event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+            coupling=coupling, variance_policy=variance_policy, clamp_factor=clamp_factor,
+            rtol=rtol, max_refinements=max_refinements,
+        )
+    _reference_multiunit().warn_if_clamp(variance_policy)
+    if coupling == "matched":
+        raise EltqError("the matched coupling's scale is defined through a grid; multiunit_moments refuses it "
+                        "until that scale is defined without one (spec section 11)")
+    columns = tuple(
+        _column(name, values)
+        for name, values in zip(_MULTI_COLUMNS[2:], (rate, mean_loss, sd_indep, sd_corr, max_loss))
+    )
+    event_codes, _ = _factorize(event_id)
+    unit_codes, _ = _factorize(unit_id)
+    out = _rust_multiunit_moments(
+        event_codes, unit_codes, *columns, coupling=coupling, variance_policy=variance_policy,
+        clamp_factor=clamp_factor, rtol=float(rtol), max_refinements=int(max_refinements),
+        threads=threads, chunk_rows=chunk_rows,
+    )
+    event_labels = np.asarray(event_id)
+    unit_labels = np.asarray(unit_id)
+    diagnostics = {}
+    for category, entry in out.pop("diagnostics").items():
+        examples = [f"{event_labels[row]}/{unit_labels[row]}" for row in entry["examples"]]
+        diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
+    unconverged = [{"event_id": event_labels[row], "error": tuple(error)} for row, error in out.pop("unconverged")]
+    total_rate = out["total_rate"]
+    raw = tuple(out.pop("raw_moments"))
+    return ModelMoments(
+        raw_moments=raw,
+        severity_moments=tuple(c / total_rate if total_rate > 0.0 else float("nan") for c in raw),
+        analytic_aal=raw[0],
+        moment_overflow=tuple(out.pop("moment_overflow")),
+        achieved_error=tuple(out.pop("achieved_error")),
+        diagnostics=diagnostics,
+        unconverged=unconverged,
+        rtol=float(rtol),
+        converged=out["unconverged_events"] == 0,
+        coupling=coupling,
+        **out,
     )
 
 

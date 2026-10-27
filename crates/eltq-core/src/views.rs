@@ -95,7 +95,7 @@ impl MultiInput<'_> {
         Ok(expected)
     }
 
-    fn spec(&self, row: usize) -> UnitSpec {
+    pub(crate) fn spec(&self, row: usize) -> UnitSpec {
         UnitSpec {
             mean_loss: self.mean_loss[row],
             sd_indep: self.sd_indep[row],
@@ -961,22 +961,30 @@ fn sd_of(pmf: &[f64], bucket_size: f64) -> f64 {
     (acc.value() - mean * mean).max(0.0).sqrt()
 }
 
-/// Total event severity by view for a multi-unit ELT.
-pub fn multiunit_views(
-    input: &MultiInput<'_>,
-    terms: &[UnitTerms],
-    config: &MultiConfig,
-) -> Result<MultiResult, Error> {
-    config.validate()?;
-    let n_rows = input.validated_len()?;
-    let h = config.bucket_size;
-    for t in terms {
-        check_grid_alignment(t, h)?;
-    }
-    let rule = FactorRule::new(config.z_nodes, config.z_rule)?;
-    let single = FactorRule::single();
+/// Pass 1 of the multi-unit route, shared by the views and the model moments
+/// (spec sections 4A and 4B): the contiguous event spans, every row of a
+/// rated event classified, and the diagnostics.
+pub(crate) struct EventPass {
+    pub events: Vec<(usize, usize)>,
+    pub classes: Vec<RowClass>,
+    /// Whether the event's rate is finite and positive, so that its rows
+    /// were classified.
+    pub rated: Vec<bool>,
+    pub diagnostics: Diagnostics,
+}
 
-    // Pass 1: structure, classification, event spans.
+/// Validate the multi-unit structure, never repairing it: events contiguous,
+/// each unit at most once per event, the rate constant within an event, and
+/// (when `units_available` is given) every unit code inside the terms
+/// table. An event with a nonfinite, negative or zero rate is reported row
+/// by row and not classified; the rows of the others are classified as
+/// one-row rows are (`classify_unit_row`).
+pub(crate) fn event_pass(
+    input: &MultiInput<'_>,
+    policy: VariancePolicy,
+    units_available: Option<usize>,
+) -> Result<EventPass, Error> {
+    let n_rows = input.validated_len()?;
     let mut diagnostics = Diagnostics::default();
     let mut classes = vec![
         RowClass {
@@ -1003,28 +1011,17 @@ pub fn multiunit_views(
         events.push((start, end));
         start = end;
     }
-    // Event span in buckets: each live unit's pmf has
-    // `grid_length_for(support, h)` nodes, so the convolution across units
-    // has span + 1. Summing supports in money first undercounts whenever a
-    // support is off the grid.
-    let mut event_span = vec![0usize; events.len()];
-    let mut event_live = vec![false; events.len()];
+    let mut rated = vec![false; events.len()];
     let mut units_here: Vec<i64> = Vec::new();
-    // Largest loss each unit code can show in the output view's ground-up
-    // row, for the pair grid: its support, or under homer its share of the
-    // rolled exposure.
-    let mut reach = vec![0.0_f64; terms.len()];
     for (e, &(start, end)) in events.iter().enumerate() {
         let rate = input.rate[start];
         units_here.clear();
         for row in start..end {
             let code = input.unit_code[row];
-            if code < 0 || code as usize >= terms.len() {
-                return Err(Error::UnitCodeOutOfRange {
-                    row,
-                    code,
-                    available: terms.len(),
-                });
+            if let Some(available) = units_available
+                && (code < 0 || code as usize >= available)
+            {
+                return Err(Error::UnitCodeOutOfRange { row, code, available });
             }
             if units_here.contains(&code) {
                 return Err(Error::MultiUnitStructure(format!(
@@ -1051,13 +1048,61 @@ pub fn multiunit_views(
             }
             continue;
         }
+        rated[e] = true;
+        for row in start..end {
+            classes[row] = classify_unit_row(row, &input.spec(row), policy, &mut diagnostics)?;
+        }
+    }
+    Ok(EventPass {
+        events,
+        classes,
+        rated,
+        diagnostics,
+    })
+}
+
+/// Total event severity by view for a multi-unit ELT.
+pub fn multiunit_views(
+    input: &MultiInput<'_>,
+    terms: &[UnitTerms],
+    config: &MultiConfig,
+) -> Result<MultiResult, Error> {
+    config.validate()?;
+    let n_rows = input.validated_len()?;
+    let h = config.bucket_size;
+    for t in terms {
+        check_grid_alignment(t, h)?;
+    }
+    let rule = FactorRule::new(config.z_nodes, config.z_rule)?;
+    let single = FactorRule::single();
+
+    // Pass 1: structure, classification, event spans.
+    let EventPass {
+        events,
+        classes,
+        rated,
+        diagnostics,
+    } = event_pass(input, config.variance_policy, Some(terms.len()))?;
+    // Event span in buckets: each live unit's pmf has
+    // `grid_length_for(support, h)` nodes, so the convolution across units
+    // has span + 1. Summing supports in money first undercounts whenever a
+    // support is off the grid.
+    let mut event_span = vec![0usize; events.len()];
+    let mut event_live = vec![false; events.len()];
+    // Largest loss each unit code can show in the output view's ground-up
+    // row, for the pair grid: its support, or under homer its share of the
+    // rolled exposure.
+    let mut reach = vec![0.0_f64; terms.len()];
+    for (e, &(start, end)) in events.iter().enumerate() {
+        if !rated[e] {
+            continue;
+        }
         let mut span = 0;
         let mut live_rows = 0;
         let mut exposure = 0.0;
         let mut mean = 0.0;
         for row in start..end {
-            let class = classify_unit_row(row, &input.spec(row), config.variance_policy, &mut diagnostics)?;
-            classes[row] = class;
+            let class = classes[row];
             if class.kind != UnitKind::Drop {
                 event_live[e] = true;
                 live_rows += 1;

@@ -374,6 +374,18 @@ impl NarrowKernel {
         ((self.alpha - 1.0) * (d / self.ybar).ln_1p() + (self.beta - 1.0) * (-d / (1.0 - self.ybar)).ln_1p()).exp()
     }
 
+    /// The logarithm of the kernel's density relative to its value at the
+    /// mean (the normal law's `-z^2 / 2` from `NARROW_NORMAL_FROM`); divided
+    /// by the kernel's integral it is the density.
+    pub fn ln_relative_density(&self, y: f64) -> f64 {
+        if self.normal {
+            let z = (y - self.ybar) / self.sd;
+            return -0.5 * z * z;
+        }
+        let d = y - self.ybar;
+        (self.alpha - 1.0) * (d / self.ybar).ln_1p() + (self.beta - 1.0) * (-d / (1.0 - self.ybar)).ln_1p()
+    }
+
     /// `int_lo^hi f(y) / f(ybar) dy` and `int_lo^hi y f(y) / f(ybar) dy`.
     pub fn integrals(&self, lo: f64, hi: f64) -> (f64, f64) {
         if !(hi > lo) {

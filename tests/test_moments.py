@@ -166,3 +166,167 @@ def test_grid_moments_approach_the_model():
     assert (errors[1:, 0] < errors[:-1, 0] / 1.4).all()
     assert (errors[1:, 1:] < errors[:-1, 1:] / 3.0).all()
     assert errors[-1].max() < 3e-5
+
+
+# ---------------------------------------------------------------------------
+# [Eltq-Model-Moments] spec test 36: shared events. Both backends through
+# MULTI_MOMENT_IMPLS. The oracles come from `fixtures/generate_moment_oracles.py`,
+# by methods that share nothing with the score tables and rules: the
+# bivariate normal for two-point pairs, a factor quadrature for a triple,
+# Hoeffding's identity in score coordinates for two betas, one-dimensional
+# bivariate-normal integrals for a beta beside a two-point unit, and the
+# quantile integral under the comonotone coupling.
+
+from eltq import reference_multiunit as rm  # noqa: E402
+
+MULTI_MOMENT_IMPLS = [("reference", rm.multiunit_moments_reference), ("eltq", eltq.multiunit_moments)]
+
+
+@pytest.fixture(params=MULTI_MOMENT_IMPLS, ids=[name for name, _ in MULTI_MOMENT_IMPLS])
+def shared(request):
+    return request.param[1]
+
+
+def run_shared(shared, events, coupling="burke", **options):
+    """``events``: list of ``(event_id, rate, [units])``, units as
+    ``(mean, sd_indep, sd_corr, M)``."""
+    rows = [(e, f"u{i}", lam, *u) for e, lam, units in events for i, u in enumerate(units)]
+    cols = list(zip(*rows))
+    return shared(list(cols[0]), list(cols[1]), *[np.array(c, dtype=np.float64) for c in cols[2:]],
+                  coupling=coupling, **options)
+
+
+TWO_POINT_UNITS = [(30.0, 50.0, 30.0, 100.0), (20.0, 40.0, 60.0, 200.0), (50.0, 100.0, 100.0, 400.0)]
+BETA_UNITS = [(200.0, 100.0, 150.0, 1000.0), (500.0, 300.0, 200.0, 2000.0)]
+HOMER = {
+    1: ((300.0, 400.0, 300.0, 3000.0), (200.0, 300.0, 200.0, 1000.0)),
+    2: ((100.0, 371.0, 267.0, 1000.0), (200.0, 150.0, 533.0, 4000.0)),
+    3: ((100.0, 224.0, 200.0, 2000.0), (100.0, 200.0, 200.0, 2000.0)),
+}
+HOMER_RATES = {1: 0.1, 2: 0.1, 3: 0.5}
+#: (P S, P S^2, P S^3) of each oracle event's total (generate_moment_oracles.py).
+ORACLES = {
+    "two betas": (BETA_UNITS, "burke", (700.0, 905258.6872798419, 1481501182.8264463)),
+    "homer 1": (HOMER[1], "burke", (500.0, 1006943.8322303265, 2603109099.502201)),
+    "homer 2": (HOMER[2], "burke", (300.0, 772782.7257790992, 2624114036.203572)),
+    # Event 3's personal unit has alpha = 0.0028: its oracle is good to 1e-7 in P S^3.
+    "homer 3": (HOMER[3], "burke", (200.0, 449413.60260062444, 1180735793.8039532)),
+    "comonotone betas": (BETA_UNITS, "comonotone", (700.0, 1050231.3565742385, 1989712990.401895)),
+}
+
+
+@pytest.mark.parametrize("name", list(ORACLES))
+def test_shared_moments_against_the_oracles(shared, name):
+    units, coupling, want = ORACLES[name]
+    m = run_shared(shared, [("e", 1.0, units)], coupling)
+    assert m.raw_moments == pytest.approx(want, rel=1e-7), name
+    assert m.method == "factor_integration" and m.converged
+    assert max(m.achieved_error) <= m.rtol == 1e-6
+    assert m.marginal_residual < 1e-6
+
+
+def test_tight_tolerance_meets_hoeffding(shared):
+    # At rtol 1e-8 the two betas are within 1e-10 of Hoeffding's identity
+    # (2e-12 measured 2026-10-26).
+    units, coupling, want = ORACLES["two betas"]
+    m = run_shared(shared, [("e", 1.0, units)], coupling, rtol=1e-8)
+    assert m.raw_moments == pytest.approx(want, rel=1e-10)
+
+
+def test_two_point_units_are_exact(shared):
+    # Two two-point units: P(X_u^a X_w^b) = M_u^a M_w^b P(V_u > y_u, V_w > y_w)
+    # at correlation w_u w_w; three: the triple probability by a factor
+    # quadrature (235350.2376887846 = M_1 M_2 M_3 P(all three)).
+    preps = [rm.couple(rm.prepare_unit(rm.Unit(*u), "u"), "burke") for u in TWO_POINT_UNITS]
+    y = [float(rm.ndtri(1.0 - p.two_point_p)) for p in preps]
+    m_ = [p.max_loss for p in preps]
+    both = {(i, j): float(rm.bivariate_normal_cdf(-y[i], -y[j], preps[i].w_corr * preps[j].w_corr))
+            for i in range(3) for j in range(3) if i != j}
+    marginal = [(p.mean_loss, p.mean_loss * p.max_loss, p.mean_loss * p.max_loss ** 2) for p in preps]
+    two = run_shared(shared, [("e", 1.0, TWO_POINT_UNITS[:2])])
+    want2 = (50.0, marginal[0][1] + marginal[1][1] + 2 * m_[0] * m_[1] * both[(0, 1)],
+             marginal[0][2] + marginal[1][2] + 3 * (m_[0] ** 2 * m_[1] + m_[0] * m_[1] ** 2) * both[(0, 1)])
+    assert two.raw_moments == pytest.approx(want2, rel=1e-12)
+    three = run_shared(shared, [("e", 1.0, TWO_POINT_UNITS)])
+    second = sum(mm[1] for mm in marginal) + 2 * sum(
+        m_[i] * m_[j] * both[(i, j)] for i in range(3) for j in range(i + 1, 3))
+    third = (sum(mm[2] for mm in marginal)
+             + 3 * sum(m_[i] ** 2 * m_[j] * both[(i, j)] for i in range(3) for j in range(3) if i != j)
+             + 6 * 235350.2376887846)
+    assert three.raw_moments == pytest.approx((100.0, second, third), rel=1e-10)
+
+
+def test_closed_form_couplings(shared):
+    # One-unit events are the one-row closed forms; independent units the
+    # moments of a sum of independent laws; homer the rolled row's.
+    events = [("a", 0.1, [BETA_UNITS[0]]), ("b", 0.2, [HOMER[1][1]]), ("c", 0.3, [(50.0, 0.0, 0.0, 100.0)])]
+    one = run_shared(shared, events)
+    cols = np.array([(lam, u[3], u[0], u[1], u[2]) for _, lam, us in events for u in us]).T
+    row = eltq.moments_arrays(*cols)
+    assert one.raw_moments == pytest.approx(row.raw_moments, rel=1e-15)
+    assert (one.method, one.one_unit_events, one.valid_events) == ("closed_form", 3, 3)
+    assert math.isclose(one.rate_at_zero, row.rate_at_zero, rel_tol=1e-15)
+    ind = run_shared(shared, [("e", 1.0, BETA_UNITS)], "independent")
+    m = [eltq.moments_arrays(*np.array([(1.0, u[3], u[0], u[1], u[2])]).T).raw_moments for u in BETA_UNITS]
+    want = (m[0][0] + m[1][0], m[0][1] + m[1][1] + 2 * m[0][0] * m[1][0],
+            m[0][2] + m[1][2] + 3 * m[0][1] * m[1][0] + 3 * m[0][0] * m[1][1])
+    assert ind.raw_moments == pytest.approx(want, rel=1e-14) and ind.method == "closed_form"
+    homer = run_shared(shared, [("e", 1.0, HOMER[1])], "homer")
+    rolled = rm.rolled_unit([rm.Unit(*u) for u in HOMER[1]])
+    want = eltq.moments_arrays(*np.array([(1.0, rolled.max_loss, rolled.mean_loss, rolled.sd_indep,
+                                           rolled.sd_corr)]).T).raw_moments
+    assert homer.raw_moments == pytest.approx(want, rel=1e-14)
+    assert homer.support[0] == rolled.max_loss
+
+
+def test_unconverged_and_refused(shared):
+    # A tolerance no comparison reaches, with no refinement allowed, is
+    # reported; the moments stay those of the fine level.
+    m = run_shared(shared, [("e", 1.0, BETA_UNITS)], rtol=1e-13, max_refinements=0)
+    assert not m.converged and m.unconverged_events == 1
+    assert m.unconverged[0]["event_id"] == "e"
+    assert m.raw_moments == pytest.approx(ORACLES["two betas"][2], rel=1e-7)
+    with pytest.raises(Exception, match="matched"):
+        run_shared(shared, [("e", 1.0, BETA_UNITS)], "matched")
+    with pytest.raises(Exception, match="rtol"):
+        run_shared(shared, [("e", 1.0, BETA_UNITS)], rtol=2.0)
+
+
+def test_shared_moments_backends_agree_and_are_bitwise():
+    df = pd.read_csv(FIXTURES_DIR / "multiunit_small_elt.csv", float_precision="round_trip")
+    cols = [list(df["event_id"].astype(str)), list(df["unit_id"].astype(str))] + [
+        df[c].to_numpy(dtype=np.float64) for c in ("rate", "mean_loss", "sd_indep", "sd_corr", "max_loss")]
+    ref = rm.multiunit_moments_reference(*cols)
+    runs = [eltq.multiunit_moments(*cols, threads=k) for k in (1, 3, None)]
+    assert runs[0].raw_moments == pytest.approx(ref.raw_moments, rel=1e-7)
+    assert runs[0].diagnostics.keys() == ref.diagnostics.keys()
+    assert (runs[0].valid_events, runs[0].one_unit_events) == (ref.valid_events, ref.one_unit_events)
+    for other in runs[1:]:
+        assert other.raw_moments == runs[0].raw_moments
+    np.testing.assert_array_equal(runs[0].support, ref.support)
+
+
+def test_views_grids_approach_the_model_up_to_the_stratified_rule():
+    # The multiunit_views grids realize the stratified rule's approximation
+    # of the coupling, its units independent within a stratum; their first
+    # moment approaches the model's at first order in h (the mass of bucket
+    # zero sits at zero), their second and third settle at the rule's own
+    # limit, below the model by the within-stratum association it ignores
+    # (Homer and Li's Table 11, measured 2026-10-26: -7.2e-4, -3.6e-4,
+    # -1.8e-4, -9.0e-5, -4.4e-5 in the mean at h = 40, 20, 10, 5, 2.5; the
+    # second moment to -5.2e-4, the third to -1.0e-3).
+    rows = [(f"e{e}", HOMER_RATES[e], list(HOMER[e])) for e in HOMER]
+    model = run_shared(eltq.multiunit_moments, rows)
+    flat = [(e, f"u{i}", lam, *u) for e, lam, units in rows for i, u in enumerate(units)]
+    cols = list(zip(*flat))
+    args = (list(cols[0]), list(cols[1]), *[np.array(c, dtype=np.float64) for c in cols[2:]])
+    gaps = []
+    for h in (10.0, 5.0, 2.5):
+        views, _ = eltq.multiunit_views(*args, bucket_size=h, views=("ground_up",))
+        grid = views["ground_up"]
+        x = h * np.arange(grid.size)
+        gaps.append([(grid @ x ** r) / model.raw_moments[r - 1] - 1.0 for r in (1, 2, 3)])
+    gaps = np.asarray(gaps)
+    assert np.allclose(gaps[1:, 0] / gaps[:-1, 0], 0.5, atol=0.02)
+    assert (gaps[:, 1:] < 0.0).all() and (np.abs(gaps[:, 1:]) < 1.5e-3).all()
+    assert abs(gaps[-1, 1] - gaps[-2, 1]) < 3e-5 and abs(gaps[-1, 2] - gaps[-2, 2]) < 6e-5

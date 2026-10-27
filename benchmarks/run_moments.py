@@ -10,7 +10,11 @@ Measures, on the three seeded one-row portfolios of ``run_end_to_end.py``
 thousandth of the largest exposed value and the value itself, with all
 threads and with one; checks the tail query bitwise across thread counts;
 prints a summary and appends a machine-readable record to
-``benchmarks/results.json`` under ``"suite": "moments"``. The plan's budget
+``benchmarks/results.json`` under ``"suite": "moments"``. With
+``--multiunit`` it also times ``multiunit_moments`` under each coupling on
+the portfolio of ``run_multiunit.py`` (``--events`` events of ten units),
+one thread against all, beside one ``multiunit_views`` run of the ground-up
+view. The plan's budget
 (``dev/done/plan-model-moments-and-windowed-views.md``, open question 4):
 a million rows by 64 edges well under a second.
 """
@@ -46,6 +50,9 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=1_000_000)
     parser.add_argument("--edges", type=int, default=64)
     parser.add_argument("--no-append", action="store_true")
+    parser.add_argument("--multiunit", action="store_true",
+                        help="also time multiunit_moments on the multi-unit benchmark portfolio")
+    parser.add_argument("--events", type=int, default=100_000)
     args = parser.parse_args()
     if eltq.BACKEND != "rust":
         raise SystemExit("the benchmark needs the Rust backend")
@@ -81,6 +88,29 @@ def main() -> None:
         record["runs"][name] = entry
         print(f"{name:12s} moments {seconds_moments:7.4f} s  tails {seconds_tails:6.3f} s "
               f"(1 thread {seconds_one:6.3f} s)  bitwise {bitwise}  {tails.regimes}")
+    if args.multiunit:
+        from run_multiunit import synthetic_portfolio
+
+        cols = synthetic_portfolio(args.events, 10)
+        multi = (cols["event_id"], cols["unit_id"], cols["rate"], cols["mean_loss"], cols["sd_indep"],
+                 cols["sd_corr"], cols["max_loss"])
+        entry = {"rows": int(cols["rate"].size)}
+        for coupling in ("burke", "comonotone", "independent", "homer"):
+            seconds, m = timed(lambda c=coupling: eltq.multiunit_moments(*multi, coupling=c), 1)
+            entry[coupling] = {"seconds": round(seconds, 3), "evaluations": m.evaluations,
+                               "achieved_error": list(m.achieved_error), "unconverged": m.unconverged_events,
+                               "marginal_residual": m.marginal_residual}
+            print(f"multiunit_moments {coupling:12s} {seconds:7.2f} s  evaluations {m.evaluations:.2e}  "
+                  f"achieved {m.achieved_error[0]:.1e} {m.achieved_error[1]:.1e}  unconverged {m.unconverged_events}")
+        seconds_one, one = timed(lambda: eltq.multiunit_moments(*multi, threads=1), 1)
+        seconds_all, again = timed(lambda: eltq.multiunit_moments(*multi), 1)
+        entry["burke_one_thread_seconds"] = round(seconds_one, 2)
+        entry["bitwise_across_threads"] = one.raw_moments == again.raw_moments
+        seconds_views, _ = timed(lambda: eltq.multiunit_views(*multi, bucket_size=40000.0, views=("ground_up",)), 1)
+        entry["views_ground_up_seconds"] = round(seconds_views, 2)
+        print(f"burke one thread {seconds_one:.1f} s, bitwise {entry['bitwise_across_threads']}; "
+              f"multiunit_views ground_up {seconds_views:.2f} s")
+        record["runs"]["multiunit"] = entry
     record["peak_rss_mb"] = peak_working_set_mb()
     print(f"peak RSS {record['peak_rss_mb']} MiB")
     if not args.no_append:

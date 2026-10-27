@@ -163,6 +163,32 @@ impl BetaFn {
         (sf, (a * ln_y + (b - 1.0) * ln_1my - self.ln_beta).exp())
     }
 
+    /// `(I_x, 1 - I_x)` from one continued fraction: the tail the fraction
+    /// evaluates directly on each side of the switch point keeps its
+    /// relative precision, the other is its complement.
+    pub fn tails(&self, x: f64) -> (f64, f64) {
+        let (a, b) = (self.alpha, self.beta);
+        if x <= 0.0 {
+            return (0.0, 1.0);
+        }
+        if x >= 1.0 {
+            return (1.0, 0.0);
+        }
+        let front = (a * x.ln() + b * (-x).ln_1p() - self.ln_beta).exp();
+        if x < (a + 1.0) / (a + b + 2.0) {
+            let cdf = betacf(a, b, x).map_or(f64::NAN, |cf| front * cf / a);
+            (cdf, 1.0 - cdf)
+        } else {
+            let sf = betacf(b, a, 1.0 - x).map_or(f64::NAN, |cf| front * cf / b);
+            (1.0 - sf, sf)
+        }
+    }
+
+    /// `ln f(x)` on the open interval.
+    pub fn ln_pdf(&self, x: f64) -> f64 {
+        (self.alpha - 1.0) * x.ln() + (self.beta - 1.0) * (-x).ln_1p() - self.ln_beta
+    }
+
     /// Density f(x); zero outside the open interval (callers keep brackets
     /// open, so the endpoint singularities for shapes below one never enter).
     pub fn pdf(&self, x: f64) -> f64 {

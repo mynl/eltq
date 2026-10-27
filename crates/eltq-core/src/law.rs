@@ -74,6 +74,24 @@ impl BetaLaw {
             BetaLaw::Narrow(law) => law.sf(y),
         }
     }
+
+    /// `(P(Y <= y), P(Y > y))` from one evaluation, the smaller of the two
+    /// with its relative precision.
+    pub fn tails(&self, y: f64) -> (f64, f64) {
+        match self {
+            BetaLaw::Regular(bf) => bf.tails(y),
+            BetaLaw::Narrow(law) => (law.cdf(y), law.sf(y)),
+        }
+    }
+
+    /// `ln f(y)` on the open interval: the beta's, or the narrow kernel's
+    /// normalized on its bulk.
+    pub fn ln_density(&self, y: f64) -> f64 {
+        match self {
+            BetaLaw::Regular(bf) => bf.ln_pdf(y),
+            BetaLaw::Narrow(law) => law.kernel.ln_relative_density(y) - law.norm.ln(),
+        }
+    }
 }
 
 impl NarrowLaw {

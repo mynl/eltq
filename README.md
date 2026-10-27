@@ -101,6 +101,7 @@ bitwise identical either way (`benchmarks/report-2.4.2.md`).
 | [narrow-units] beta units past the continued fraction's regime evaluated by the narrow kernel, no NaN; units below the resolution are atoms; the reference's unit classification in ratios | 2.10.1 | done |
 | [model-moments] `moments_arrays`: the one-row ELT's rate, raw moments, zero rate and support with no grid, classified as the grid route classifies | 2.11.0 | done |
 | [tail-queries] `tail_moments_arrays`: tail rate, tail and excess moments to order 3 at any candidate edge with no grid, exact per row; a million rows by 64 edges in 0.3 s (`benchmarks/report-2.12.0.md`) | 2.12.0 | done |
+| [shared-moments] `multiunit_moments`: the event totals' raw moments under the coupling with no grid, closed forms where they exist and an integration over the factor checked at two levels otherwise (`benchmarks/report-2.13.0.md`) | 2.13.0 | done |
 
 ## Layout
 
@@ -241,6 +242,9 @@ tails = eltq.tail_moments_arrays(rate, max_loss, mean_loss, sd_indep, sd_corr,
     *, edge, top_node=None, threads=None, ...)
     # TailMoments at each edge t, node c: rate_above R(t), moments_above T_r(t),
     # excess_above D_r(t, c), the atoms in (c, t] apart (spec section 4B)
+shared = eltq.multiunit_moments(event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+    *, coupling="burke", rtol=1e-6, ...)
+    # ModelMoments of the event totals under the coupling, with no grid
 ```
 
 `source` for the last two: a CSV path, a DataFrame with canonical columns, or

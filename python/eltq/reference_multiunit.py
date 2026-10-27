@@ -55,12 +55,12 @@ from collections import namedtuple
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.special import betainc, owens_t
+from scipy.special import betainc, ndtr, ndtri, owens_t
 from scipy.stats import beta as beta_dist
 from scipy.stats import norm
 
 from eltq._meta import (
-    ATOM_RESOLUTION, LARGE_PARAMETER_FROM, STRATA_BODY_TOP, STRATA_TAIL_FLOOR, STRATA_TAIL_RATIO, JointMeta,
+    ATOM_RESOLUTION, LARGE_PARAMETER_FROM, NARROW_NORMAL_FROM, STRATA_BODY_TOP, STRATA_TAIL_FLOOR, STRATA_TAIL_RATIO, JointMeta,
     MultiMeta, RowIssues,
 )
 from eltq.reference import (
@@ -1567,3 +1567,669 @@ def _roll_up_entry(eid, live, columns, conds, z_weights, h):
         "q99_rolled": q_rolled,
         "q99_ratio": q_exact / q_rolled if q_rolled > 0.0 else math.nan,
     }
+
+
+# ---------------------------------------------------------------------------
+# [Eltq-Model-Moments] model moments of shared events with no grid (spec
+# section 4B, test 36): the moment recursion over the units given the
+# factor, the marginal parts in closed form, the cross parts integrated.
+
+#: Default relative tolerance of the shared-event moments in C_2 and C_3
+#: (the aggregate package's ``elt_moment_rtol``; spec section 11, item 10).
+MOMENT_RTOL = 1e-6
+#: The score tables' tolerance on ln y, as a fraction of ``rtol``: the
+#: moments' error measured about three times the table's (2026-10-26).
+_TABLE_TOL_FRACTION = 1.0 / 30.0
+#: Widest score cell of a table, and largest rise of the share's logit,
+#: ln(y / (1 - y)), across one: the logit follows both the climb from zero
+#: of a small-alpha share and the approach to one of a small-beta share.
+_TABLE_MAX_DV = 1.0
+_TABLE_MAX_DLOGIT = 1.0
+#: Most nodes one table may have before it is reported unconverged, and the
+#: least tolerance a table is held to (the incomplete beta's own accuracy).
+_TABLE_MAX_NODES = 16384
+_TABLE_TOL_FLOOR = 1e-12
+#: Pieces of the rules at the fine level: the inner rule's width in the
+#: kernel's standardized variable and its breakpoints every this rise of
+#: the share's logit; the factor rule's width.
+_INNER_WIDTH = 2.5
+_INNER_CAP = 3.0
+_OUTER_WIDTH = 2.5
+#: Gauss-Legendre points per piece of the inner and the factor rule.
+_GL_INNER = np.polynomial.legendre.leggauss(8)
+_GL_OUTER = np.polynomial.legendre.leggauss(8)
+#: How far the inner rule reaches in standard normal units (Phi(-8) is
+#: 6e-16), and the factor's lower end (below it the cross part omits at
+#: most c_r(-9) Phi(-9)).
+_REACH = 8.0
+_Z_LOW = -9.0
+#: The factor's upper end is at least this, and beyond it the omitted
+#: cross part is at most 0.01 rtol of the marginal part (``_event_moments``).
+_Z_HIGH_MIN = 9.0
+#: A unit's own factor nodes, from which its conditional moments are
+#: interpolated onto the event's: pieces of at most this many times its
+#: kernel's width in the factor when smooth, at least ``_STEEP_NATIVE``
+#: wide between its table's breakpoints when steep.
+_SMOOTH_NATIVE = 2.5
+_STEEP_NATIVE = 1.0
+#: Refinement rounds after the first comparison before an event is reported
+#: unconverged.
+_MAX_REFINEMENTS = 3
+#: The coarse level of the comparison: the rules' widths and caps this many
+#: times the fine level's, on every second node of each table.
+_COARSE_SCALE = 1.5
+#: A unit whose kernel in the factor, s / w with s = sqrt(1 - w^2), is
+#: narrower than this puts its table's breakpoints into the factor rule: its
+#: conditional moments are steep in z (at loading one, a function of z
+#: itself).
+_STEEP_KERNEL = 0.5
+
+
+class _ScoreTable:
+    """The loss share of a beta unit as a function of its normal score,
+    ``ln y`` against ``v = Phi^{-1}(F(y))``, on nodes placed by the forward
+    map only (no inversion): seeded per decade of ``y``, near one, and about
+    the mean, then split until a cubic Hermite in ``v`` with the exact
+    slopes ``d ln y / dv = phi(v) / (y f(y))`` misses no cell's midpoint by
+    more than ``tol``, no cell is wider than ``_TABLE_MAX_DV`` in ``v`` and
+    the logit of ``y`` rises by at most ``_TABLE_MAX_DLOGIT`` across one (spec section
+    4B, test 36). Below the first node and above the last the share is held
+    at the end values: the probability there is below ``1e-4 rtol`` of the
+    mean's share, or below the double range."""
+
+    def __init__(self, a: float, b: float, rtol: float, tol: float):
+        self.a, self.b = a, b
+        self.large = min(a, b) >= LARGE_PARAMETER_FROM
+        mean = a / (a + b)
+        sd = math.sqrt(a * b / ((a + b) ** 2 * (a + b + 1.0)))
+        self.law = _law(a, b)
+        if self.large:
+            self._norm = self._kernel_norm(mean, sd)
+        else:
+            self._lnb = float(special_betaln(a, b))
+        lo = max(1e-300, 1e-4 * rtol * mean)
+        seeds = set()
+        decade = math.floor(math.log10(lo))
+        while 10.0 ** decade < 0.5:
+            seeds.add(max(10.0 ** decade, lo))
+            decade += 1
+        seeds.update(1.0 - 0.5 * 10.0 ** -j for j in range(0, 17))
+        seeds.update(mean + k * sd for k in range(-8, 9))
+        if self.large:
+            seeds.update(mean + sd * np.linspace(-12.0, 12.0, 33))
+        nodes = [self._node(y) for y in sorted(s for s in seeds if lo <= s < 1.0)]
+        nodes = [n for n in nodes if n is not None]
+        kept = [nodes[0]]
+        for n in nodes[1:]:
+            if n[0] > kept[-1][0]:
+                kept.append(n)
+        # Breadth-first passes: every open cell is checked against its
+        # midpoint and split or closed, so that a table stopped by the node
+        # budget is refined evenly rather than on one side.
+        out = kept
+        open_ = [True] * (len(out) - 1)
+        self.converged = True
+        while any(open_):
+            new, new_open = [out[0]], []
+            for left, right, check in zip(out[:-1], out[1:], open_):
+                split = False
+                if check:
+                    mid = self._node(self._midpoint(left, right))
+                    if mid is not None and left[0] < mid[0] < right[0] and self._split(left, right, mid, tol):
+                        new.extend([mid, right])
+                        new_open.extend([True, True])
+                        split = True
+                if not split:
+                    new.append(right)
+                    new_open.append(False)
+            if len(new) > _TABLE_MAX_NODES:
+                self.converged = False
+                break
+            out, open_ = new, new_open
+        self.v = np.array([n[0] for n in out])
+        self.lny = np.array([n[2] for n in out])
+        self.slope = np.array([n[3] for n in out])
+        self.logit = np.array([n[4] for n in out])
+
+    def _kernel_norm(self, mean, sd):
+        from scipy.integrate import quad
+
+        lo, hi = max(0.0, mean - 40.0 * sd), min(1.0, mean + 40.0 * sd)
+        return quad(lambda u: math.exp(self._log_ratio(u)), lo, hi, points=[mean],
+                    epsabs=0.0, epsrel=1e-13, limit=400)[0]
+
+    def _log_ratio(self, y):
+        a, b = self.a, self.b
+        mean = a / (a + b)
+        d = y - mean
+        return (a - 1.0) * math.log1p(d / mean) + (b - 1.0) * math.log1p(-d / (1.0 - mean))
+
+    def _ln_density(self, y):
+        if min(self.a, self.b) >= NARROW_NORMAL_FROM:
+            law = self.law
+            z = (y - law.ybar) / law.sd
+            return -0.5 * z * z - math.log(law.sd * math.sqrt(2.0 * math.pi))
+        if self.large:
+            return self._log_ratio(y) - math.log(self._norm)
+        return (self.a - 1.0) * math.log(y) + (self.b - 1.0) * math.log1p(-y) - self._lnb
+
+    def _node(self, y):
+        """``(v, y, ln y, d ln y / dv, logit y)``, or None where the score is
+        not finite."""
+        if not 0.0 < y < 1.0:
+            return None
+        sf = float(self.law.sf(y))
+        v = -float(ndtri(sf)) if sf < 0.5 else float(ndtri(float(self.law.cdf(y))))
+        if not math.isfinite(v):
+            return None
+        ln_y = math.log(y)
+        slope = math.exp(-0.5 * v * v - 0.5 * math.log(2.0 * math.pi) - ln_y - self._ln_density(y))
+        return (v, y, ln_y, slope, ln_y - math.log1p(-y))
+
+    @staticmethod
+    def _midpoint(left, right):
+        yl, yr = left[1], right[1]
+        if yr > 2.0 * yl:
+            return math.exp(0.5 * (left[2] + right[2]))
+        if (1.0 - yl) > 2.0 * (1.0 - yr):
+            return 1.0 - math.sqrt((1.0 - yl) * (1.0 - yr))
+        return 0.5 * (yl + yr)
+
+    @staticmethod
+    def _hermite(left, right, v):
+        h = right[0] - left[0]
+        t = (v - left[0]) / h
+        t2, t3 = t * t, t * t * t
+        return ((2 * t3 - 3 * t2 + 1) * left[2] + (t3 - 2 * t2 + t) * h * left[3]
+                + (-2 * t3 + 3 * t2) * right[2] + (t3 - t2) * h * right[3])
+
+    def _split(self, left, right, mid, tol):
+        """Whether the cell ``(left, right)`` with its midpoint node ``mid``
+        must be split."""
+        if right[0] - left[0] > _TABLE_MAX_DV or right[4] - left[4] > _TABLE_MAX_DLOGIT:
+            return True
+        return abs(self._hermite(left, right, mid[0]) - mid[2]) > tol
+
+    def subsampled(self) -> _ScoreTable:
+        """The table on every second node (the last kept): the coarse level
+        of the refinement comparison."""
+        out = object.__new__(_ScoreTable)
+        out.__dict__.update(self.__dict__)
+        keep = np.arange(0, self.v.size, 2)
+        if keep[-1] != self.v.size - 1:
+            keep = np.append(keep, self.v.size - 1)
+        out.v, out.lny, out.slope, out.logit = self.v[keep], self.lny[keep], self.slope[keep], self.logit[keep]
+        return out
+
+    def ln_share(self, v):
+        """``ln y`` at scores ``v``, held at the end values outside the table."""
+        v = np.asarray(v, dtype=np.float64)
+        i = np.clip(np.searchsorted(self.v, v, side="right") - 1, 0, self.v.size - 2)
+        h = self.v[i + 1] - self.v[i]
+        t = np.clip((v - self.v[i]) / h, 0.0, 1.0)
+        t2, t3 = t * t, t * t * t
+        return ((2 * t3 - 3 * t2 + 1) * self.lny[i] + (t3 - 2 * t2 + t) * h * self.slope[i]
+                + (-2 * t3 + 3 * t2) * self.lny[i + 1] + (t3 - t2) * h * self.slope[i + 1])
+
+    def breakpoints(self, cap: float) -> np.ndarray:
+        """Table scores at which the logit of ``y`` has risen by ``cap``
+        since the last."""
+        out = [self.v[0]]
+        last = self.logit[0]
+        for v, lg in zip(self.v[1:], self.logit[1:]):
+            if lg - last >= cap:
+                out.append(v)
+                last = lg
+        out.append(self.v[-1])
+        return np.unique(np.array(out))
+
+
+def special_betaln(a, b):
+    from scipy.special import betaln
+
+    return betaln(a, b)
+
+
+def _pieces(lo: float, hi: float, breaks, width: float, rule):
+    """Gauss-Legendre points and weights on ``[lo, hi]`` split at ``breaks``
+    and into pieces at most ``width`` long."""
+    x, w = rule
+    edges = [lo, *[b for b in breaks if lo < b < hi], hi]
+    points, weights = [], []
+    for a, b in zip(edges[:-1], edges[1:]):
+        k = max(1, int(math.ceil((b - a) / width)))
+        e = np.linspace(a, b, k + 1)
+        half = 0.5 * np.diff(e)
+        mid = 0.5 * (e[:-1] + e[1:])
+        points.append((mid[:, None] + half[:, None] * x[None, :]).ravel())
+        weights.append((half[:, None] * w[None, :]).ravel())
+    return np.concatenate(points), np.concatenate(weights)
+
+
+def _phi(x):
+    return np.exp(-0.5 * np.asarray(x) ** 2) / math.sqrt(2.0 * math.pi)
+
+
+class _Level:
+    """The widths and caps of one level of the rules, and whether the
+    tables are subsampled (the coarse level of a comparison)."""
+
+    def __init__(self, scale: float, coarse: bool = False):
+        factor = scale * (_COARSE_SCALE if coarse else 1.0)
+        self.inner_width = _INNER_WIDTH * factor
+        self.inner_cap = _INNER_CAP * factor
+        self.outer_width = _OUTER_WIDTH * factor
+        self.coarse = coarse
+
+
+def _beta_conditional(table: _ScoreTable, m_loss: float, w: float, z: np.ndarray, level: _Level,
+                      breaks: np.ndarray):
+    """``(P(X | z), P(X^2 | z), evaluations)`` of a beta unit at loading ``w``
+    at the factor values ``z``: piecewise Gauss-Legendre in the kernel's
+    standardized variable ``t``, ``v = w z + s t``, split at the table's
+    breakpoints, the share held at its end values outside the table."""
+    s = math.sqrt((1.0 - w) * (1.0 + w))
+    a1 = np.empty(z.size)
+    a2 = np.empty(z.size)
+    count = 0
+    y0, yn = math.exp(table.lny[0]), math.exp(table.lny[-1])
+    for i, zz in enumerate(z):
+        m = w * zz
+        if s == 0.0:
+            y = math.exp(float(table.ln_share([m])[0]))
+            a1[i], a2[i] = m_loss * y, (m_loss * y) ** 2
+            count += 1
+            continue
+        t0, tn = (table.v[0] - m) / s, (table.v[-1] - m) / s
+        lo, hi = max(-_REACH, t0), min(_REACH, tn)
+        first = second = 0.0
+        if t0 > -_REACH:
+            p = float(ndtr(min(t0, _REACH)))
+            first += y0 * p
+            second += y0 * y0 * p
+        if tn < _REACH:
+            p = float(ndtr(-max(tn, -_REACH)))
+            first += yn * p
+            second += yn * yn * p
+        if hi > lo:
+            points, weights = _pieces(lo, hi, (breaks - m) / s, level.inner_width, _GL_INNER)
+            weights = weights * _phi(points)
+            y = np.exp(table.ln_share(m + s * points))
+            first += float(y @ weights)
+            second += float((y * y) @ weights)
+            count += points.size
+        a1[i], a2[i] = m_loss * first, m_loss * m_loss * second
+    return a1, a2, count
+
+
+class _UnitTerm:
+    """One unit's conditional first and second moments given the factor."""
+
+    def __init__(self, prep: _Prepped, rtol: float, tol: float):
+        self.prep = prep
+        self.law = _unit_law(prep)
+        self.moments = law_moments_of(self.law)
+        self.w = prep.w_corr if prep.kind in (_BETA, _COMONOTONE, _TWO_POINT) else 0.0
+        self.table = None
+        if prep.kind in (_BETA, _COMONOTONE) and self.w > 0.0:
+            self.table = _ScoreTable(prep.alpha, prep.beta, rtol, tol)
+
+    @property
+    def flat(self) -> bool:
+        return self.w == 0.0
+
+    def conditional(self, z: np.ndarray, level: _Level):
+        """``(a1, a2, evaluations)`` at ``z``."""
+        prep = self.prep
+        if self.flat:
+            return np.full(z.size, self.moments[0]), np.full(z.size, self.moments[1]), 0
+        if prep.kind == _TWO_POINT:
+            at_max = two_point_conditional(prep.two_point_p, self.w, prep.w_indep, z)
+            return prep.max_loss * at_max, prep.max_loss ** 2 * at_max, z.size
+        table = self.table.subsampled() if level.coarse else self.table
+        breaks = table.breakpoints(level.inner_cap)
+        return _beta_conditional(table, prep.max_loss, self.w, z, level, breaks)
+
+    def outer_breaks(self, level: _Level) -> list:
+        """Factor values at which this unit's conditional moments change
+        character: the step of a two-point unit at loading one, and, for a
+        beta unit steep in the factor (its kernel in z narrower than
+        ``_STEEP_KERNEL``), its table's breakpoints mapped to z."""
+        prep = self.prep
+        if self.flat:
+            return []
+        if prep.kind == _TWO_POINT:
+            return [float(ndtri(1.0 - prep.two_point_p))] if prep.w_indep == 0.0 else []
+        s = math.sqrt((1.0 - self.w) * (1.0 + self.w))
+        if s / self.w >= _STEEP_KERNEL:
+            return []
+        table = self.table.subsampled() if level.coarse else self.table
+        return list(table.breakpoints(level.inner_cap) / self.w)
+
+
+def _unit_law(prep: _Prepped):
+    """The effective law of a prepared unit as ``(kind, mu, sd, M)`` for the
+    closed forms."""
+    from eltq.reference import _ATOM as ROW_ATOM, _BERNOULLI as ROW_BERNOULLI, _BETA as ROW_BETA
+
+    if prep.kind == _ATOM:
+        return (ROW_ATOM, prep.mean_loss, 0.0, prep.max_loss)
+    if prep.kind == _TWO_POINT:
+        return (ROW_BERNOULLI, prep.mean_loss, prep.sigma_used, prep.max_loss)
+    return (ROW_BETA, prep.mean_loss, prep.sigma_used, prep.max_loss)
+
+
+def law_moments_of(law) -> tuple:
+    from eltq.reference import law_moments
+
+    return law_moments(*law)
+
+
+_BARYCENTRIC = np.array([1.0 / np.prod([x - y for y in _GL_OUTER[0] if y != x]) for x in _GL_OUTER[0]])
+
+
+def _native_edges(unit, level: _Level, z_high: float) -> np.ndarray:
+    """The piece edges of a beta unit's own factor nodes: a smooth unit's
+    conditional moments vary on the scale of its kernel in z, ``s / w``,
+    a steep unit's at its table's breakpoints mapped to z."""
+    kernel = math.sqrt((1.0 - unit.w) * (1.0 + unit.w)) / unit.w
+    if kernel >= _STEEP_KERNEL:
+        breaks, width = [], min(level.outer_width, _SMOOTH_NATIVE * kernel)
+    else:
+        table = unit.table.subsampled() if level.coarse else unit.table
+        breaks = list(table.breakpoints(level.inner_cap) / unit.w)
+        width = min(level.outer_width, max(_STEEP_NATIVE, 1.5 * kernel))
+    edges = [_Z_LOW, *[b for b in sorted(set(breaks)) if _Z_LOW < b < z_high], z_high]
+    out = [edges[0]]
+    for a, b in zip(edges[:-1], edges[1:]):
+        k = max(1, int(math.ceil((b - a) / width)))
+        out.extend(np.linspace(a, b, k + 1)[1:])
+    return np.array(out)
+
+
+def _interpolate_log(edges: np.ndarray, values: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Values at ``z`` from values at each piece's Gauss-Legendre nodes, by
+    barycentric Lagrange interpolation of their logarithm within the piece
+    holding ``z`` (a conditional moment is positive and its logarithm
+    smoother than itself where it climbs by orders of magnitude)."""
+    logs = np.log(np.maximum(values, 1e-300)).reshape(-1, _GL_OUTER[0].size)
+    i = np.clip(np.searchsorted(edges, z, side="right") - 1, 0, edges.size - 2)
+    a, b = edges[i], edges[i + 1]
+    x = (2.0 * z - a - b) / (b - a)
+    d = x[:, None] - _GL_OUTER[0][None, :]
+    exact = d == 0.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = _BARYCENTRIC[None, :] / d
+        out = (t * logs[i]).sum(axis=1) / t.sum(axis=1)
+    hit = exact.any(axis=1)
+    out[hit] = logs[i[hit], exact[hit].argmax(axis=1)]
+    return np.exp(out)
+
+
+def _cross_parts(units, level: _Level, z_high: float):
+    """The cross parts ``int c_r(z) phi(z) dz`` for r = 2, 3, the factor
+    integrals of each unit's conditional moments (for the marginal
+    residual) and the evaluation count, at one level. Flat units are
+    constants, two-point units and units at loading one are evaluated at the
+    event's factor nodes, and the other beta units at their own nodes,
+    interpolated onto the event's."""
+    breaks = []
+    for u in units:
+        breaks.extend(u.outer_breaks(level))
+    points, weights = _pieces(_Z_LOW, z_high, sorted(set(breaks)), level.outer_width, _GL_OUTER)
+    weights = weights * _phi(points)
+    t1 = np.zeros(points.size)
+    t2 = np.zeros(points.size)
+    c2 = np.zeros(points.size)
+    c3 = np.zeros(points.size)
+    marginals = []
+    evaluations = 0
+    for u in units:
+        if u.table is not None and u.w < 1.0:
+            edges = _native_edges(u, level, z_high)
+            native, _ = _pieces(edges[0], edges[-1], edges[1:-1], np.inf, _GL_OUTER)
+            b1, b2, count = u.conditional(native, level)
+            a1, a2 = _interpolate_log(edges, b1, points), _interpolate_log(edges, b2, points)
+        else:
+            a1, a2, count = u.conditional(points, level)
+        evaluations += count
+        c3 += 3.0 * t2 * a1 + 3.0 * t1 * a2
+        c2 += 2.0 * t1 * a1
+        t2 += 2.0 * t1 * a1 + a2
+        t1 += a1
+        marginals.append((float(a1 @ weights), float(a2 @ weights)))
+    return float(c2 @ weights), float(c3 @ weights), marginals, evaluations
+
+
+def _event_moments(preps, coupling: str, rtol: float, max_refinements: int):
+    """Raw moments, zero probability, support and integration record of one
+    event's total under the coupling (spec section 4B)."""
+    from eltq.reference import law_moments
+
+    laws = [_unit_law(p) for p in preps]
+    marginal = [law_moments(*law) for law in laws]
+    support = math.fsum(p.support for p in preps)
+    record = {"method": "closed_form", "error": (0.0, 0.0), "residual": 0.0, "evaluations": 0,
+              "converged": True}
+    if len(preps) == 1:
+        zero = _zero_probability(preps[0])
+        return list(marginal[0]), zero, support, record
+    if coupling == "independent" or all(_flat(p) for p in preps):
+        t = [0.0, 0.0, 0.0]
+        for m in marginal:
+            t = [t[0] + m[0], t[1] + 2.0 * t[0] * m[0] + m[1],
+                 t[2] + 3.0 * t[1] * m[0] + 3.0 * t[0] * m[1] + m[2]]
+        zero = math.prod(_zero_probability(p) for p in preps)
+        return t, zero, support, record
+    marginal_sum = [math.fsum(m[r] for m in marginal) for r in range(3)]
+    ratio = min(marginal_sum[1] / support ** 2, marginal_sum[2] / support ** 3)
+    z_high = min(37.0, max(_Z_HIGH_MIN, -float(ndtri(0.01 * rtol * ratio))))
+    record["method"] = "factor_integration"
+    scale = 1.0
+    previous = None
+    for round_ in range(max_refinements + 1):
+        tol = max(rtol * _TABLE_TOL_FRACTION * scale ** 4, _TABLE_TOL_FLOOR)
+        units = [_UnitTerm(p, rtol, tol) for p in preps]
+        fine = _cross_parts(units, _Level(scale), z_high)
+        coarse = previous if previous is not None else _cross_parts(units, _Level(scale, coarse=True), z_high)
+        record["evaluations"] += fine[3] + (coarse[3] if previous is None else 0)
+        error = (abs(fine[0] - coarse[0]), abs(fine[1] - coarse[1]))
+        moments = [marginal_sum[0], marginal_sum[1] + fine[0], marginal_sum[2] + fine[1]]
+        tables_ok = all(u.table is None or u.table.converged for u in units)
+        converged = tables_ok and error[0] <= rtol * moments[1] and error[1] <= rtol * moments[2]
+        record["error"] = (error[0] / moments[1], error[1] / moments[2])
+        residual = 0.0
+        for (f1, f2), m in zip(fine[2], marginal):
+            residual = max(residual, abs(f1 - m[0]) / max(m[0], 1e-300), abs(f2 - m[1]) / max(m[1], 1e-300))
+        record["residual"] = residual
+        if converged:
+            break
+        previous = fine
+        scale *= 0.5
+    record["converged"] = converged
+    zero = _integrated_zero(preps, z_high)
+    return moments, zero, support, record
+
+
+def _flat(prep: _Prepped) -> bool:
+    return prep.kind == _ATOM or prep.kind == _DROP or prep.w_corr == 0.0
+
+
+def _zero_probability(prep: _Prepped) -> float:
+    if prep.kind == _ATOM:
+        return 1.0 if prep.mean_loss == 0.0 else 0.0
+    if prep.kind == _TWO_POINT:
+        return (prep.max_loss - prep.mean_loss) / prep.max_loss
+    return 0.0
+
+
+def _integrated_zero(preps, z_high: float) -> float:
+    """``int prod_u P(X_u = 0 | z) phi(z) dz``: zero unless every unit is a
+    two-point unit or an atom at zero."""
+    if any(p.kind in (_BETA, _COMONOTONE) or (p.kind == _ATOM and p.mean_loss > 0.0) for p in preps):
+        return 0.0
+    steps = [float(ndtri(1.0 - p.two_point_p)) for p in preps if p.kind == _TWO_POINT and p.w_indep == 0.0]
+    points, weights = _pieces(_Z_LOW, z_high, sorted(set(steps)), 0.5, _GL_OUTER)
+    weights = weights * _phi(points)
+    product = np.ones(points.size)
+    for p in preps:
+        if p.kind == _TWO_POINT:
+            product *= 1.0 - two_point_conditional(p.two_point_p, p.w_corr, p.w_indep, points)
+    return float(product @ weights) + float(ndtr(_Z_LOW)) * float(product[0])
+
+
+def multiunit_moments_reference(event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *,
+                                coupling="burke", variance_policy="bernoulli",
+                                clamp_factor=DEFAULT_CLAMP_FACTOR, rtol=MOMENT_RTOL,
+                                max_refinements=_MAX_REFINEMENTS):
+    """Model moments of a multi-unit ELT's event totals under a coupling,
+    with no grid (spec section 4B).
+
+    Events are validated and classified exactly as ``multiunit_views_reference``
+    does. Per event: one live unit, ``independent`` and ``homer`` take closed
+    forms (``homer`` the rolled row's); ``burke`` and ``comonotone`` add the
+    integrated cross parts to the closed-form marginal parts, at two levels
+    of the score tables and the rules, refined until the levels agree within
+    ``rtol`` in ``C_2`` and ``C_3`` or reported unconverged. ``matched`` is
+    refused (spec section 11).
+
+    Returns
+    -------
+    ModelMoments
+    """
+    from eltq._meta import ModelMoments
+
+    if coupling not in COUPLINGS:
+        raise EltqError(f"unknown coupling {coupling!r}; expected one of {COUPLINGS}")
+    if coupling == "matched":
+        raise EltqError("the matched coupling's scale is defined through a grid; multiunit_moments refuses it "
+                        "until that scale is defined without one (spec section 11)")
+    if variance_policy not in VARIANCE_POLICIES:
+        raise EltqError(f"unknown variance_policy {variance_policy!r}")
+    if not (0.0 < clamp_factor < 1.0):
+        raise EltqError(f"clamp_factor must be in (0, 1), got {clamp_factor}")
+    rtol = float(rtol)
+    if not (0.0 < rtol < 1.0):
+        raise EltqError(f"rtol must be in (0, 1), got {rtol}")
+    warn_if_clamp(variance_policy)
+    event_id = np.asarray(event_id, dtype=object)
+    unit_id = np.asarray(unit_id, dtype=object)
+    cols = [np.asarray(c, dtype=np.float64) for c in (rate, mean_loss, sd_indep, sd_corr, max_loss)]
+    n_rows = event_id.size
+    for name, arr in zip(("unit_id", "rate", "mean_loss", "sd_indep", "sd_corr", "max_loss"), (unit_id, *cols)):
+        if arr.size != n_rows:
+            raise EltqError(f"column {name} has {arr.size} rows, expected {n_rows}")
+    rates = cols[0]
+    diagnostics: dict[str, RowIssues] = {}
+    ranges = _events(event_id)
+    support = np.full(len(ranges), np.nan)
+    rate_terms, zero_terms = [], []
+    moment_terms = ([], [], [])
+    counts = {"atom": 0, "beta": 0, "two_point": 0}
+    valid_events = one_unit = 0
+    errors = ([], [])
+    residual = 0.0
+    evaluations = 0
+    unconverged = []
+    integrated = False
+    for e, (start, end) in enumerate(ranges):
+        eid = event_id[start]
+        if not np.all(rates[start:end] == rates[start]):
+            raise MultiUnitError(f"event {eid!r}: rate varies across its rows")
+        units_here = set()
+        for j in range(start, end):
+            uid = str(unit_id[j])
+            if uid in units_here:
+                raise MultiUnitError(f"event {eid!r}: unit {uid!r} appears twice")
+            units_here.add(uid)
+        lam = float(rates[start])
+        if not math.isfinite(lam) or lam < 0.0:
+            category = "nonfinite" if not math.isfinite(lam) else "negative_field"
+            for j in range(start, end):
+                _note(diagnostics, category, f"{eid}/{unit_id[j]}")
+            continue
+        if lam == 0.0:
+            for j in range(start, end):
+                _note(diagnostics, "zero_rate", f"{eid}/{unit_id[j]}")
+            continue
+        preps, specs = [], []
+        for j in range(start, end):
+            unit = Unit(cols[1][j], cols[2][j], cols[3][j], cols[4][j])
+            prep = prepare_unit(unit, f"{eid}/{unit_id[j]}", variance_policy, clamp_factor, diagnostics)
+            if prep.kind == _DROP:
+                continue
+            preps.append(couple(prep, coupling))
+            specs.append(unit)
+            counts["atom" if prep.kind == _ATOM else "two_point" if prep.kind == _TWO_POINT else "beta"] += 1
+        if not preps:
+            continue
+        valid_events += 1
+        if len(preps) == 1:
+            one_unit += 1
+        if coupling == "homer" and len(preps) >= 2:
+            rolled = prepare_unit(rolled_unit(specs), "rolled", variance_policy, clamp_factor)
+            if rolled.kind == _DROP:
+                moments, zero = [0.0, 0.0, 0.0], 0.0
+            else:
+                from eltq.reference import law_moments
+
+                moments = list(law_moments(*_unit_law(rolled)))
+                zero = _zero_probability(rolled)
+            event_support = max(math.fsum(p.support for p in preps), rolled.support)
+            record = {"method": "closed_form", "error": (0.0, 0.0), "residual": 0.0, "evaluations": 0,
+                      "converged": True}
+        else:
+            moments, zero, event_support, record = _event_moments(preps, coupling, rtol, max_refinements)
+        support[e] = event_support
+        rate_terms.append(lam)
+        zero_terms.append(lam * zero)
+        for r in range(3):
+            moment_terms[r].append(lam * moments[r])
+        if record["method"] == "factor_integration":
+            integrated = True
+            errors[0].append(lam * moments[1] * record["error"][0])
+            errors[1].append(lam * moments[2] * record["error"][1])
+            residual = max(residual, record["residual"])
+            evaluations += record["evaluations"]
+            if not record["converged"] and len(unconverged) < MAX_EXAMPLES:
+                unconverged.append({"event_id": eid, "error": record["error"]})
+            elif not record["converged"]:
+                unconverged.append(None)
+    from eltq.reference import _exact_sum
+
+    total_rate = math.fsum(rate_terms)
+    sums = [_exact_sum(t) for t in moment_terms]
+    raw = tuple(v for v, _ in sums)
+    valid_rows = sum(counts.values())
+    achieved = tuple(math.fsum(errors[r]) / raw[r + 1] if raw[r + 1] > 0.0 else 0.0 for r in range(2))
+    n_unconverged = len(unconverged)
+    examples = [u for u in unconverged if u is not None]
+    return ModelMoments(
+        total_rate=total_rate,
+        raw_moments=raw,
+        severity_moments=tuple(c / total_rate if total_rate > 0.0 else math.nan for c in raw),
+        analytic_aal=raw[0],
+        rate_at_zero=math.fsum(zero_terms),
+        max_support=float(np.nanmax(support)) if valid_events else 0.0,
+        support=support,
+        input_rows=n_rows,
+        valid_rows=valid_rows,
+        atom_rows=counts["atom"],
+        beta_rows=counts["beta"],
+        two_point_rows=counts["two_point"],
+        dropped_rows=n_rows - valid_rows,
+        moment_overflow=tuple(flag for _, flag in sums),
+        diagnostics=diagnostics,
+        method="factor_integration" if integrated else "closed_form",
+        rtol=rtol,
+        achieved_error=achieved,
+        converged=n_unconverged == 0,
+        events=len(ranges),
+        valid_events=valid_events,
+        one_unit_events=one_unit,
+        coupling=coupling,
+        marginal_residual=residual,
+        evaluations=evaluations,
+        unconverged_events=n_unconverged,
+        unconverged=examples,
+    )

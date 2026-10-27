@@ -25,6 +25,7 @@ pub mod deposit;
 pub mod incbeta;
 pub mod diagnostics;
 pub mod error;
+pub mod event_moments;
 pub mod kernel;
 pub mod law;
 pub mod moments;
@@ -54,6 +55,7 @@ pub use quadrature::{FactorRule, ZRule, z_quadrature};
 pub use quantize::{Classified, EltInput, classify_rows, classify_rows_with, quantize};
 pub use moments::{ModelMoments, RowLaw, model_moments};
 pub use tails::{TailMoments, TailRegimes, tail_moments};
+pub use event_moments::{MomentConfig, SharedMoments, UnconvergedEvent, multiunit_moments};
 pub use terms::{Clause, UnitTerms, View, ViewMap, check_grid_alignment, parse_terms, parse_terms_line};
 pub use views::{
     Convolution, FirstMoments, MatchedEntry, MultiConfig, MultiInput, MultiMeta, MultiResult, PairResult, RollUpEntry,

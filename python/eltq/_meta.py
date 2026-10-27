@@ -170,7 +170,12 @@ class ModelMoments:
 
     The integration fields describe how the moments were obtained:
     ``method`` is ``closed_form`` for a one-row ELT, whose moments are exact
-    (``achieved_error`` zero, ``converged`` True).
+    (``achieved_error`` zero, ``converged`` True), and for a multi-unit ELT
+    whose events all have closed forms; ``factor_integration`` when some
+    event's cross parts were integrated over the factor, ``achieved_error``
+    then being the rate-weighted difference between two levels of the rules
+    relative to ``C_2`` and ``C_3``. For a multi-unit ELT ``support`` is per
+    event (the sum of its units' supports), NaN where no unit contributes.
     """
 
     total_rate: float
@@ -194,6 +199,22 @@ class ModelMoments:
     #: Achieved relative errors of ``C_2`` and ``C_3``.
     achieved_error: tuple = (0.0, 0.0)
     converged: bool = True
+    #: Multi-unit only (None for a one-row ELT): the events, those with a
+    #: contributing unit, those with one (closed forms), and the coupling.
+    events: int | None = None
+    valid_events: int | None = None
+    one_unit_events: int | None = None
+    coupling: str | None = None
+    #: The largest relative difference between a unit's closed-form first or
+    #: second moment and the same rule's integral of its conditional moments,
+    #: a check of the inner integration.
+    marginal_residual: float | None = None
+    #: Integrand evaluations of the conditional moments.
+    evaluations: int | None = None
+    #: Events whose two levels did not agree within ``rtol`` after the
+    #: refinements, and bounded examples ``{"event_id", "error"}``.
+    unconverged_events: int | None = None
+    unconverged: list | None = None
 
 
 @dataclass
