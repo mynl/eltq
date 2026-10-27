@@ -14,6 +14,8 @@ All notable changes to this project are documented here, following
 ### Fixed
 
 - The refusal of the `matched` coupling by `multiunit_moments` no longer carries a run of spaces in its message.
+- The wheels workflow installs the `dev` dependency group, so test 23 has `mpmath`; its absence had failed every test job since the test landed, and no release reached the publish step.
+- Tests 30 and 31 compare only the engine above 1e6 on macOS arm64, where SciPy's incomplete beta is off by about `min(a, b) * 3e-18` (3e-3 at 1e14); the engine passes there.
 
 ## [2.13.0] - 2026-10-27
 

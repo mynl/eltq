@@ -109,8 +109,13 @@ jobs:
         with:
           name: wheel-${{ matrix.name }}
           path: dist
-      - name: Install the wheel with the reference backend
-        run: python -m pip install "$(echo dist/*.whl)[reference]" pytest pandas
+      - name: Install the wheel with the reference backend and the dev group
+        # The dev group in pyproject.toml lists the test dependencies (pytest,
+        # SciPy, pandas, mpmath for test 23), so a new one reaches CI without
+        # an edit here; --group needs pip 25.1 or later.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group dev "$(echo dist/*.whl)[reference]"
       - name: Check the compiled backend loads from the wheel
         run: python -c "import eltq; print(eltq.__version__, eltq.__file__); assert eltq.BACKEND == 'rust'"
       - name: Run the suite against the installed wheel
