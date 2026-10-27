@@ -207,6 +207,13 @@ impl RowTail {
     }
 }
 
+/// One law's contribution per unit of rate at edge `t` and node `c`: `R`,
+/// `T_1..3`, `D_1..3`, the top-half rate and `sum (x^r - c^r)` there (the
+/// one-row formulas, for an event with one unit or a rolled row).
+pub(crate) fn law_tail(law: RowLaw, t: f64, c: f64) -> Result<[f64; 11], Error> {
+    Ok(RowTail::new(law)?.at(t, c))
+}
+
 /// Tail measures of a one-row ELT at `edge` with nodes `top_node` (the edge
 /// itself when None), classified exactly as the grid route classifies the
 /// same input (spec section 4B). Rows are processed in fixed chunks of

@@ -2436,5 +2436,105 @@
       }
     },
     "peak_rss_mb": 303.1
+  },
+  {
+    "suite": "moments",
+    "timestamp": "2026-10-27T01:52:04.168359+00:00",
+    "machine": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+      "logical_cores": 32,
+      "python": "3.14.7",
+      "numpy": "2.5.2",
+      "eltq": "2.14.0",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "cpu_name": "AMD Ryzen 9 9950X3D2 16-Core Processor"
+    },
+    "rows": 1000000,
+    "edges": 64,
+    "runs": {
+      "mixture": {
+        "moments_seconds": 0.0197,
+        "tails_seconds": 0.173,
+        "tails_seconds_one_thread": 3.46,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 979806,
+        "regimes": {
+          "incomplete_beta": 849522,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 90272,
+          "two_point": 40012
+        },
+        "max_support": 4999949.479549875
+      },
+      "small_alpha": {
+        "moments_seconds": 0.0198,
+        "tails_seconds": 0.298,
+        "tails_seconds_one_thread": 6.372,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 1000000,
+        "regimes": {
+          "incomplete_beta": 1000000,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 0,
+          "two_point": 0
+        },
+        "max_support": 1000000.0
+      },
+      "large_m": {
+        "moments_seconds": 0.0195,
+        "tails_seconds": 0.211,
+        "tails_seconds_one_thread": 4.433,
+        "tails_bitwise_across_threads": true,
+        "valid_rows": 1000000,
+        "regimes": {
+          "incomplete_beta": 1000000,
+          "narrow_kernel": 0,
+          "normal_law": 0,
+          "atoms": 0,
+          "two_point": 0
+        },
+        "max_support": 999987015.8879712
+      },
+      "shared_tails": {
+        "rows": 909937,
+        "edges": [
+          12687518,
+          14107243,
+          15685834,
+          17441069
+        ],
+        "seconds": 20.44,
+        "seconds_eight_threads": 41.93,
+        "bitwise_across_threads": true,
+        "evaluations": 10016055224,
+        "regimes": {
+          "exact_events": 19750,
+          "bounded_events": 78176,
+          "one_unit_events": 9945
+        },
+        "width": [
+          0.999174,
+          0.999411,
+          0.999597,
+          0.999755
+        ],
+        "rate_lower": [
+          0.43121203241786826,
+          0.22534817605920437,
+          0.09930018435124177,
+          0.03675597632354232
+        ],
+        "rate_upper": [
+          36.672740930218566,
+          25.713123986298484,
+          15.89097738607267,
+          8.760900149830755
+        ]
+      }
+    },
+    "peak_rss_mb": 476.3
   }
 ]

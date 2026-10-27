@@ -235,7 +235,10 @@ class TailMoments:
     - 1/2) h`` and ``c = (n - 1) h`` the rate and ``D_1`` are a grid's
     ``rate_above_grid`` and ``mean_above_grid``.
 
-    ``method`` is ``exact`` for a one-row ELT. ``regimes`` counts the rows by
+    ``method`` is ``exact`` for a one-row ELT, and for a multi-unit ELT whose
+    events all have exact tails; ``union_bound`` where some event's tail is
+    bounded (spec section 4B), ``regimes`` then counting the exact and the
+    bounded events. For a one-row ELT ``regimes`` counts the rows by
     evaluation: ``incomplete_beta`` (the continued fraction),
     ``narrow_kernel`` (the quadrature from ``min(alpha, beta) = 2e5``),
     ``normal_law`` (from ``1e16``), ``atoms`` and ``two_point``. An order
@@ -257,6 +260,21 @@ class TailMoments:
     valid_rows: int
     diagnostics: dict[str, RowIssues]
     method: str = "exact"
+    #: Multi-unit only (None for a one-row ELT): the bounds of each measure,
+    #: ``{"rate_above", "moments_above", "excess_above"}`` with the shapes of
+    #: the point values (which are the upper bounds where an event is
+    #: bounded), their largest relative width per edge, whether every width
+    #: is within ``rtol`` (None when no ``rtol`` was given), the coupling,
+    #: the event counts and the integrand evaluations of the bounded events.
+    lower: dict | None = None
+    upper: dict | None = None
+    width: object = None
+    converged: bool | None = None
+    rtol: float | None = None
+    coupling: str | None = None
+    events: int | None = None
+    valid_events: int | None = None
+    evaluations: int | None = None
 
 
 @dataclass

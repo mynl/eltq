@@ -37,7 +37,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.13.0"
+__version__ = "2.14.0"
 
 try:
     from eltq._eltq import (
@@ -77,6 +77,10 @@ try:
         from eltq._eltq import multiunit_moments as _rust_multiunit_moments
     except ImportError:  # extension older than 2.13.0
         _rust_multiunit_moments = None
+    try:
+        from eltq._eltq import multiunit_tail_moments as _rust_multiunit_tail_moments
+    except ImportError:  # extension older than 2.14.0
+        _rust_multiunit_tail_moments = None
 
     BACKEND = "rust"
 except ImportError:
@@ -98,6 +102,7 @@ except ImportError:
     _rust_moments_arrays = None
     _rust_tail_moments_arrays = None
     _rust_multiunit_moments = None
+    _rust_multiunit_tail_moments = None
 
 if BACKEND == "rust":
     try:
@@ -132,6 +137,7 @@ __all__ = [
     "tail_moments_arrays",
     "TailMoments",
     "multiunit_moments",
+    "multiunit_tail_moments",
     "CurveMeta",
     "GridMeta",
     "joint_two_units",
@@ -1236,6 +1242,122 @@ def multiunit_moments(
         converged=out["unconverged_events"] == 0,
         coupling=coupling,
         **out,
+    )
+
+
+def multiunit_tail_moments(
+    event_id,
+    unit_id,
+    rate,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    max_loss,
+    *,
+    edge,
+    top_node=None,
+    coupling="burke",
+    variance_policy="bernoulli",
+    clamp_factor=0.999,
+    rtol=None,
+    threads=None,
+    chunk_rows=None,
+) -> TailMoments:
+    """Tail measures of a multi-unit ELT's event totals at candidate edges,
+    with no grid (spec section 4B).
+
+    For each edge ``t`` with node ``c``: the tail rate, tail moments and
+    excess moments of the event totals, as ``tail_moments_arrays`` gives them
+    for one-row rows, each with a lower and an upper bound. An event with one
+    contributing unit, every event under ``homer`` (the rolled row), an event
+    of atoms, and an event whose total is a function of the factor alone
+    (every unit at loading one) is exact. Any other event is bounded by the
+    union bound: from above, each unit beyond its share ``t b_u / B`` of the
+    edge with the moments of the others; from below, the largest unit beyond
+    the edge or every unit beyond its share; the conditional bounds
+    integrated over the factor by the rule of ``multiunit_moments`` and
+    widened by a relative margin of 1e-6. A bounded event's point value is
+    its upper bound. A loose bound failing a target is not evidence of a
+    material tail; an event whose total cannot reach the edge contributes
+    nothing at no cost.
+
+    Parameters
+    ----------
+    event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss : array_like
+        As ``multiunit_views`` takes them.
+    edge, top_node : array_like
+        As ``tail_moments_arrays`` takes them.
+    coupling : {"burke", "comonotone", "independent", "homer"}, default "burke"
+        ``matched`` is refused (spec section 11).
+    variance_policy, clamp_factor : as ``multiunit_views``.
+    rtol : float, optional
+        With a tolerance, ``converged`` states whether every measure's bounds
+        lie within this relative width at every edge; with None (the
+        default) no target is set and ``converged`` is None.
+    threads, chunk_rows : as ``multiunit_moments``.
+
+    Returns
+    -------
+    TailMoments
+        The point values (upper bounds where an event is bounded), ``lower``
+        and ``upper`` dicts of the same arrays, ``width`` per edge,
+        ``converged``, and in ``regimes`` the counts of exact and bounded
+        events.
+    """
+    edges = np.ascontiguousarray(np.atleast_1d(np.asarray(edge, dtype=np.float64)))
+    nodes = None if top_node is None else np.ascontiguousarray(
+        np.atleast_1d(np.asarray(top_node, dtype=np.float64)))
+    if _rust_multiunit_tail_moments is None:
+        return _via_reference(
+            lambda module: module.multiunit_tail_moments_reference,
+            event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss,
+            edge=edges, top_node=nodes, coupling=coupling, variance_policy=variance_policy,
+            clamp_factor=clamp_factor, rtol=rtol,
+        )
+    _reference_multiunit().warn_if_clamp(variance_policy)
+    if coupling == "matched":
+        raise EltqError("the matched coupling's scale is defined through a grid; the tail query refuses it "
+                        "until that scale is defined without one (spec section 11)")
+    columns = tuple(
+        _column(name, values)
+        for name, values in zip(_MULTI_COLUMNS[2:], (rate, mean_loss, sd_indep, sd_corr, max_loss))
+    )
+    event_codes, _ = _factorize(event_id)
+    unit_codes, _ = _factorize(unit_id)
+    out = _rust_multiunit_tail_moments(
+        event_codes, unit_codes, *columns, edge=edges, top_node=nodes, coupling=coupling,
+        variance_policy=variance_policy, clamp_factor=clamp_factor,
+        rtol=None if rtol is None else float(rtol), threads=threads, chunk_rows=chunk_rows,
+    )
+    event_labels = np.asarray(event_id)
+    unit_labels = np.asarray(unit_id)
+    diagnostics = {}
+    for category, entry in out.pop("diagnostics").items():
+        examples = [f"{event_labels[row]}/{unit_labels[row]}" for row in entry["examples"]]
+        diagnostics[category] = RowIssues(count=entry["count"], examples=examples)
+
+    def split(flat):
+        table = flat.reshape(-1, 7)
+        return {"rate_above": table[:, 0].copy(), "moments_above": table[:, 1:4].copy(),
+                "excess_above": table[:, 4:7].copy()}
+
+    point, lower, upper = split(out["point"]), split(out["lower"]), split(out["upper"])
+    half = out["top_half"].reshape(-1, 4)
+    return TailMoments(
+        edge=out["edge"], top_node=out["top_node"],
+        rate_above=point["rate_above"], moments_above=point["moments_above"],
+        excess_above=point["excess_above"],
+        top_half_rate=half[:, 0].copy(), top_half_excess=half[:, 1:].copy(),
+        total_rate=out["total_rate"],
+        regimes={"exact_events": out["exact_events"], "bounded_events": out["bounded_events"],
+                 "one_unit_events": out["one_unit_events"]},
+        moment_overflow=(False, False, False),
+        input_rows=out["input_rows"], valid_rows=out["valid_rows"], diagnostics=diagnostics,
+        method="union_bound" if out["bounded_events"] else "exact",
+        lower=lower, upper=upper, width=out["width"], converged=out["converged"],
+        rtol=None if rtol is None else float(rtol),
+        coupling=coupling, events=out["events"], valid_events=out["valid_events"],
+        evaluations=out["evaluations"],
     )
 
 

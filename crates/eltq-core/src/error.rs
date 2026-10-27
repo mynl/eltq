@@ -107,7 +107,7 @@ pub enum Error {
     #[error("tail query edge {edge} with top node {top_node}: both must be finite with 0 <= top_node <= edge")]
     BadTailEdge { edge: f64, top_node: f64 },
     #[error(
-        "the matched coupling's scale is defined through a grid; the model moments and tail          measures refuse it until that scale is defined without one (spec section 11)"
+        "the matched coupling's scale is defined through a grid; the model moments and tail measures refuse it until that scale is defined without one (spec section 11)"
     )]
     MatchedRefused,
     #[error("rtol must be in (0, 1), got {0}")]

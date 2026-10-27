@@ -144,6 +144,25 @@ pub fn erf(x: f64) -> f64 {
     }
 }
 
+/// `ln(1 - Phi(t))`, finite wherever the tail is positive in exact
+/// arithmetic: the logarithm of the cdf while `t < 5`, beyond it `ln phi(t)`
+/// plus the logarithm of Mills's ratio by its Laplace continued fraction
+/// `1 / (t + 1 / (t + 2 / (t + 3 / ...)))`, which converges quickly there
+/// and stays finite where `1 - Phi` underflows; `-inf` at `+inf`.
+pub fn ln_upper_tail(t: f64) -> f64 {
+    if t == f64::INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    if t < 5.0 {
+        return cdf(-t).ln();
+    }
+    let mut f = t;
+    for k in (1..=60).rev() {
+        f = t + k as f64 / f;
+    }
+    -0.5 * t * t - 0.5 * (2.0 * PI).ln() - f.ln()
+}
+
 /// Phi^{-1}(p) for p in [0, 1] (AS241); the endpoints map to the infinities.
 pub fn quantile(p: f64) -> f64 {
     if p.is_nan() {
@@ -498,6 +517,21 @@ mod tests {
         eprintln!("erfc worst relative error {worst:.2e}");
         assert!((erf(0.3) - libm::erf(0.3)).abs() < 1e-16);
         assert!((erf(-2.0) - libm::erf(-2.0)).abs() < 1e-16);
+    }
+
+    // The logarithm of the upper tail agrees with that of the cdf wherever
+    // the latter is a normal double, and stays finite and asymptotic beyond.
+    #[test]
+    fn ln_upper_tail_matches_the_cdf() {
+        let mut t = -5.0;
+        while t < 37.0 {
+            let (got, want) = (ln_upper_tail(t), cdf(-t).ln());
+            assert!((got - want).abs() <= 1e-13 * want.abs().max(1.0), "t {t}: {got} vs {want}");
+            t += 0.125;
+        }
+        let x = 60.0_f64;
+        let mills = -0.5 * x * x - x.ln() - 0.5 * (2.0 * PI).ln();
+        assert!((ln_upper_tail(x) - mills).abs() < 1e-3 && ln_upper_tail(f64::INFINITY) == f64::NEG_INFINITY);
     }
 
     #[test]

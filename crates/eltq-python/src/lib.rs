@@ -18,7 +18,7 @@ use eltq_core::{
     ClassifyOptions, Clause, Config, Convolution, Coupling, Curve, EltInput, Error as CoreError, JointConfig, Meta,
     Method, MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule, build_curve,
     classify_rows, joint_two_units as core_joint_two_units, model_moments, tail_moments, MomentConfig,
-    multiunit_moments as core_multiunit_moments,
+    multiunit_moments as core_multiunit_moments, multiunit_tail_moments as core_multiunit_tail_moments, TailConfig,
     multiunit_views as core_multiunit_views, quantize,
 };
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
@@ -695,6 +695,82 @@ fn multiunit_moments<'py>(
     Ok(dict)
 }
 
+/// Tail measures of a multi-unit ELT's event totals at candidate edges with
+/// no grid (spec section 4B): a dict of flat arrays (seven measures per
+/// edge for the point values and the bounds, four for the half bucket),
+/// the widths, the counts and the diagnostics.
+#[pyfunction]
+#[pyo3(signature = (event_code, unit_code, rate, mean_loss, sd_indep, sd_corr, max_loss, *, edge,
+    top_node=None, coupling="burke", variance_policy="bernoulli", clamp_factor=0.999,
+    rtol=None, threads=None, chunk_rows=None))]
+#[allow(clippy::too_many_arguments)]
+fn multiunit_tail_moments<'py>(
+    py: Python<'py>,
+    event_code: PyReadonlyArray1<'py, i64>,
+    unit_code: PyReadonlyArray1<'py, i64>,
+    rate: PyReadonlyArray1<'py, f64>,
+    mean_loss: PyReadonlyArray1<'py, f64>,
+    sd_indep: PyReadonlyArray1<'py, f64>,
+    sd_corr: PyReadonlyArray1<'py, f64>,
+    max_loss: PyReadonlyArray1<'py, f64>,
+    edge: PyReadonlyArray1<'py, f64>,
+    top_node: Option<PyReadonlyArray1<'py, f64>>,
+    coupling: &str,
+    variance_policy: &str,
+    clamp_factor: f64,
+    rtol: Option<f64>,
+    threads: Option<usize>,
+    chunk_rows: Option<usize>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let err = |e: CoreError| to_py_err(py, e);
+    let mut config = TailConfig::new();
+    config.coupling = Coupling::parse(coupling).map_err(err)?;
+    config.variance_policy = parse_variance_policy(variance_policy, clamp_factor)?;
+    config.rtol = rtol;
+    config.threads = threads;
+    if let Some(chunk_rows) = chunk_rows {
+        config.chunk_rows = chunk_rows;
+    }
+    let event_code = event_code.as_slice().map_err(|_| EltqError::new_err("event codes must be contiguous int64"))?;
+    let unit_code = unit_code.as_slice().map_err(|_| EltqError::new_err("unit codes must be contiguous int64"))?;
+    let input = MultiInput {
+        event_code,
+        unit_code,
+        rate: contiguous("rate", &rate)?,
+        mean_loss: contiguous("mean_loss", &mean_loss)?,
+        sd_indep: contiguous("sd_indep", &sd_indep)?,
+        sd_corr: contiguous("sd_corr", &sd_corr)?,
+        max_loss: contiguous("max_loss", &max_loss)?,
+    };
+    let edges = contiguous("edge", &edge)?;
+    let nodes = match &top_node {
+        Some(c) => Some(contiguous("top_node", c)?),
+        None => None,
+    };
+    let t = py.detach(|| core_multiunit_tail_moments(&input, edges, nodes, &config)).map_err(err)?;
+    let flat7 = |v: &[[f64; 7]]| -> Vec<f64> { v.iter().flatten().copied().collect() };
+    let dict = PyDict::new(py);
+    dict.set_item("point", flat7(&t.point).into_pyarray(py))?;
+    dict.set_item("lower", flat7(&t.lower).into_pyarray(py))?;
+    dict.set_item("upper", flat7(&t.upper).into_pyarray(py))?;
+    dict.set_item("top_half", t.top_half.iter().flatten().copied().collect::<Vec<f64>>().into_pyarray(py))?;
+    dict.set_item("width", t.width.into_pyarray(py))?;
+    dict.set_item("edge", t.edge.into_pyarray(py))?;
+    dict.set_item("top_node", t.top_node.into_pyarray(py))?;
+    dict.set_item("converged", t.converged)?;
+    dict.set_item("total_rate", t.total_rate)?;
+    dict.set_item("input_rows", t.input_rows)?;
+    dict.set_item("valid_rows", t.valid_rows)?;
+    dict.set_item("events", t.events)?;
+    dict.set_item("valid_events", t.valid_events)?;
+    dict.set_item("one_unit_events", t.one_unit_events)?;
+    dict.set_item("exact_events", t.exact_events)?;
+    dict.set_item("bounded_events", t.bounded_events)?;
+    dict.set_item("evaluations", t.evaluations)?;
+    dict.set_item("diagnostics", diagnostics_to_dict(py, &t.diagnostics, None)?)?;
+    Ok(dict)
+}
+
 type JointReturn<'py> = (
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray1<f64>>,
@@ -990,5 +1066,6 @@ fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(moments_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(tail_moments_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(multiunit_moments, m)?)?;
+    m.add_function(wrap_pyfunction!(multiunit_tail_moments, m)?)?;
     Ok(())
 }

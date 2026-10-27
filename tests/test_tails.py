@@ -17,9 +17,11 @@ import math
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import integrate, optimize, stats
 
 import eltq
 from eltq import reference
+from eltq import reference_multiunit as rm
 
 from conftest import FIXTURES_DIR
 
@@ -258,3 +260,248 @@ def test_partial_moments_against_60_digits(alpha):
                 # few times where the node is this close to the edge.
                 assert abs(out.excess_above[e, r] - want) <= (1e-9 + 2e-16 * b) * want + 5e-15 * float(full[r + 1]), (
                     alpha, b0, y, r + 1, out.excess_above[e, r], want)
+
+
+# [Eltq-Tail-Queries] Spec test 38: tail measures of shared events, both
+# backends through SHARED_TAIL_IMPLS (the reference evaluates every unit at
+# the event's factor nodes, the engine at each unit's own nodes, interpolated).
+# The two-beta and regression oracles are the exact conditional formula on
+# dense score grids, `fixtures/generate_tail_oracles.py` at 8001 by 80001
+# nodes: the two betas agree with the 4001 grid to 2e-6, the regression pair
+# to 2e-3 at its two shallower edges and 1e-6 at the deepest.
+SHARED_TAIL_IMPLS = [("reference", rm.multiunit_tail_moments_reference), ("eltq", eltq.multiunit_tail_moments)]
+
+
+@pytest.fixture(params=SHARED_TAIL_IMPLS, ids=[name for name, _ in SHARED_TAIL_IMPLS])
+def shared_tails(request):
+    return request.param[1]
+
+
+def run_shared(shared_tails, events, **options):
+    """``events``: ``(rate, [(mean_loss, sd_indep, sd_corr, max_loss), ...])``."""
+    rows = [(f"e{k}", f"u{i}", lam, *unit) for k, (lam, units) in enumerate(events) for i, unit in enumerate(units)]
+    event_id, unit_id, *cols = zip(*rows)
+    return shared_tails(list(event_id), list(unit_id), *(np.asarray(c, dtype=np.float64) for c in cols), **options)
+
+
+def measures(out, which=None):
+    """``(R, T_1..3, D_1..3)`` per edge: the point values, or a bound."""
+    d = (dict(rate_above=out.rate_above, moments_above=out.moments_above, excess_above=out.excess_above)
+         if which is None else getattr(out, which))
+    return np.column_stack([d["rate_above"], d["moments_above"], d["excess_above"]])
+
+
+def assert_bracketed(out, exact, rtol):
+    """``lower <= exact <= upper`` within the oracle's accuracy ``rtol``, and
+    ``lower <= point <= upper``; ``exact`` has as many columns as it checks."""
+    k = exact.shape[1]
+    lower, upper, point = measures(out, "lower"), measures(out, "upper"), measures(out)
+    assert np.all(lower[:, :k] <= exact * (1.0 + rtol))
+    assert np.all(upper[:, :k] >= exact * (1.0 - rtol))
+    assert np.all(lower <= point) and np.all(point <= upper)
+
+
+def assert_close(got, want, rtol):
+    """Elementwise within ``rtol``, each column's zeros within ``rtol`` of
+    that column's largest magnitude."""
+    scale = np.abs(want).max(axis=0, keepdims=True)
+    assert np.all(np.abs(got - want) <= rtol * (np.abs(want) + scale)), np.abs(got - want).max()
+
+
+def loading(unit):
+    """Burke's loading of a unit's normal score on the factor (spec section
+    4A): ``sigma_C / sqrt(sigma_I^2 + sigma_C^2)``."""
+    return unit[2] / math.hypot(unit[1], unit[2])
+
+
+SHARED_BETAS = [(200.0, 100.0, 150.0, 1000.0), (500.0, 300.0, 200.0, 2000.0)]
+SHARED_BETA_EDGES = [1000.0, 2000.0, 2900.0]
+SHARED_BETA_EXACT = np.array([
+    [2.804116339474e-01, 4.421167756854e+02, 7.508615027027e+05, 1.371978102312e+09],
+    [5.057087579334e-02, 1.168616204052e+02, 2.727490341697e+05, 6.431830813235e+08],
+    [4.367115278975e-04, 1.281255519024e+00, 3.759287456240e+03, 1.103072729395e+07],
+])
+# Two copies of the second regression row of test 37 (mu 100, sigma 10,000,
+# M 1e9) split evenly between independent and correlated parts.
+SHARED_REGRESSION = [(100.0, 5000.0, 5000.0, 1e9)] * 2
+SHARED_REGRESSION_EDGES = [4e5, 4e6, 4e7]
+SHARED_REGRESSION_EXACT = np.array([
+    [1.397611748017e-04, 1.352004413586e+02, 1.941053840963e+08, 4.280316724611e+14],
+    [8.768874246696e-07, 4.309142585069e+00, 2.198487316946e+07, 1.177708451102e+14],
+    [4.810066734313e-19, 1.991754248263e-11, 8.256993952891e-04, 3.427219970837e+04],
+])
+
+
+def test_shared_one_unit_events_equal_the_one_row_query(shared_tails):
+    units = [(0.5, (200.0, 100.0, 150.0, 1000.0)), (0.2, (300.0, 400.0, 300.0, 1000.0)),
+             (0.3, (50.0, 0.0, 0.0, 100.0))]
+    edges, nodes = [40.0, 100.0, 300.0, 900.0], [20.0, 60.0, 300.0, 600.0]
+    out = run_shared(shared_tails, [(lam, [u]) for lam, u in units], edge=edges, top_node=nodes, rtol=1e-3)
+    rate = np.array([lam for lam, _ in units])
+    cols = np.array([u for _, u in units]).T
+    one = eltq.tail_moments_arrays(rate, cols[3], cols[0], cols[1], cols[2], edge=edges, top_node=nodes)
+    want = measures(one)
+    assert_close(measures(out), want, 1e-13)
+    np.testing.assert_allclose(out.top_half_rate, one.top_half_rate, rtol=1e-13, atol=0)
+    np.testing.assert_array_equal(measures(out, "lower"), measures(out, "upper"))
+    assert out.regimes == {"exact_events": 3, "bounded_events": 0, "one_unit_events": 3}
+    assert out.method == "exact" and out.converged is True and np.all(out.width == 0.0)
+
+
+def test_shared_two_point_pair_against_the_four_outcome_law(shared_tails):
+    units = [(300.0, 400.0, 300.0, 1000.0), (500.0, 600.0, 500.0, 1500.0)]
+    p = [u[0] / u[3] for u in units]
+    rho = loading(units[0]) * loading(units[1])
+    y = [stats.norm.ppf(1.0 - q) for q in p]
+    both = stats.multivariate_normal([0.0, 0.0], [[1.0, rho], [rho, 1.0]]).cdf([-y[0], -y[1]])
+    outcomes = [(0.0, 1.0 - p[0] - p[1] + both), (1000.0, p[0] - both), (1500.0, p[1] - both), (2500.0, both)]
+    edges, nodes = [400.0, 1200.0, 2000.0], [300.0, 1000.0, 1800.0]
+    exact = np.array([[math.fsum(q * s ** r for s, q in outcomes if s > t) for r in range(4)]
+                      + [math.fsum(q * (s ** r - c ** r) for s, q in outcomes if s > t) for r in (1, 2, 3)]
+                      for t, c in zip(edges, nodes)])
+    out = run_shared(shared_tails, [(1.0, units)], edge=edges, top_node=nodes)
+    assert_bracketed(out, exact, 1e-9)
+    # Every outcome at these edges either passes both or neither of the lower
+    # bound's events, so its tail rate is the exact rate less the margin.
+    np.testing.assert_allclose(out.lower["rate_above"], exact[:, 0], rtol=2e-6)
+    assert out.regimes["bounded_events"] == 1 and out.method == "union_bound"
+
+
+def test_shared_two_betas_against_the_conditional_formula(shared_tails):
+    nodes = [0.9 * t for t in SHARED_BETA_EDGES]
+    out = run_shared(shared_tails, [(1.0, SHARED_BETAS)], edge=SHARED_BETA_EDGES, top_node=nodes)
+    c = np.array(nodes)[:, None] ** np.arange(1, 4)
+    excess = SHARED_BETA_EXACT[:, 1:] - c * SHARED_BETA_EXACT[:, :1]
+    assert_bracketed(out, np.column_stack([SHARED_BETA_EXACT, excess]), 1e-5)
+
+
+def test_shared_regression_pair_is_bracketed(shared_tails):
+    out = run_shared(shared_tails, [(1.0, SHARED_REGRESSION)], edge=SHARED_REGRESSION_EDGES)
+    assert_bracketed(out, SHARED_REGRESSION_EXACT, 1e-2)
+    assert np.all(np.isfinite(measures(out, "upper")))
+
+
+def test_shared_comonotone_events_are_exact(shared_tails):
+    # S = sum M F^-1(U): P(S > t) = 1 - u* and P(S^r; S > t) = int_u*^1 S^r.
+    edges = [600.0, 1500.0, 2500.0]
+    out = run_shared(shared_tails, [(1.0, SHARED_BETAS)], edge=edges, coupling="comonotone", rtol=1e-3)
+    laws = [(stats.beta(*reference.beta_params(u[3], u[0], u[1] + u[2])), u[3]) for u in SHARED_BETAS]
+
+    def total(q):
+        return math.fsum(m * law.ppf(q) for law, m in laws)
+
+    for e, t in enumerate(edges):
+        u_star = optimize.brentq(lambda q: total(q) - t, 1e-12, 1.0 - 1e-15, xtol=1e-15, rtol=1e-15)
+        assert out.rate_above[e] == pytest.approx(1.0 - u_star, rel=1e-7)
+        for r in (1, 2, 3):
+            want = integrate.quad(lambda q: total(q) ** r, u_star, 1.0, epsabs=0, epsrel=1e-11, limit=200)[0]
+            assert out.moments_above[e, r - 1] == pytest.approx(want, rel=1e-7)
+    assert out.regimes == {"exact_events": 1, "bounded_events": 0, "one_unit_events": 0}
+    assert out.method == "exact" and out.converged is True
+    np.testing.assert_array_less(measures(out, "lower"), measures(out, "upper") + 1e-300)
+
+
+def test_shared_atoms_and_homer_are_exact(shared_tails):
+    atoms = [(50.0, 0.0, 0.0, 100.0), (70.0, 0.0, 0.0, 200.0)]
+    out = run_shared(shared_tails, [(0.25, atoms)], edge=[100.0, 119.0, 120.0], top_node=[100.0, 110.0, 110.0])
+    np.testing.assert_allclose(out.rate_above, [0.25, 0.25, 0.0], rtol=1e-15)
+    np.testing.assert_allclose(out.moments_above[:, 1], [0.25 * 120.0 ** 2, 0.25 * 120.0 ** 2, 0.0], rtol=1e-15)
+    np.testing.assert_allclose(out.top_half_rate, [0.0, 0.0, 0.25], rtol=1e-15)
+    # homer rolls the event up (Homer and Li 2017, section 3.2.2): means,
+    # exposures and correlated sds added, independent sds in quadrature.
+    edges, nodes = [1000.0, 2000.0], [800.0, 2000.0]
+    out = run_shared(shared_tails, [(0.5, SHARED_BETAS)], edge=edges, top_node=nodes, coupling="homer")
+    mu, sd_i, sd_c, m = (math.fsum(u[0] for u in SHARED_BETAS), math.hypot(*(u[1] for u in SHARED_BETAS)),
+                         math.fsum(u[2] for u in SHARED_BETAS), math.fsum(u[3] for u in SHARED_BETAS))
+    one = eltq.tail_moments_arrays([0.5], [m], [mu], [sd_i], [sd_c], edge=edges, top_node=nodes)
+    np.testing.assert_allclose(measures(out), measures(one), rtol=1e-13)
+    np.testing.assert_array_equal(measures(out, "lower"), measures(out, "upper"))
+
+
+def test_shared_unreachable_edges_return_zero_with_no_work(shared_tails):
+    events = [(1.0, SHARED_BETAS), (0.5, [(300.0, 400.0, 300.0, 1000.0), (500.0, 600.0, 500.0, 1500.0)])]
+    out = run_shared(shared_tails, events, edge=[3000.0, 5000.0])
+    assert np.all(measures(out) == 0.0) and np.all(measures(out, "lower") == 0.0)
+    assert np.all(measures(out, "upper") == 0.0) and np.all(out.width == 0.0)
+    assert out.evaluations == 0 and out.regimes["bounded_events"] == 2
+    # A reachable edge beside them does the work for the events that reach it.
+    out = run_shared(shared_tails, events, edge=[2900.0, 5000.0])
+    assert out.evaluations > 0 and out.upper["rate_above"][0] > 0.0 and out.upper["rate_above"][1] == 0.0
+
+
+def test_shared_converged_against_rtol(shared_tails):
+    out = run_shared(shared_tails, [(1.0, SHARED_BETAS)], edge=SHARED_BETA_EDGES)
+    assert out.converged is None and out.rtol is None
+    out = run_shared(shared_tails, [(1.0, SHARED_BETAS)], edge=SHARED_BETA_EDGES, rtol=0.5)
+    assert out.converged is False and np.all(out.width > 0.5)
+    assert out.coupling == "burke" and out.events == 1 and out.valid_events == 1
+
+
+def test_shared_tails_refusals(shared_tails):
+    events = [(1.0, SHARED_BETAS)]
+    with pytest.raises(Exception, match="matched"):
+        run_shared(shared_tails, events, edge=[1000.0], coupling="matched")
+    for rtol in (0.0, 1.5):
+        with pytest.raises(Exception, match="rtol"):
+            run_shared(shared_tails, events, edge=[1000.0], rtol=rtol)
+    for edge, node in (([1000.0], [1100.0]), ([-1.0], [-1.0]), ([math.nan], [0.0])):
+        with pytest.raises(Exception, match="edge"):
+            run_shared(shared_tails, events, edge=edge, top_node=node)
+    with pytest.raises(Exception, match="top_node"):
+        run_shared(shared_tails, events, edge=[1000.0, 2000.0], top_node=[500.0])
+
+
+def shared_portfolio(n_events, seed):
+    """Seeded events of two to five units: correlated betas at loadings over
+    (0, 1), steep ones near one, two-point units, atoms and lone units."""
+    rng = np.random.default_rng(seed)
+    events = []
+    for k in range(n_events):
+        units = []
+        for _ in range(int(rng.integers(1, 6))):
+            m = float(rng.choice([1000.0, 5000.0, 20000.0]))
+            mu = m * float(rng.uniform(0.02, 0.3))
+            kind = rng.uniform()
+            if kind < 0.1:
+                units.append((mu, 0.0, 0.0, m))
+            elif kind < 0.2:
+                units.append((mu, 2.0 * mu, 2.0 * mu, m))
+            else:
+                sd = mu * float(rng.uniform(0.3, 1.2))
+                w = float(rng.choice([rng.uniform(0.05, 0.9), rng.uniform(0.95, 0.999)]))
+                units.append((mu, sd * (1.0 - w), sd * w, m))
+        events.append((float(rng.uniform(0.001, 0.05)), units))
+    return events
+
+
+def test_shared_tail_rule_has_converged(monkeypatch):
+    # The reference's outer width and transition step divided by four move
+    # the bounds by far less than their margin, on the seeded portfolio's
+    # events with the steepest units and the two-point units.
+    events = [shared_portfolio(24, 38)[k] for k in (1, 6, 8, 12, 14, 18)]
+    edges = [2000.0, 8000.0, 20000.0, 40000.0]
+    nodes = [0.95 * t for t in edges]
+    default = run_shared(rm.multiunit_tail_moments_reference, events, edge=edges, top_node=nodes)
+    monkeypatch.setattr(rm, "_TAIL_REFINE", 4.0)
+    refined = run_shared(rm.multiunit_tail_moments_reference, events, edge=edges, top_node=nodes)
+    for which in ("lower", "upper"):
+        assert_close(measures(default, which), measures(refined, which), 1e-8)
+
+
+def test_shared_tails_backends_agree_and_are_bitwise():
+    events = shared_portfolio(24, 38)
+    edges = [2000.0, 8000.0, 20000.0, 40000.0]
+    nodes = [0.95 * t for t in edges]
+    ref = run_shared(rm.multiunit_tail_moments_reference, events, edge=edges, top_node=nodes)
+    rust = run_shared(eltq.multiunit_tail_moments, events, edge=edges, top_node=nodes)
+    for which in (None, "lower", "upper"):
+        a, b = measures(rust, which), measures(ref, which)
+        assert_close(a, b, 1e-6)
+    np.testing.assert_allclose(rust.top_half_rate, ref.top_half_rate, rtol=1e-13)
+    assert rust.regimes == ref.regimes and rust.valid_rows == ref.valid_rows
+    # Fixed chunks folded in order: bitwise identical for any thread count.
+    one = run_shared(eltq.multiunit_tail_moments, events, edge=edges, top_node=nodes, threads=1, chunk_rows=3)
+    many = run_shared(eltq.multiunit_tail_moments, events, edge=edges, top_node=nodes, threads=4, chunk_rows=3)
+    for which in (None, "lower", "upper"):
+        np.testing.assert_array_equal(measures(one, which), measures(many, which))
+    np.testing.assert_array_equal(one.width, many.width)

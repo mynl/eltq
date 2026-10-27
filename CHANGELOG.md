@@ -3,6 +3,18 @@
 All notable changes to this project are documented here, following
 [Keep a Changelog](https://keepachangelog.com/) and semantic versioning.
 
+## [2.14.0] - 2026-10-27
+
+### Added
+
+- [shared-tails] `multiunit_tail_moments(event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *, edge, top_node, coupling, variance_policy, rtol, threads)` returns a `TailMoments` of the event totals at candidate edges with no grid (spec section 4B): per edge the point values and `lower` and `upper` bounds of the tail rate, tail moments and excess moments, the largest relative width, `converged` against `rtol` (None when no `rtol` is given), the counts and the integrand evaluations. One-unit events, `homer`, events of atoms and events at loading one are exact; any other event is bounded by the union bound, integrated over the factor within a relative margin of 1e-6, its point value the upper bound. An event that cannot reach an edge costs nothing. `matched` is refused.
+- Spec test 38 on both backends: one-unit events equal the one-row query; two-point pairs, two betas and a pair of regression rows are bracketed by exact laws (`fixtures/generate_tail_oracles.py`); comonotone, atom and `homer` events are exact; the factor rule agrees with a fourfold refinement within the margin; the backends agree to 1e-6 and the engine is bitwise across thread counts.
+- On the 0.91M unit-row benchmark, four edges take 20.4 s, and the bound is not informative on events of many units: the upper tail rate is only 16 to 22% below the trivial bound and 85 to 240 times the lower (`benchmarks/report-2.14.0.md`, `run_moments.py --shared-tails`). The lattice bracket of the plan is the next evaluator, if wanted.
+
+### Fixed
+
+- The refusal of the `matched` coupling by `multiunit_moments` no longer carries a run of spaces in its message.
+
 ## [2.13.0] - 2026-10-27
 
 ### Added

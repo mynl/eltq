@@ -2233,3 +2233,480 @@ def multiunit_moments_reference(event_id, unit_id, rate, mean_loss, sd_indep, sd
         unconverged_events=n_unconverged,
         unconverged=examples,
     )
+
+
+# ---------------------------------------------------------------------------
+# [Eltq-Tail-Queries] tail measures of shared events with no grid (spec
+# section 4B, test 38): exact for one-unit events, the homer coupling, events
+# of atoms and comonotone events; otherwise the union bound, its conditional
+# bounds integrated over the factor by the moment pass's rule.
+
+#: Relative margin by which the shared tail query widens its bounds, a
+#: hundred times the measured accuracy of the factor integration (about 1e-8,
+#: test 36): the bounds are valid to that accuracy.
+TAIL_MARGIN = 1e-6
+# A threshold within _DEEP_FROM standard scores of the inner reach has its
+# tail integrated past the reach (beyond it lies more than 5e-13 of the
+# tail), over _DEEP_SPAN / a past its start a, where the normal weight has
+# fallen by e^-40, in Gauss-Legendre pieces _DEEP_WIDTH / a wide.
+_DEEP_FROM = 5.0
+_DEEP_SPAN = 40.0
+_DEEP_WIDTH = 5.0
+# A unit's tail beyond x given the factor switches on as Phi((w z - v_x) / s),
+# over a factor width k = s / w about z = v_x / w: sharper than the moment
+# pass resolves when k is below _TRANSITION_KERNEL. Such a transition gets
+# breakpoints _TRANSITION_STEP k apart over _TRANSITION_SPAN in units of k
+# (below its start the sigmoid is under Phi(-10)); _TAIL_REFINE divides the
+# outer width and the step, for the tests' check that the rule has converged.
+_TRANSITION_KERNEL = 1.25
+_TRANSITION_STEP = 2.0
+_TRANSITION_SPAN = (-10.0, 6.0)
+_TAIL_REFINE = 1.0
+
+
+def _score(law, y: float) -> float:
+    """The normal score ``Phi^-1(F(y))`` of share ``y``, from the survival
+    function above the median; the infinities at or beyond the ends."""
+    if y <= 0.0:
+        return -math.inf
+    if y >= 1.0:
+        return math.inf
+    sf = float(law.sf(y))
+    return -float(ndtri(sf)) if sf < 0.5 else float(ndtri(float(law.cdf(y))))
+
+
+def _transitions(unit: _UnitTerm, thresholds, z_high: float) -> list:
+    """Breakpoints in the factor where the unit's tails beyond
+    ``thresholds`` switch on: a step for a beta unit at loading one, else
+    ``_TRANSITION_STEP k`` apart over ``_TRANSITION_SPAN`` about each
+    transition sharper than ``_TRANSITION_KERNEL``."""
+    prep = unit.prep
+    if prep.kind in (_ATOM, _DROP) or unit.w == 0.0:
+        return []
+    if prep.kind == _TWO_POINT:
+        if prep.w_indep == 0.0 or not any(x < prep.max_loss for x in thresholds):
+            return []  # the step at loading one is among the moment pass's breakpoints
+        centers, k = [float(ndtri(1.0 - prep.two_point_p)) / unit.w], prep.w_indep / unit.w
+    else:
+        law = unit.table.law
+        scores = [_score(law, x / prep.max_loss) for x in thresholds if 0.0 < x < prep.max_loss]
+        s = math.sqrt((1.0 - unit.w) * (1.0 + unit.w))
+        if s == 0.0:
+            return [v for v in scores if _Z_LOW < v < z_high]
+        centers, k = [v / unit.w for v in scores], s / unit.w
+    if k >= _TRANSITION_KERNEL:
+        return []
+    offsets = np.arange(_TRANSITION_SPAN[0], _TRANSITION_SPAN[1] + 1e-9, _TRANSITION_STEP / _TAIL_REFINE)
+    return [b for c in centers for b in (c + k * offsets) if _Z_LOW < b < z_high]
+
+
+def _unit_tails(unit: _UnitTerm, z: np.ndarray, x: float):
+    """``(P(X^k; X > x | z), evaluations)``: the tails for k = 0..3 at each
+    factor value, shape ``(len(z), 4)`` (a negative ``x`` gives the full
+    moments), and the count of share evaluations."""
+    prep = unit.prep
+    out = np.zeros((z.size, 4))
+    if prep.kind == _ATOM:
+        if prep.mean_loss > x:
+            out[:] = [prep.mean_loss ** k for k in range(4)]
+        return out, 0
+    if prep.kind == _TWO_POINT:
+        if prep.max_loss > x:
+            p = (two_point_conditional(prep.two_point_p, unit.w, prep.w_indep, z) if unit.w > 0.0
+                 else np.full(z.size, prep.two_point_p))
+            out[:] = p[:, None] * np.array([prep.max_loss ** k for k in range(4)])[None, :]
+        return out, z.size
+    m_loss = prep.max_loss
+    if x >= m_loss:
+        return out, 0
+    if unit.w == 0.0:
+        if x < 0.0:
+            out[:] = [1.0, *unit.moments]
+            return out, 0
+        from eltq.reference import _beta_tail_contribution
+
+        values = _beta_tail_contribution(prep.alpha, prep.beta, m_loss, x, x)
+        out[:] = np.array(values[:4])[None, :]
+        return out, 0
+    table = unit.table
+    v_x = _score(table.law, x / m_loss)
+    s = math.sqrt((1.0 - unit.w) * (1.0 + unit.w))
+    breaks = table.breakpoints(_INNER_CAP)
+    yn = math.exp(table.lny[-1])
+    count = 0
+    for i, zz in enumerate(z):
+        m = unit.w * zz
+        if s == 0.0:
+            share = math.exp(float(table.ln_share([m])[0]))
+            if m > v_x:
+                out[i] = [(m_loss * share) ** k for k in range(4)]
+            continue
+        t_x = (v_x - m) / s
+        out[i, 0] = float(ndtr(-t_x))
+        t0, tn = (table.v[0] - m) / s, (table.v[-1] - m) / s
+        lo, hi = max(-_REACH, t_x, t0), min(_REACH, tn)
+        sums = np.zeros(3)
+        if hi > lo:
+            points, weights = _pieces(lo, hi, (breaks - m) / s, _INNER_WIDTH, _GL_INNER)
+            weights = weights * _phi(points)
+            share = np.exp(table.ln_share(m + s * points))
+            sums += [float(share @ weights), float((share ** 2) @ weights), float((share ** 3) @ weights)]
+            count += points.size
+        # The reach suits the moments, not a tail that starts near it: such
+        # a threshold's tail is integrated on past it.
+        top = min(tn, _REACH)
+        if t_x > _REACH - _DEEP_FROM and tn > _REACH:
+            a = max(t_x, _REACH)
+            top = min(tn, a + _DEEP_SPAN / a)
+            if top > a:
+                points, weights = _pieces(a, top, (breaks - m) / s, _DEEP_WIDTH / a, _GL_INNER)
+                weights = weights * _phi(points)
+                share = np.exp(table.ln_share(m + s * points))
+                sums += [float(share @ weights), float((share ** 2) @ weights), float((share ** 3) @ weights)]
+                count += points.size
+        if tn <= top:
+            p = float(ndtr(-max(tn, t_x, -_REACH)))
+            sums += [yn * p, yn ** 2 * p, yn ** 3 * p]
+        if t0 > max(t_x, -_REACH):
+            # Below the table's first node the share is held at its first
+            # value, which still exceeds y where t_x lies below t0.
+            y0 = math.exp(table.lny[0])
+            p = float(ndtr(min(t0, _REACH))) - float(ndtr(max(t_x, -_REACH)))
+            sums += [y0 * p, y0 ** 2 * p, y0 ** 3 * p]
+        out[i, 1:] = sums * np.array([m_loss, m_loss ** 2, m_loss ** 3])
+    return out, count
+
+
+def _combine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Raw moments of order 0..3 of the sum of two independent parts, from
+    theirs (shape ``(n, 4)``)."""
+    return np.stack([a[:, 0] * b[:, 0],
+                     a[:, 1] * b[:, 0] + a[:, 0] * b[:, 1],
+                     a[:, 2] * b[:, 0] + 2 * a[:, 1] * b[:, 1] + a[:, 0] * b[:, 2],
+                     a[:, 3] * b[:, 0] + 3 * a[:, 2] * b[:, 1] + 3 * a[:, 1] * b[:, 2] + a[:, 0] * b[:, 3]], axis=1)
+
+
+def _union_bound_event(units, supports, t: float, c: float, z_high: float):
+    """``(lower, upper)``, each ``(R, T_1..3, D_1..3)``, of one event at
+    edge ``t`` and node ``c`` (spec section 4B): the union bound over the
+    thresholds ``t_u = t b_u / B`` from above; from below the larger of the
+    largest unit's tail beyond ``t`` and the probability that every unit
+    exceeds its threshold; the conditional bounds integrated over the factor
+    by the moment pass's rule, with breakpoints where a unit's tail switches
+    on (``_transitions``). Returns ``(lower, upper, evaluations)``."""
+    total = math.fsum(supports)
+    breaks = []
+    for u, b in zip(units, supports):
+        breaks.extend(u.outer_breaks(_Level(1.0)))
+        breaks.extend(_transitions(u, (t * b / total, t), z_high))
+    points, weights = _pieces(_Z_LOW, z_high, sorted(set(breaks)), _OUTER_WIDTH / _TAIL_REFINE, _GL_OUTER)
+    weights = weights * _phi(points)
+    n = points.size
+    moments = []
+    split, at_edge = [], []
+    evaluations = 0
+    for u, b in zip(units, supports):
+        (full, n_full), (part, n_part), (edge_part, n_edge) = (
+            _unit_tails(u, points, x) for x in (-1.0, t * b / total, t))
+        full[:, 0] = 1.0
+        moments.append(full)
+        split.append(part)
+        at_edge.append(edge_part)
+        evaluations += n_full + n_part + n_edge
+    k_units = len(units)
+    prefix = [np.tile([1.0, 0.0, 0.0, 0.0], (n, 1))]
+    for k in range(k_units):
+        prefix.append(_combine(prefix[-1], moments[k]))
+    suffix = [np.tile([1.0, 0.0, 0.0, 0.0], (n, 1))]
+    for k in reversed(range(k_units)):
+        suffix.insert(0, _combine(moments[k], suffix[0]))
+    # Each candidate bound is a smooth function of the factor and is
+    # integrated alone; clipping and the larger of two candidates are taken
+    # after integration, where a kink at an unknown factor value would cost
+    # the rule its accuracy (the integral of a max is at least the max of
+    # the integrals, so the bounds stay valid).
+    upper_r = np.zeros(n)
+    upper_t = np.zeros((n, 3))
+    binom = [[1], [1, 1], [1, 2, 1], [1, 3, 3, 1]]
+    for k in range(k_units):
+        others = _combine(prefix[k], suffix[k + 1])
+        q = split[k]
+        upper_r += q[:, 0]
+        for r in (1, 2, 3):
+            upper_t[:, r - 1] += sum(binom[r][j] * q[:, j] * others[:, r - j] for j in range(r + 1))
+    # The omitted factor ranges: below z = -9 the upper integrands, each
+    # nondecreasing in the factor, are at most their values at the first
+    # node; above z_high at most the trivial bound.
+    tail_low = float(ndtr(_Z_LOW))
+    tail_high = float(ndtr(-z_high))
+    rate_up = min(1.0, float(upper_r @ weights) + tail_low * upper_r[0] + tail_high)
+    moments_up = upper_t.T @ weights + tail_low * upper_t[0] + tail_high * total ** np.arange(1, 4)
+    # From below: some unit beyond t, or every unit beyond its share t_u
+    # (the shares sum to t), the latter a product given the factor; for the
+    # moments also each unit's own tail beyond t.
+    any_beyond = 1.0 - np.prod([1.0 - q[:, 0] for q in at_edge], axis=0)
+    all_beyond = np.prod([q[:, 0] for q in split], axis=0)
+    rate_low = max(float(any_beyond @ weights), float(all_beyond @ weights))
+    own = np.array([[float(q[:, r] @ weights) for r in (1, 2, 3)] for q in at_edge]).max(axis=0)
+    powers = t ** np.arange(1, 4)
+    nodes = c ** np.arange(1, 4)
+    moments_low = np.maximum(powers * rate_low, own)
+    excess_low = (powers - nodes) * rate_low
+    excess_up = np.maximum(moments_up - nodes * rate_low, excess_low)
+    lower = (rate_low, *moments_low, *excess_low)
+    upper = (rate_up, *moments_up, *excess_up)
+    return lower, upper, evaluations
+
+
+def _comonotone_event(units, t: float, c: float, z_high: float):
+    """``(R, T_1..3, D_1..3)`` of an event whose total is a nondecreasing
+    function of the factor alone (every unit at loading one or flat atoms):
+    ``P(S > t) = Phi(-z*)`` at the first ``z`` where the total exceeds ``t``,
+    found by bisection, and the moments by the factor rule above it."""
+    def total_at(z):
+        out = 0.0
+        for u in units:
+            prep = u.prep
+            if prep.kind == _ATOM:
+                out += prep.mean_loss
+            elif prep.kind == _TWO_POINT:
+                out += prep.max_loss if z > float(ndtri(1.0 - prep.two_point_p)) else 0.0
+            else:
+                out += prep.max_loss * math.exp(float(u.table.ln_share([z])[0]))
+        return out
+
+    lo, hi = _Z_LOW, z_high
+    if total_at(hi) <= t:
+        return (0.0,) * 7
+    if total_at(lo) > t:
+        z_star = -math.inf
+    else:
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            if total_at(mid) > t:
+                hi = mid
+            else:
+                lo = mid
+        z_star = hi
+    start = max(z_star, _Z_LOW)
+    breaks = []
+    for u in units:
+        breaks.extend(u.outer_breaks(_Level(1.0)))
+    points, weights = _pieces(start, z_high, sorted(set(breaks)), _OUTER_WIDTH, _GL_OUTER)
+    weights = weights * _phi(points)
+    s = np.array([total_at(z) for z in points])
+    rate = float(ndtr(-z_star)) if math.isfinite(z_star) else 1.0
+    moments = [float((s ** r) @ weights) for r in (1, 2, 3)]
+    excess = [float((s ** r - c ** r) @ weights) for r in (1, 2, 3)]
+    if not math.isfinite(z_star):
+        p_low = float(ndtr(_Z_LOW))
+        base = total_at(_Z_LOW)
+        moments = [m + base ** r * p_low for m, r in zip(moments, (1, 2, 3))]
+        excess = [d + (base ** r - c ** r) * p_low for d, r in zip(excess, (1, 2, 3))]
+    return (rate, *moments, *excess)
+
+
+def multiunit_tail_moments_reference(event_id, unit_id, rate, mean_loss, sd_indep, sd_corr, max_loss, *,
+                                     edge, top_node=None, coupling="burke", variance_policy="bernoulli",
+                                     clamp_factor=DEFAULT_CLAMP_FACTOR, rtol=None):
+    """Tail measures of a multi-unit ELT's event totals at candidate edges,
+    with no grid (spec section 4B).
+
+    Exact for one-unit events, under ``homer`` (the rolled row), for events
+    of atoms and for events whose total is a function of the factor alone
+    (every unit at loading one); otherwise bounded by the union bound, the
+    bounds integrated over the factor and widened by ``TAIL_MARGIN``. The
+    point value is the upper bound where the event is bounded. ``matched``
+    is refused. With ``rtol`` given, ``converged`` states whether every
+    bracket is within it; with None, ``converged`` is None.
+
+    Returns
+    -------
+    TailMoments
+        With ``lower`` and ``upper`` dicts of the per-edge arrays.
+    """
+    from eltq._meta import TailMoments
+    from eltq.reference import law_moments  # noqa: F401
+    from eltq.reference import _beta_tail_contribution, _exact_sum, _power_excess
+
+    if coupling not in COUPLINGS:
+        raise EltqError(f"unknown coupling {coupling!r}; expected one of {COUPLINGS}")
+    if coupling == "matched":
+        raise EltqError("the matched coupling's scale is defined through a grid; the tail query refuses it "
+                        "until that scale is defined without one (spec section 11)")
+    edges = np.atleast_1d(np.asarray(edge, dtype=np.float64))
+    nodes = edges.copy() if top_node is None else np.atleast_1d(np.asarray(top_node, dtype=np.float64))
+    if nodes.shape != edges.shape:
+        raise EltqError(f"top_node has shape {nodes.shape}, expected {edges.shape}")
+    for t, c in zip(edges, nodes):
+        if not (math.isfinite(t) and math.isfinite(c) and 0.0 <= c <= t):
+            raise EltqError(
+                f"tail query edge {t} with top node {c}: both must be finite with 0 <= top_node <= edge")
+    if variance_policy not in VARIANCE_POLICIES:
+        raise EltqError(f"unknown variance_policy {variance_policy!r}")
+    if rtol is not None and not 0.0 < rtol < 1.0:
+        raise EltqError(f"rtol {rtol} must lie strictly between 0 and 1")
+    warn_if_clamp(variance_policy)
+    event_id = np.asarray(event_id, dtype=object)
+    unit_id = np.asarray(unit_id, dtype=object)
+    cols = [np.asarray(col, dtype=np.float64) for col in (rate, mean_loss, sd_indep, sd_corr, max_loss)]
+    n_rows = event_id.size
+    rates = cols[0]
+    diagnostics: dict[str, RowIssues] = {}
+    ranges = _events(event_id)
+    n_edges = edges.size
+    names = ("rate_above", "t1", "t2", "t3", "d1", "d2", "d3")
+    terms = {"point": [[[] for _ in names] for _ in range(n_edges)],
+             "lower": [[[] for _ in names] for _ in range(n_edges)],
+             "upper": [[[] for _ in names] for _ in range(n_edges)]}
+    half = [[[] for _ in range(4)] for _ in range(n_edges)]
+    rate_terms = []
+    evaluations = 0
+    counts = {"exact": 0, "bounded": 0, "one_unit": 0, "valid": 0, "rows": 0}
+
+    def add(e, kind, values, lam):
+        for i, v in enumerate(values):
+            if v != 0.0:
+                terms[kind][e][i].append(lam * v)
+
+    def one_row_tail(prep, t, c):
+        """``(R, T, D)`` and top-half ``(rate, excess)`` of a lone law."""
+        if prep.kind == _ATOM or prep.kind == _TWO_POINT:
+            x, p = (prep.mean_loss, 1.0) if prep.kind == _ATOM else (prep.max_loss, prep.two_point_p)
+            if x > t:
+                return (p, p * x, p * x * x, p * x ** 3, *(p * v for v in _power_excess(x, c))), (0.0,) * 4
+            if x > c:
+                return (0.0,) * 7, (p, *(p * v for v in _power_excess(x, c)))
+            return (0.0,) * 7, (0.0,) * 4
+        return _beta_tail_contribution(prep.alpha, prep.beta, prep.max_loss, t, c), (0.0,) * 4
+
+    for start, end in ranges:
+        eid = event_id[start]
+        if not np.all(rates[start:end] == rates[start]):
+            raise MultiUnitError(f"event {eid!r}: rate varies across its rows")
+        seen = set()
+        for j in range(start, end):
+            uid = str(unit_id[j])
+            if uid in seen:
+                raise MultiUnitError(f"event {eid!r}: unit {uid!r} appears twice")
+            seen.add(uid)
+        lam = float(rates[start])
+        if not math.isfinite(lam) or lam < 0.0:
+            category = "nonfinite" if not math.isfinite(lam) else "negative_field"
+            for j in range(start, end):
+                _note(diagnostics, category, f"{eid}/{unit_id[j]}")
+            continue
+        if lam == 0.0:
+            for j in range(start, end):
+                _note(diagnostics, "zero_rate", f"{eid}/{unit_id[j]}")
+            continue
+        preps, specs = [], []
+        for j in range(start, end):
+            unit = Unit(cols[1][j], cols[2][j], cols[3][j], cols[4][j])
+            prep = prepare_unit(unit, f"{eid}/{unit_id[j]}", variance_policy, clamp_factor, diagnostics)
+            if prep.kind != _DROP:
+                preps.append(couple(prep, coupling))
+                specs.append(unit)
+        if not preps:
+            continue
+        counts["valid"] += 1
+        counts["rows"] += len(preps)
+        rate_terms.append(lam)
+        support = math.fsum(p.support for p in preps)
+        exact_law = None
+        if len(preps) == 1:
+            counts["one_unit"] += 1
+            exact_law = preps[0]
+        elif coupling == "homer":
+            exact_law = prepare_unit(rolled_unit(specs), "rolled", variance_policy, clamp_factor)
+        if exact_law is not None:
+            counts["exact"] += 1
+            if exact_law.kind == _DROP:
+                continue
+            for e, (t, c) in enumerate(zip(edges, nodes)):
+                values, top = one_row_tail(exact_law, float(t), float(c))
+                for kind in ("point", "lower", "upper"):
+                    add(e, kind, values, lam)
+                for i, v in enumerate(top):
+                    if v != 0.0:
+                        half[e][i].append(lam * v)
+            continue
+        if all(p.kind == _ATOM for p in preps):
+            counts["exact"] += 1
+            atom = _Prepped(kind=_ATOM, mean_loss=math.fsum(p.mean_loss for p in preps), max_loss=support)
+            for e, (t, c) in enumerate(zip(edges, nodes)):
+                values, top = one_row_tail(atom, float(t), float(c))
+                for kind in ("point", "lower", "upper"):
+                    add(e, kind, values, lam)
+                for i, v in enumerate(top):
+                    if v != 0.0:
+                        half[e][i].append(lam * v)
+            continue
+        # The total is a function of the factor alone when every unit is an
+        # atom or loads one on it.
+        comonotone = all(p.kind == _ATOM or (p.kind in (_BETA, _COMONOTONE, _TWO_POINT) and p.w_corr == 1.0)
+                         for p in preps)
+        counts["exact" if comonotone else "bounded"] += 1
+        # An event whose total cannot pass an edge contributes nothing there,
+        # and one that passes none costs nothing.
+        if all(support <= t for t in edges):
+            continue
+        units = [_UnitTerm(p, MOMENT_RTOL, MOMENT_RTOL * _TABLE_TOL_FRACTION) for p in preps]
+        marginal = [law_moments_of(u.law) for u in units]
+        marginal_sum = [math.fsum(m[r] for m in marginal) for r in range(3)]
+        ratio = min(marginal_sum[1] / support ** 2, marginal_sum[2] / support ** 3)
+        z_high = min(37.0, max(_Z_HIGH_MIN, -float(ndtri(0.01 * MOMENT_RTOL * ratio))))
+        for e, (t, c) in enumerate(zip(edges, nodes)):
+            t, c = float(t), float(c)
+            if support <= t:
+                continue
+            if comonotone:
+                values = _comonotone_event(units, t, c, z_high)
+                # Above z_high the total is at most its support.
+                beyond = float(ndtr(-z_high))
+                trivial = (1.0, support, support ** 2, support ** 3, support - c, support ** 2 - c ** 2,
+                           support ** 3 - c ** 3)
+                lower = tuple(v * (1.0 - TAIL_MARGIN) for v in values)
+                upper = tuple(v * (1.0 + TAIL_MARGIN) + beyond * tv for v, tv in zip(values, trivial))
+                add(e, "point", values, lam)
+            else:
+                lower, upper, count = _union_bound_event(units, [p.support for p in preps], t, c, z_high)
+                evaluations += count
+                lower = tuple(v * (1.0 - TAIL_MARGIN) for v in lower)
+                upper = tuple(v * (1.0 + TAIL_MARGIN) for v in upper)
+                add(e, "point", upper, lam)
+            add(e, "lower", lower, lam)
+            add(e, "upper", upper, lam)
+
+    def assemble(kind):
+        sums = [[_exact_sum(terms[kind][e][i])[0] for i in range(7)] for e in range(n_edges)]
+        arr = np.array(sums).reshape(n_edges, 7)
+        return arr[:, 0], arr[:, 1:4], arr[:, 4:7]
+
+    point, low, up = assemble("point"), assemble("lower"), assemble("upper")
+    width = np.zeros(n_edges)
+    for e in range(n_edges):
+        for lo_v, up_v in zip((low[0][e], *low[1][e], *low[2][e]), (up[0][e], *up[1][e], *up[2][e])):
+            if up_v > 0.0:
+                width[e] = max(width[e], (up_v - lo_v) / up_v)
+    half_arr = np.array([[_exact_sum(half[e][i])[0] for i in range(4)] for e in range(n_edges)]).reshape(n_edges, 4)
+    return TailMoments(
+        edge=edges, top_node=nodes,
+        rate_above=point[0], moments_above=point[1], excess_above=point[2],
+        top_half_rate=half_arr[:, 0], top_half_excess=half_arr[:, 1:],
+        total_rate=math.fsum(rate_terms),
+        regimes={"exact_events": counts["exact"], "bounded_events": counts["bounded"],
+                 "one_unit_events": counts["one_unit"]},
+        moment_overflow=(False, False, False),
+        input_rows=n_rows, valid_rows=counts["rows"], diagnostics=diagnostics,
+        method="union_bound" if counts["bounded"] else "exact",
+        lower={"rate_above": low[0], "moments_above": low[1], "excess_above": low[2]},
+        upper={"rate_above": up[0], "moments_above": up[1], "excess_above": up[2]},
+        width=width,
+        converged=None if rtol is None else bool((width <= rtol).all()),
+        rtol=rtol,
+        coupling=coupling,
+        events=len(ranges),
+        valid_events=counts["valid"],
+        evaluations=evaluations,
+    )

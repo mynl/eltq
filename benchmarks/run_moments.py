@@ -14,7 +14,11 @@ prints a summary and appends a machine-readable record to
 ``--multiunit`` it also times ``multiunit_moments`` under each coupling on
 the portfolio of ``run_multiunit.py`` (``--events`` events of ten units),
 one thread against all, beside one ``multiunit_views`` run of the ground-up
-view. The plan's budget
+view. With ``--shared-tails`` it times ``multiunit_tail_moments`` on the
+same portfolio at ``--tail-edges`` log-spaced edges from the 99th
+percentile of the event mean totals to half the largest event support, with
+all threads and with eight (bitwise), and records the bounds' widths. The
+plan's budget
 (``dev/done/plan-model-moments-and-windowed-views.md``, open question 4):
 a million rows by 64 edges well under a second.
 """
@@ -53,6 +57,9 @@ def main() -> None:
     parser.add_argument("--multiunit", action="store_true",
                         help="also time multiunit_moments on the multi-unit benchmark portfolio")
     parser.add_argument("--events", type=int, default=100_000)
+    parser.add_argument("--shared-tails", action="store_true",
+                        help="also time multiunit_tail_moments on the multi-unit benchmark portfolio")
+    parser.add_argument("--tail-edges", type=int, default=4)
     args = parser.parse_args()
     if eltq.BACKEND != "rust":
         raise SystemExit("the benchmark needs the Rust backend")
@@ -111,6 +118,39 @@ def main() -> None:
         print(f"burke one thread {seconds_one:.1f} s, bitwise {entry['bitwise_across_threads']}; "
               f"multiunit_views ground_up {seconds_views:.2f} s")
         record["runs"]["multiunit"] = entry
+    if args.shared_tails:
+        from run_multiunit import synthetic_portfolio
+
+        cols = synthetic_portfolio(args.events, 10)
+        multi = (cols["event_id"], cols["unit_id"], cols["rate"], cols["mean_loss"], cols["sd_indep"],
+                 cols["sd_corr"], cols["max_loss"])
+        codes = np.unique(np.asarray(cols["event_id"]), return_inverse=True)[1]
+        support = np.bincount(codes, weights=cols["max_loss"])
+        mean_total = np.bincount(codes, weights=cols["mean_loss"])
+        edges = np.geomspace(np.quantile(mean_total, 0.99), 0.5 * support.max(), args.tail_edges)
+        seconds_all, tails = timed(lambda: eltq.multiunit_tail_moments(*multi, edge=edges), 1)
+        seconds_eight, again = timed(lambda: eltq.multiunit_tail_moments(*multi, edge=edges, threads=8), 1)
+        bitwise = all(
+            np.array_equal(getattr(tails, field), getattr(again, field))
+            for field in ("rate_above", "moments_above", "excess_above", "width")
+        ) and all(np.array_equal(tails.lower[k], again.lower[k]) for k in tails.lower)
+        entry = {
+            "rows": int(cols["rate"].size),
+            "edges": [round(float(t)) for t in edges],
+            "seconds": round(seconds_all, 2),
+            "seconds_eight_threads": round(seconds_eight, 2),
+            "bitwise_across_threads": bitwise,
+            "evaluations": tails.evaluations,
+            "regimes": tails.regimes,
+            "width": [round(float(w), 6) for w in tails.width],
+            "rate_lower": [float(v) for v in tails.lower["rate_above"]],
+            "rate_upper": [float(v) for v in tails.upper["rate_above"]],
+        }
+        record["runs"]["shared_tails"] = entry
+        print(f"multiunit_tail_moments {args.tail_edges} edges {seconds_all:.2f} s (8 threads {seconds_eight:.2f} s) "
+              f"bitwise {bitwise} evaluations {tails.evaluations:.2e} {tails.regimes}")
+        for t, lo, up in zip(edges, tails.lower["rate_above"], tails.upper["rate_above"]):
+            print(f"  edge {t:12.0f}  rate in [{lo:.3e}, {up:.3e}]")
     record["peak_rss_mb"] = peak_working_set_mb()
     print(f"peak RSS {record['peak_rss_mb']} MiB")
     if not args.no_append:

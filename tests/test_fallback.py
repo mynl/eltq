@@ -51,6 +51,11 @@ FALLBACK_SCRIPT = textwrap.dedent(
     shared = eltq.multiunit_moments(
         ["e", "e"], ["a", "b"], [1.0, 1.0], [30.0, 20.0], [50.0, 40.0], [30.0, 60.0], [100.0, 200.0])
     assert math.isclose(shared.raw_moments[1], 9387.097506566148, rel_tol=1e-9)
+    shared_tail = eltq.multiunit_tail_moments(
+        ["e", "e"], ["a", "b"], [1.0, 1.0], [300.0, 500.0], [400.0, 600.0], [300.0, 500.0], [1000.0, 1500.0],
+        edge=[1200.0, 2500.0])
+    assert math.isclose(shared_tail.lower["rate_above"][0], 1.0 / 3.0, rel_tol=2e-6)
+    assert shared_tail.upper["rate_above"][1] == 0.0 and shared_tail.method == "union_bound"
 
     # CSV fallback route with the canonical fixture.
     raw_c, secondary_c, meta_c = eltq.quantize_csv(

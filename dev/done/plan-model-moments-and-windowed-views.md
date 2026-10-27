@@ -852,3 +852,65 @@ Divergences:
 - `multiunit_views`'s pass 1 moved into `views::event_pass`, shared with the moments as the plan
   asked; the views' outputs are unchanged.
 
+### [Eltq-Tail-Queries], shared events, 2.14.0
+
+`multiunit_tail_moments` on both backends: the second section of `crates/eltq-core/src/event_moments.rs`
+(`UnitTerm::tails`, `UnitTerm::transitions`, `union_bound_event`, `comonotone_event`,
+`multiunit_tail_moments`), `normal::ln_upper_tail`, the reference's `multiunit_tail_moments_reference`,
+`TailMoments`'s multi-unit fields. Test 38 in `tests/test_tails.py` (both backends) against oracles
+from `fixtures/generate_tail_oracles.py`, a Rust test of the two-point pair and determinism,
+`run_moments.py --shared-tails`, `benchmarks/report-2.14.0.md`.
+
+The numerical design was settled by comparing the backends with each other, with the oracles, and
+with a fourfold refinement of the reference's rule:
+
+- The first engine interpolated each unit's tails from its native nodes in the logarithm of values
+  floored at $10^{-300}$, and replaced a tail beyond the inner reach by a lower estimate: at the
+  deepest edge of two betas its upper bounds were $1.7\times10^{6}$ times the reference's. The
+  logarithms are now formed exactly ($\ln\bar\Phi$ by Mills's ratio beyond 5), a piece holding a
+  zero is interpolated in the values, and a threshold within five standard scores of the inner reach
+  is integrated on past it until the normal weight falls by $e^{-40}$, on both backends.
+- On a seeded portfolio the backends then disagreed by up to a factor of 3.5, on events with units
+  at loadings near one. A unit's tail beyond $x$ given the factor is $\bar\Phi((y_u(x)-w_uz)/s_u)$,
+  a sigmoid of factor width $s_u/w_u$ (0.05 at $w_u=0.9987$) that the moment pass's breakpoints
+  do not see. Breakpoints $2k$ apart from $-10k$ to $6k$ about each such transition ($k=s_u/w_u<1.25$),
+  in the event's rule and in each unit's native nodes, brought the backends to $10^{-9}$.
+- The reference then differed from its own fourfold refinement by up to $7.7\times10^{-5}$: the
+  clip of the upper rate at one and the larger of two lower candidates, taken under the integral,
+  put kinks at unknown factor values. Each candidate is now integrated alone and combined after
+  integration; the refinement then agrees to $3\times10^{-10}$, inside the margin of $10^{-6}$.
+
+Divergences:
+
+- The plan's factor bracket by cells, certified, is not what integrates over the factor: its width
+  falls at first order in the cell width, so a relative width $\epsilon$ costs of order $1/\epsilon$
+  cells per event. The union bound's candidates are integrated by the moment pass's rule with the
+  transition breakpoints and widened by a relative margin of $10^{-6}$; the monotonicity bounds the
+  omitted factor ranges. The bounds are therefore valid by measurement (the refinement check, now
+  test 38), not by proof, and the spec says so. A lower bound far below its upper (a rate of
+  $10^{-200}$ under $10^{-15}$) is valid but carries no relative accuracy.
+- "The width shrinks under refinement" does not apply: the union bound's width is the bound's own,
+  not the rule's. Test 38 instead checks that the factor rule has converged.
+- The two-beta and regression oracles are SciPy computations on dense score grids, converged to
+  $2\times10^{-6}$ and $2\times10^{-3}$, not 60-digit arithmetic. The first oracle took the beta
+  quantile from the distribution function, which rounds to one beyond 8.3 standard scores and put
+  spurious mass at the largest loss; above the median it now uses the inverse survival function.
+- The plan's signature, `rtol=None`, is kept: with no `rtol`, `converged` is None. `clamp_factor`
+  and `chunk_rows` are keywords as on the other multi-unit functions, and `TailMoments` gained
+  `evaluations`.
+- Beyond the plan: the lower rate also takes the probability that every unit exceeds its share of
+  the edge, and events at loading one are exact by bisection on the factor. An event that cannot
+  reach any edge is skipped before its tables are built.
+- Ruling 10's measurement (`benchmarks/report-2.14.0.md`): on the 0.91M portfolio's events of up to
+  ten units the upper tail rate is only 16 to 22% below the trivial bound and 85 to 240 times the
+  lower, so the union bound does not decide whether a window is adequate. Open item for Steve: the
+  lattice bracket.
+- Four edges take 20.4 s (eight about 57 s), 2.9 times a ground-up `multiunit_views` run. The plan
+  set no budget for this query, and the speed was not tuned given the bound's looseness.
+- The gates ran in a scratch environment holding the lock file's versions and a release wheel of
+  this tree: two python processes of a stopped oracle run (the first, slow version of the
+  generator) held the project environment's extension open, and stopping them was not permitted to
+  this session. Steve to stop them and `uv sync`.
+- Fixed in the same bump: the refusal message for `matched` (since 2.11.0) carried a run of
+  spaces from a line continuation.
+
