@@ -914,3 +914,45 @@ Divergences:
 - Fixed in the same bump: the refusal message for `matched` (since 2.11.0) carried a run of
   spaces from a line continuation.
 
+
+### [Eltq-Windowed-Shared-Events], the measurement, no bump (stopped for a decision)
+
+The plan's first action, run on 2026-10-27 at 2.14.0 with `benchmarks/measure_windowed_multiunit.py`
+(uncommitted): the 0.91M-row portfolio of `run_multiunit.py` with every exposure raised to $10^9$
+(dropped rows left dropped). Today's `multiunit_views` (ground_up, one thread) on one ten-unit
+event at bucket sizes $10^{10}/2^k$, so that the event's full support is $2^k$ buckets, each size in
+its own process:
+
+| grid | seconds | peak working set |
+| --- | --- | --- |
+| $2^{16}$ | 1.08 | 1.1 GiB |
+| $2^{17}$ | 1.55 | 1.9 GiB |
+| $2^{18}$ | 2.59 | 3.7 GiB |
+| $2^{19}$ | 4.79 | 7.2 GiB |
+| $2^{20}$ | 11.2 | 14.3 GiB |
+| $2^{22}$ | not run; about 45 s and 57 GiB by the slope | |
+
+Memory grows by about 13.4 KiB per bucket of the event's grid (the 76 strata's spectra of every
+unit at full length), so today's route cannot run a 2^20 grid of this portfolio on more than one or
+two threads of this machine (61.7 GiB), and 2^22 not at all. Its one-thread time over the
+portfolio's 88k multi-unit events is about $1.1\times10^6$ s at $2^{20}$ and $4.4\times10^6$ s at
+$2^{22}$.
+
+The plan's design cuts each unit row at its span under the rate floor ($10^{-20}$ of the total
+rate, `TAIL_RATE_FLOOR`; span ends at $3.4\times10^6$, $2.0\times10^7$, $4.2\times10^7$ and
+$8.1\times10^7$ at the median, 90th, 99th percentile and largest). At today's measured cost per
+bucket, the cut events would take:
+
+| window | bucket size | median event length after the cut | one-thread seconds | on 16 cores |
+| --- | --- | --- | --- | --- |
+| $2^{20}$ | 9,537 (full support = window) | 7,360 | 8,060 | about 8 min |
+| $2^{20}$ | 954 (one unit's support = window) | 73,500 | 80,400 | about 84 min |
+| $2^{22}$ | 2,384 (full support = window) | 29,400 | 32,200 | about 34 min |
+| $2^{22}$ | 238 (one unit's support = window) | 294,000 | 322,000 | about 5.6 h |
+
+The cut saves about 140 times, and the streamed strata would bring memory per event to megabytes,
+but the cost stays at 76 strata times ten units times the event's length after the cut, against
+8.4 s for a default `multiunit_views` run of the unraised portfolio and Steve's "full quantization
+on 250K is mostly < 1 sec". Out of proportion by one to three orders of magnitude, so the step
+stops here for a decision, as the plan directs, with nothing implemented. Questions for Steve are
+in the session's final report.
