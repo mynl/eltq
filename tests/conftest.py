@@ -9,6 +9,7 @@ package.
 from __future__ import annotations
 
 import json
+import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,17 @@ TESTS_DIR = Path(__file__).parent
 REPO_ROOT = TESTS_DIR.parent
 FIXTURES_DIR = REPO_ROOT / "fixtures"
 GOLDEN_DIR = FIXTURES_DIR / "golden"
+
+# SciPy's incomplete beta on macOS arm64 is off by about min(a, b) * 3e-18 at
+# large parameters: 3e-9 at 1e9 and 3e-3 at 1e14 (SciPy 1.18.1, wheels runs of
+# 2.10.1 and 2.14.0), where on x86 it is within the skewness term, 1.3e-8 at
+# 1e14. There the reference is no oracle for the beta law above 1e6, and tests
+# 30 and 31 compare only the engine; below 1e6 and on the normal law above
+# NARROW_NORMAL_FROM both backends are checked. SciPy's beta density there is
+# off by up to 2.6e-11 at 2e5 and by orders of magnitude just below 1e16
+# (wheels run of 2.15.0), so test 40 checks the reference's density only
+# below 1e3 on that platform.
+SCIPY_LARGE_PARAMETER_BETA_INEXACT = sys.platform == "darwin" and platform.machine() == "arm64"
 
 sys.path.insert(0, str(TESTS_DIR))
 

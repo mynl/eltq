@@ -9,8 +9,12 @@ All notable changes to this project are documented here, following
 
 - [density] `density_arrays(rate, max_loss, mean_loss, sd_indep, sd_corr, *, x, mean_is_loss_rate, variance_policy, threads, event_ids)` returns the rate density of the continuous part of a one-row ELT's event-loss measure at any losses, with no grid (spec section 4B, Density): `nu_c(x) = sum lambda f(x / M) / M` over the beta rows, atoms and two-point rows excluded, so `-dR/dx` beside `tail_moments_arrays` wherever `R` has no atom. For the aggregate package's pointwise severity density; a release rather than a pre-release, so that aggregate's `elt` extra can require it from PyPI.
 - Every row is exact by its law. From `min(alpha, beta) = 100` the beta density takes a Stirling form (the three series of `ln B` subtracted symbolically against the powers), within 5e-13 of 50-digit arithmetic up to 2e5, where the plain form lost up to 4e-10. `1 - y` is formed as `(M - x) / M`, so a pole at `M` keeps its digits. The narrow kernel's normalized density on its bulk from 2e5, the normal from 1e16. Zero at `x <= 0` and `x >= M`; `+inf` only where a pole overflows.
-- Spec test 40 on both backends (`tests/test_density.py`): SciPy's density to 1e-12, the poles against 50-digit arithmetic, `int nu_c = R(a) - R(b)` less the atoms to 1e-9, atoms and Bernoulli rows exactly zero, both regime thresholds, bitwise across threads, the backends within 1e-11 (1e-9 with narrow rows to `alpha + beta` of 1e13).
+- Spec test 40 on both backends (`tests/test_density.py`): SciPy's density to 1e-12 below `min(alpha, beta) = 1e3` and 50-digit arithmetic from there, the poles against 50-digit arithmetic, `int nu_c = R(a) - R(b)` less the atoms to 1e-9, atoms and Bernoulli rows exactly zero, both regime thresholds, bitwise across threads, the backends within 1e-11 (1e-9 with narrow rows to `alpha + beta` of 1e13).
 - At 30 points on a million rows the density takes 0.03 to 0.04 s against the tail query's 0.09 to 0.15 s at the same points (`benchmarks/report-2.15.0.md`, `run_moments.py --density`).
+
+### Fixed
+
+- Test 40 failed on the macOS arm64 wheel, where SciPy's beta density is off by up to 2.6e-11 at 2e5 and by orders of magnitude just below 1e16. The engine is now checked against 50-digit arithmetic from `min(alpha, beta) = 1e3` on every platform, and on that platform the reference only below 1e3 and on the normal law. `SCIPY_LARGE_PARAMETER_BETA_INEXACT` moves to `conftest.py`, shared with tests 30 and 31.
 
 ## [2.14.0] - 2026-10-27
 

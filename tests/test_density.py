@@ -6,8 +6,8 @@ Runs on both backends through ``DENSITY_IMPLS``: the SciPy reference
 above one half, exact sums) and the package API (the Rust engine: the beta
 density in a Stirling form from ``min(alpha, beta) = 100``, the narrow
 kernel from 2e5, the normal law from 1e16). The comparisons near the poles
-run against mpmath where it is installed (the dev group) and are skipped
-otherwise.
+and from ``min(alpha, beta) = 1e3`` run against 50-digit arithmetic where
+mpmath is installed (the dev group) and are skipped otherwise.
 """
 
 from __future__ import annotations
@@ -20,6 +20,13 @@ from scipy import integrate, stats
 
 import eltq
 from eltq import reference
+from eltq._meta import NARROW_NORMAL_FROM
+
+from conftest import SCIPY_LARGE_PARAMETER_BETA_INEXACT
+
+#: From this smaller parameter the oracle is 50-digit arithmetic, not SciPy,
+#: whose beta density on macOS arm64 is off by up to 2.6e-11 at 2e5.
+EXACT_ORACLE_FROM = 1e3
 
 DENSITY_IMPLS = [("reference", reference.density_reference), ("eltq", eltq.density_arrays)]
 TAIL_IMPLS = {"reference": reference.tail_moments_reference, "eltq": eltq.tail_moments_arrays}
@@ -52,10 +59,32 @@ def shares(alpha, beta, ks=(-4.0, -2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 4.0)):
     return a, b, np.array([y for y in ys if 0.0 < y < 1.0])
 
 
-# [Eltq-Density-Arrays] Test 40, clause 1: against SciPy's density on beta
-# rows from alpha, beta of 1e-3 to the narrow threshold 2e5, below one
-# included, relative 1e-12 away from the poles (both backends are within 5e-13
-# of 50-digit arithmetic there, measured 2026-11-06).
+def oracle_density(a, b, ys):
+    """``Beta(a, b)``'s density at the shares ``ys``: SciPy's below
+    ``EXACT_ORACLE_FROM``, 50-digit arithmetic from there."""
+    if min(a, b) < EXACT_ORACLE_FROM:
+        return stats.beta.pdf(ys, a, b)
+    mp = pytest.importorskip("mpmath")
+    mp.mp.dps = 50
+    ln_beta = mp.log(mp.beta(a, b))
+    return np.array([float(mp.exp((a - 1) * mp.log(mp.mpf(y)) + (b - 1) * mp.log1p(-mp.mpf(y)) - ln_beta))
+                     for y in ys])
+
+
+def skip_inexact_reference(name, a, b):
+    """Skip the reference backend, which is SciPy's beta density, where SciPy
+    is inexact on macOS arm64: from ``EXACT_ORACLE_FROM`` up to the normal law
+    (conftest, ``SCIPY_LARGE_PARAMETER_BETA_INEXACT``)."""
+    if (SCIPY_LARGE_PARAMETER_BETA_INEXACT and name == "reference"
+            and EXACT_ORACLE_FROM <= min(a, b) < NARROW_NORMAL_FROM):
+        pytest.skip("SciPy's beta density is inexact at large parameters on macOS arm64")
+
+
+# [Eltq-Density-Arrays] Test 40, clause 1: on beta rows from alpha, beta of
+# 1e-3 to the narrow threshold 2e5, below one included, against SciPy's
+# density and from min(alpha, beta) = 1e3 against 50-digit arithmetic,
+# relative 1e-12 away from the poles (both backends are within 5e-13 of
+# 50-digit arithmetic there on x86, measured 2026-11-06).
 RNG_SHAPES = [(float(a), float(b)) for a, b in np.exp(
     np.random.default_rng(20261106).uniform(math.log(1e-3), math.log(1.9e5), size=(40, 2)))]
 FIXED_SHAPES = [(0.3, 7.0), (0.5, 0.5), (2.5, 2.5), (1e-3, 900.0), (40.0, 0.7), (5.0, 1e6), (99.9, 99.9),
@@ -63,11 +92,12 @@ FIXED_SHAPES = [(0.3, 7.0), (0.5, 0.5), (2.5, 2.5), (1e-3, 900.0), (40.0, 0.7), 
 
 
 @pytest.mark.parametrize("alpha, beta", FIXED_SHAPES + RNG_SHAPES)
-def test_against_scipy(backend, alpha, beta):
-    _, density = backend
+def test_beta_density(backend, alpha, beta):
+    name, density = backend
     a, b, ys = shares(alpha, beta)
+    skip_inexact_reference(name, a, b)
     got = run(density, [beta_row(alpha, beta, rate=0.25)], ys)
-    want = 0.25 * stats.beta.pdf(ys, a, b)
+    want = 0.25 * oracle_density(a, b, ys)
     assert np.all(want > 0.0)
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=0.0)
 
@@ -153,22 +183,24 @@ def test_atoms_contribute_nothing(backend):
 
 
 # Clause 4: the regimes at their thresholds. Either side of min(alpha, beta)
-# = 2e5 (the continued fraction's beta and the narrow kernel) against SciPy's
-# beta density within 1e-11; from 1e16 the normal density within 1e-12, and
+# = 2e5 (the continued fraction's beta and the narrow kernel) against 50-digit
+# arithmetic within 1e-11; from 1e16 the normal density within 1e-12, and
 # just below it the narrow kernel within the beta's skewness of it, 1e-6.
 @pytest.mark.parametrize("alpha, beta", [(2e5 * (1 - 1e-9), 6e5), (2e5 * (1 + 1e-9), 6e5),
                                          (2e5 * (1 + 1e-9), 2e5 * (1 + 1e-9))])
 def test_narrow_threshold(backend, alpha, beta):
-    _, density = backend
+    name, density = backend
     a, b, ys = shares(alpha, beta)
-    np.testing.assert_allclose(run(density, [beta_row(alpha, beta)], ys), stats.beta.pdf(ys, a, b),
+    skip_inexact_reference(name, a, b)
+    np.testing.assert_allclose(run(density, [beta_row(alpha, beta)], ys), oracle_density(a, b, ys),
                                rtol=1e-11, atol=0.0)
 
 
 @pytest.mark.parametrize("scale, rtol", [(1.0 + 1e-6, 1e-12), (1.0 - 1e-6, 1e-6)])
 def test_normal_threshold(backend, scale, rtol):
-    _, density = backend
+    name, density = backend
     a, b, ys = shares(1e16 * scale, 3e16 * scale)
+    skip_inexact_reference(name, a, b)
     mean = a / (a + b)
     sd = math.sqrt(mean * (1.0 - mean) / (a + b + 1.0))
     np.testing.assert_allclose(run(density, [beta_row(1e16 * scale, 3e16 * scale)], ys),
@@ -197,7 +229,9 @@ def seeded_table(rows, seed=7, min_cv=1e-6):
 # where SciPy's density is below the floor): within 1e-11 relative with no
 # narrow row, and within the rounding of the share the narrow kernel is
 # centred on, about eps sqrt(alpha + beta) per standard score, with narrow
-# rows to alpha + beta of 1e13 (7.5e-10 measured 2026-11-06).
+# rows to alpha + beta of 1e13 (7.5e-10 measured 2026-11-06). On macOS arm64,
+# where SciPy's beta density is inexact at large parameters, only the table
+# with no narrow row is compared.
 def test_bitwise_across_threads():
     table = seeded_table(20_000)
     x = np.geomspace(1e2, 1.2e6, 64)
@@ -209,6 +243,8 @@ def test_bitwise_across_threads():
 
 @pytest.mark.parametrize("min_cv, rtol", [(3e-3, 1e-11), (1e-6, 1e-9)])
 def test_backends_agree(min_cv, rtol):
+    if SCIPY_LARGE_PARAMETER_BETA_INEXACT and min_cv < 3e-3:
+        pytest.skip("SciPy's beta density is inexact at large parameters on macOS arm64")
     table = seeded_table(300, min_cv=min_cv)
     x = np.concatenate([np.geomspace(1e1, 1.2e6, 200), table[:40, 2]])
     engine = eltq.density_arrays(*table.T, x=x)

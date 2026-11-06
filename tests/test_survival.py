@@ -14,27 +14,21 @@ gross-like, with a few atoms, inadmissible and zero-rate rows.
 from __future__ import annotations
 
 import math
-import platform
-import sys
 
 import numpy as np
 import pytest
 
 from eltq import reference
 
-from conftest import diag_count, elt, grid_of, load_fixture, run
+from conftest import SCIPY_LARGE_PARAMETER_BETA_INEXACT, diag_count, elt, grid_of, load_fixture, run
 
 # The fixture's h: about 1e-4 of a typical mean, with max M = 1e6 (n = 1e6
 # nodes).
 FIXTURE_H = 1.0
 
-# SciPy's incomplete beta on macOS arm64 is off by about min(a, b) * 3e-18 at
-# large parameters: 3e-9 at 1e9 and 3e-3 at 1e14 (SciPy 1.18.1, wheels runs of
-# 2.10.1 and 2.14.0), where on x86 it is within the skewness term, 1.3e-8 at
-# 1e14. There the reference is no oracle for the beta law above 1e6, and tests
-# 30 and 31 compare only the engine; below 1e6 and on the normal law above
-# NARROW_NORMAL_FROM both backends are checked.
-SCIPY_LARGE_PARAMETER_BETA_INEXACT = sys.platform == "darwin" and platform.machine() == "arm64"
+# SCIPY_LARGE_PARAMETER_BETA_INEXACT (conftest): on macOS arm64 the reference is
+# no oracle for the beta law above 1e6, and tests 30 and 31 compare only the
+# engine there.
 
 # One inadmissible row: sigma^2 = 2500 >= mu (M - mu) = 2100, p = 0.3.
 BAD = (0.005, 100.0, 30.0, 50.0, 0.0)

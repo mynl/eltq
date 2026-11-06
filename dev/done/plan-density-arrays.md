@@ -92,8 +92,13 @@ Executed 2026-11-06 as 2.15.0, from eltq 2.14.0 (commit `cfe22b7`).
 - At 30 points, all threads (`benchmarks/report-2.15.0.md`): 0.031 to 0.040 s on the three one-row portfolios of a million rows and 0.034 s on the 909,937 multi-unit rows, against 0.092 to 0.148 s for `tail_moments_arrays` at the same points; bitwise across thread counts. At every node of a $2^{16}$ grid on the mixture portfolio: 0.86 s on $10^5$ rows and 8.0 s on $10^6$, peak RSS 72 and 168 MiB, so aggregate's grid-scale callers ([ELT-Grid-Scale-Callers]) cost seconds rather than the minutes that ruling allowed for.
 - Gates: `cargo test -p eltq-core` green (118 unit tests and the integration suites); `uv run pytest` 487 passed, 3 skipped (none in `tests/test_density.py`), 4 min 49 s.
 
+### The macOS arm64 test fix (after 2.15.0, no bump)
+
+- The wheels run of `09c6a0b` on master (run 42303032765) failed seven of test 40's cases on macOS arm64 alone, 480 passing: the engine against SciPy at `min(alpha, beta)` of 5.8e4 to 2e5 (relative 1.9e-12 to 2.6e-11), the reference's narrow-row backend comparison, and the reference just below $10^{16}$ against the normal density (absolute $1.7\times10^7$). Windows and Linux were green. The pattern is SciPy's, already recorded at 2.14.0 for the incomplete beta (off by about $\min(a,b)\times3\times10^{-18}$ there): it grows with the parameters, and the engine passed the same check just below $10^{16}$ where the reference failed. Not reproduced here, since no arm64 machine is available.
+- Ruled by the author 2026-11-06 ("yes"). From $\min(\alpha,\beta)=10^3$ the oracle of clauses 1 and 4 is 50-digit arithmetic in place of SciPy on every platform, so the engine is checked against exact values on arm64 too. On macOS arm64 the reference is skipped from $10^3$ up to the normal law, and the narrow-row backend comparison is skipped. The flag `SCIPY_LARGE_PARAMETER_BETA_INEXACT` moved from `tests/test_survival.py` to `tests/conftest.py`, so both files share one definition. Checked locally with the flag forced on through a throwaway plugin: 14 reference cases skip and every engine case passes. Committed without a version bump, as `05c7abb` was at 2.14.0; the release tag goes on that commit.
+
 ### Left for the author
 
-- Push the 2.15.0 commit, tag `v2.15.0` and approve the PyPI publish; aggregate's half (`[ELT-Severity-Functions]`) waits on the release.
+- Push the arm64 test fix, wait for a green wheels run on master, then tag that commit `v2.15.0` and approve the PyPI publish; aggregate's half (`[ELT-Severity-Functions]`) waits on the release.
 - Whether `D:/Projects/Using/eltq` should become a third Using site (`_quarto.yml`, `style.py`, `site.toml`, an environment and an index): the page stands alone and has not been rendered.
 - Tests 34 and 35 of the specification contain a tab where `\t` of `\times` was lost (`5.8<tab>imes10^{-11}` and seven more), from an earlier edit; not fixed here.
