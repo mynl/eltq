@@ -211,6 +211,84 @@ impl BetaFn {
     }
 }
 
+/// The density of `Beta(alpha, beta)` to full relative precision at every
+/// parameter size the continued fraction serves, with its per-row constant
+/// computed once (`dev/done/plan-density-arrays.md`,
+/// [Eltq-Density-Large-Parameters]).
+///
+/// Notes
+/// -----
+/// `BetaFn::ln_pdf` adds three logarithms of size about `(alpha + beta)
+/// H(ybar)`, `H` the entropy of the mean share, and loses about `eps
+/// min(alpha, beta)` of relative precision to their cancellation (2.9e-10 at
+/// `alpha = beta = 1e5`). From `min(alpha, beta) = LN_BETA_STIRLING_FROM`
+/// the three Stirling series of `ln B` (Press et al. 1992, section 6.1) are
+/// subtracted symbolically against the powers of `y` and `1 - y`:
+///
+/// `ln f(y) = (alpha - 1) ln(1 + g / alpha) + (beta - 1) ln(1 - g / beta) +
+/// ln((alpha + beta)^3 / (alpha beta)) / 2 - ln(2 pi) / 2 - sigma(alpha) -
+/// sigma(beta) + sigma(alpha + beta)`,
+///
+/// with `g = y (alpha + beta) - alpha = beta - (1 - y) (alpha + beta)`, so
+/// that each logarithm is of the deviation from the mean and the constant is
+/// of order one. `g` is formed from the smaller of `y` and `1 - y` by a fused
+/// multiply-add against `alpha + beta` held as the unevaluated sum `s + e`;
+/// the result is within about 1e-12 of 50-digit arithmetic up to the narrow
+/// threshold.
+#[derive(Debug, Clone, Copy)]
+pub struct BetaDensity {
+    alpha: f64,
+    beta: f64,
+    /// `ln B(alpha, beta)` on the direct route, the constant above on the
+    /// Stirling route.
+    constant: f64,
+    /// `alpha + beta = s + e` exactly, on the Stirling route.
+    s: f64,
+    e: f64,
+    stirling: bool,
+}
+
+impl BetaDensity {
+    pub fn new(bf: &BetaFn) -> Self {
+        let (a, b) = (bf.alpha, bf.beta);
+        if a.min(b) < LN_BETA_STIRLING_FROM {
+            return BetaDensity { alpha: a, beta: b, constant: bf.ln_beta, s: 0.0, e: 0.0, stirling: false };
+        }
+        // Knuth's two-sum: s + e = a + b exactly.
+        let s = a + b;
+        let bb = s - a;
+        let e = (a - (s - bb)) + (b - bb);
+        let constant = 0.5 * ((s / a).ln() + (s / b).ln() + s.ln()) - 0.5 * (2.0 * std::f64::consts::PI).ln()
+            - stirling_correction(a)
+            - stirling_correction(b)
+            + stirling_correction(s);
+        BetaDensity { alpha: a, beta: b, constant, s, e, stirling: true }
+    }
+
+    /// `ln f(y)` for `0 < y < 1`, with `q = 1 - y` formed by the caller
+    /// without cancellation (`(M - x) / M` for a loss `x`): the logarithm of
+    /// whichever of `y` and `q` is below one half is taken directly and the
+    /// other by `ln_1p`, so a pole at either end keeps its digits. A shape of
+    /// exactly one contributes no power, so `y` or `q` underflowing to zero
+    /// gives `+inf` at a pole and `-inf` otherwise, never NaN.
+    pub fn ln_pdf(&self, y: f64, q: f64) -> f64 {
+        let (a, b) = (self.alpha, self.beta);
+        if self.stirling {
+            let g = if y <= 0.5 { y.mul_add(self.s, -a) + y * self.e } else { -(q.mul_add(self.s, -b) + q * self.e) };
+            return (a - 1.0) * (g / a).ln_1p() + (b - 1.0) * (-g / b).ln_1p() + self.constant;
+        }
+        let (ln_y, ln_q) = if y <= 0.5 { (y.ln(), (-y).ln_1p()) } else { ((-q).ln_1p(), q.ln()) };
+        let power_y = if a == 1.0 { 0.0 } else { (a - 1.0) * ln_y };
+        let power_q = if b == 1.0 { 0.0 } else { (b - 1.0) * ln_q };
+        power_y + power_q - self.constant
+    }
+
+    /// `f(y)`, `0 < y < 1`, `q = 1 - y`; `+inf` where it overflows at a pole.
+    pub fn pdf(&self, y: f64, q: f64) -> f64 {
+        self.ln_pdf(y, q).exp()
+    }
+}
+
 /// Modified Lentz evaluation of the incomplete-beta continued fraction:
 /// `None` when `MAX_CF_ITERS` pass without the step reaching `CF_EPS`.
 fn betacf(a: f64, b: f64, x: f64) -> Option<f64> {

@@ -17,7 +17,8 @@ use std::sync::Arc;
 use eltq_core::{
     ClassifyOptions, Clause, Config, Convolution, Coupling, Curve, EltInput, Error as CoreError, JointConfig, Meta,
     Method, MultiConfig, MultiInput, Overflow, UnitSpec, UnitTerms, VariancePolicy, View, ZRule, build_curve,
-    classify_rows, joint_two_units as core_joint_two_units, model_moments, tail_moments, MomentConfig,
+    classify_rows, density as core_density, joint_two_units as core_joint_two_units, model_moments, tail_moments,
+    MomentConfig,
     multiunit_moments as core_multiunit_moments, multiunit_tail_moments as core_multiunit_tail_moments, TailConfig,
     multiunit_views as core_multiunit_views, quantize,
 };
@@ -619,6 +620,41 @@ fn tail_moments_arrays<'py>(
     Ok(dict)
 }
 
+/// The rate density of the continuous part of a one-row ELT's event-loss
+/// measure at each `x`, atoms excluded (spec section 4B, Density): an array
+/// in the order of `x`.
+#[pyfunction]
+#[pyo3(signature = (rate, max_loss, mean_loss, sd_indep, sd_corr, *, x,
+    mean_is_loss_rate=false, variance_policy="bernoulli", threads=None))]
+#[allow(clippy::too_many_arguments)]
+fn density_arrays<'py>(
+    py: Python<'py>,
+    rate: PyReadonlyArray1<'py, f64>,
+    max_loss: PyReadonlyArray1<'py, f64>,
+    mean_loss: PyReadonlyArray1<'py, f64>,
+    sd_indep: PyReadonlyArray1<'py, f64>,
+    sd_corr: PyReadonlyArray1<'py, f64>,
+    x: PyReadonlyArray1<'py, f64>,
+    mean_is_loss_rate: bool,
+    variance_policy: &str,
+    threads: Option<usize>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let options = ClassifyOptions {
+        mean_is_loss_rate,
+        variance_policy: parse_one_row_variance_policy(variance_policy)?,
+    };
+    let input = EltInput {
+        rate: contiguous("rate", &rate)?,
+        max_loss: contiguous("max_loss", &max_loss)?,
+        mean_loss: contiguous("mean_loss", &mean_loss)?,
+        sd_indep: contiguous("sd_indep", &sd_indep)?,
+        sd_corr: contiguous("sd_corr", &sd_corr)?,
+    };
+    let points = contiguous("x", &x)?;
+    let values = py.detach(|| core_density(&input, &options, points, threads)).map_err(|e| to_py_err(py, e))?;
+    Ok(values.into_pyarray(py))
+}
+
 /// Model moments of a multi-unit ELT's event totals with no grid (spec
 /// section 4B): a dict of the totals, the per-event support, the counts, the
 /// integration record and the diagnostics (0-based rows, translated by the
@@ -1065,6 +1101,7 @@ fn _eltq(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(multiunit_views, m)?)?;
     m.add_function(wrap_pyfunction!(moments_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(tail_moments_arrays, m)?)?;
+    m.add_function(wrap_pyfunction!(density_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(multiunit_moments, m)?)?;
     m.add_function(wrap_pyfunction!(multiunit_tail_moments, m)?)?;
     Ok(())

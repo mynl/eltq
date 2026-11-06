@@ -106,6 +106,8 @@ pub enum Error {
     BadCoupling(String),
     #[error("tail query edge {edge} with top node {top_node}: both must be finite with 0 <= top_node <= edge")]
     BadTailEdge { edge: f64, top_node: f64 },
+    #[error("density point {0} must be finite")]
+    BadDensityPoint(f64),
     #[error(
         "the matched coupling's scale is defined through a grid; the model moments and tail measures refuse it until that scale is defined without one (spec section 11)"
     )]

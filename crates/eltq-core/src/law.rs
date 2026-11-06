@@ -138,6 +138,22 @@ impl NarrowLaw {
         self.kernel.is_normal()
     }
 
+    /// The bulk `(lower, stop)` in the share, outside which the law has no
+    /// mass (each side within `TAIL_RATE_FLOOR` of the unit mass).
+    pub fn bulk(&self) -> (f64, f64) {
+        (self.lower, self.stop)
+    }
+
+    /// The density in the share: the kernel's relative density normalized
+    /// by its integral over the bulk, and zero outside the bulk, so that it
+    /// is the derivative of `cdf` wherever that is smooth.
+    pub fn density(&self, y: f64) -> f64 {
+        if y <= self.lower || y >= self.stop {
+            return 0.0;
+        }
+        self.kernel.ln_relative_density(y).exp() / self.norm
+    }
+
     /// `P(min(Y, y))`, the limited mean in the share: the first moment below
     /// `y` by the kernel plus `y` times the survival there.
     pub fn limited_mean(&self, y: f64) -> f64 {

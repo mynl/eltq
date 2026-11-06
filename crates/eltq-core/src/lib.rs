@@ -54,7 +54,7 @@ pub use multiunit::{Coupling, JointConfig, JointMeta, JointResult, MatchedScale,
 pub use quadrature::{FactorRule, ZRule, z_quadrature};
 pub use quantize::{Classified, EltInput, classify_rows, classify_rows_with, quantize};
 pub use moments::{ModelMoments, RowLaw, model_moments};
-pub use tails::{TailMoments, TailRegimes, tail_moments};
+pub use tails::{TailMoments, TailRegimes, density, tail_moments};
 pub use event_moments::{
     MomentConfig, SharedMoments, SharedTails, TailConfig, UnconvergedEvent, multiunit_moments, multiunit_tail_moments,
 };

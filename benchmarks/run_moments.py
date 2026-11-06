@@ -17,7 +17,13 @@ one thread against all, beside one ``multiunit_views`` run of the ground-up
 view. With ``--shared-tails`` it times ``multiunit_tail_moments`` on the
 same portfolio at ``--tail-edges`` log-spaced edges from the 99th
 percentile of the event mean totals to half the largest event support, with
-all threads and with eight (bitwise), and records the bounds' widths. The
+all threads and with eight (bitwise), and records the bounds' widths. With
+``--density`` it times ``density_arrays`` beside ``tail_moments_arrays`` at
+the same ``--density-points`` log-spaced points (30 by default) on the three
+one-row portfolios and on the unit rows of the multi-unit portfolio read as
+one one-row table, with all threads and with one (bitwise); the plan's line
+(``dev/done/plan-density-arrays.md``): no slower than the tail query at the
+same points. The
 plan's budget
 (``dev/done/plan-model-moments-and-windowed-views.md``, open question 4):
 a million rows by 64 edges well under a second.
@@ -60,6 +66,9 @@ def main() -> None:
     parser.add_argument("--shared-tails", action="store_true",
                         help="also time multiunit_tail_moments on the multi-unit benchmark portfolio")
     parser.add_argument("--tail-edges", type=int, default=4)
+    parser.add_argument("--density", action="store_true",
+                        help="also time density_arrays beside tail_moments_arrays at the same points")
+    parser.add_argument("--density-points", type=int, default=30)
     args = parser.parse_args()
     if eltq.BACKEND != "rust":
         raise SystemExit("the benchmark needs the Rust backend")
@@ -151,6 +160,28 @@ def main() -> None:
               f"bitwise {bitwise} evaluations {tails.evaluations:.2e} {tails.regimes}")
         for t, lo, up in zip(edges, tails.lower["rate_above"], tails.upper["rate_above"]):
             print(f"  edge {t:12.0f}  rate in [{lo:.3e}, {up:.3e}]")
+    if args.density:
+        from run_multiunit import synthetic_portfolio
+
+        tables = {name: cols_tuple(make(args.rows)) for name, make in PORTFOLIOS.items()}
+        unit = synthetic_portfolio(args.events, 10)
+        tables["multiunit_rows"] = tuple(np.asarray(unit[c], dtype=np.float64)
+                                         for c in ("rate", "max_loss", "mean_loss", "sd_indep", "sd_corr"))
+        entry = {"points": args.density_points}
+        for name, cols in tables.items():
+            top = float(np.max(cols[1]))
+            x = np.geomspace(1e-3 * top, top, args.density_points)
+            seconds_density, values = timed(lambda: eltq.density_arrays(*cols, x=x), 3)
+            seconds_one, one = timed(lambda: eltq.density_arrays(*cols, x=x, threads=1), 1)
+            seconds_tails, _ = timed(lambda: eltq.tail_moments_arrays(*cols, edge=x), 3)
+            entry[name] = {"rows": int(cols[0].size), "density_seconds": round(seconds_density, 4),
+                           "density_seconds_one_thread": round(seconds_one, 3),
+                           "tails_seconds": round(seconds_tails, 4),
+                           "bitwise_across_threads": bool(np.array_equal(values, one))}
+            print(f"density {name:14s} {cols[0].size:8d} rows  density {seconds_density:7.4f} s "
+                  f"(1 thread {seconds_one:6.3f} s)  tails {seconds_tails:7.4f} s  "
+                  f"bitwise {entry[name]['bitwise_across_threads']}")
+        record["runs"]["density"] = entry
     record["peak_rss_mb"] = peak_working_set_mb()
     print(f"peak RSS {record['peak_rss_mb']} MiB")
     if not args.no_append:

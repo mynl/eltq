@@ -20,8 +20,8 @@ use crate::beta::beta_params;
 use crate::config::ClassifyOptions;
 use crate::diagnostics::Diagnostics;
 use crate::error::Error;
-use crate::incbeta::BetaFn;
-use crate::law::BetaLaw;
+use crate::incbeta::{BetaDensity, BetaFn};
+use crate::law::{BetaLaw, NarrowLaw};
 use crate::moments::{RowLaw, row_law};
 use crate::quantize::{EltInput, classify_rows_with};
 use crate::sum::Neumaier;
@@ -351,6 +351,146 @@ pub fn tail_moments(
     })
 }
 
+/// Chunks of `TAIL_CHUNK_ROWS` evaluated at once by the density pass, so
+/// that the partials in flight are bounded by this many vectors of the
+/// points whatever the row count (2^16 points cost 32 MiB a wave). The fold
+/// is in chunk order whatever the wave, so the wave never changes a result.
+const DENSITY_WAVE_CHUNKS: usize = 64;
+
+/// A beta row's density with its constants built once, and the losses
+/// outside which it is zero.
+enum RowDensity {
+    Regular { density: BetaDensity, m: f64 },
+    Narrow { law: NarrowLaw, m: f64 },
+}
+
+impl RowDensity {
+    /// The density of a row's law, or None for an atom or a two-point row,
+    /// whose law has no continuous part.
+    fn new(law: RowLaw, row: usize) -> Result<Option<RowDensity>, Error> {
+        let RowLaw::Beta { mu, sd, max_loss } = law else { return Ok(None) };
+        let (alpha, beta) = beta_params(max_loss, mu, sd);
+        Ok(Some(match BetaLaw::new(alpha, beta).ok_or(Error::KernelFailure { row, alpha, beta })? {
+            BetaLaw::Regular(bf) => RowDensity::Regular { density: BetaDensity::new(&bf), m: max_loss },
+            BetaLaw::Narrow(law) => RowDensity::Narrow { law, m: max_loss },
+        }))
+    }
+
+    /// The open interval of losses outside which the density is zero.
+    fn support(&self) -> (f64, f64) {
+        match *self {
+            RowDensity::Regular { m, .. } => (0.0, m),
+            RowDensity::Narrow { ref law, m } => {
+                let (lower, stop) = law.bulk();
+                (lower * m, stop * m)
+            }
+        }
+    }
+
+    /// The density of the loss at `x` inside the support, per unit of rate.
+    fn at(&self, x: f64) -> f64 {
+        match *self {
+            // 1 - y as (M - x) / M, exact in the numerator from M / 2 up, so
+            // a pole at M (beta < 1) keeps its digits.
+            RowDensity::Regular { ref density, m } => density.pdf(x / m, (m - x) / m) / m,
+            RowDensity::Narrow { ref law, m } => law.density(x / m) / m,
+        }
+    }
+}
+
+/// The rate density of the continuous part of a one-row ELT's event-loss
+/// measure at each `x`, `nu_c(x) = sum_j lambda_j f_j(x)` over the beta rows
+/// of section 4's classification, atoms and two-point rows excluded (spec
+/// section 4B, Density); `-dR/dx` wherever `R` has no atom. Rows are
+/// classified exactly as the grid route classifies the same input, and
+/// processed in fixed chunks of `TAIL_CHUNK_ROWS` folded in chunk order, so
+/// the result is bitwise identical for any `threads`.
+///
+/// Notes
+/// -----
+/// A row's density is zero outside the open interval `(0, M)` (the narrow
+/// kernel's bulk from `min(alpha, beta) = 2e5`), so at `x <= 0` and `x >= M`
+/// it adds nothing, and at a pole (`alpha < 1` at `0+`, `beta < 1` at `M-`)
+/// the sum is `+inf` only where a value overflows. Points are visited in
+/// ascending order and each row only at those inside its support, found by
+/// bisection, so a row costs a logarithm of the points plus one density per
+/// point it covers. An infinite value is carried apart from the compensated
+/// sum, which it would turn to NaN.
+pub fn density(
+    input: &EltInput<'_>,
+    options: &ClassifyOptions,
+    x: &[f64],
+    threads: Option<usize>,
+) -> Result<Vec<f64>, Error> {
+    if let Some(&bad) = x.iter().find(|v| !v.is_finite()) {
+        return Err(Error::BadDensityPoint(bad));
+    }
+    if threads == Some(0) {
+        return Err(Error::BadThreads(0));
+    }
+    let classified = classify_rows_with(input, options)?;
+    let n_rows = input.rate.len();
+    let n_points = x.len();
+    let mut order: Vec<usize> = (0..n_points).collect();
+    order.sort_by(|&i, &j| x[i].total_cmp(&x[j]));
+    let sorted: Vec<f64> = order.iter().map(|&i| x[i]).collect();
+    let process = |chunk: usize| -> Result<(Vec<Neumaier>, Vec<bool>), Error> {
+        let mut acc = vec![Neumaier::default(); n_points];
+        let mut infinite = vec![false; n_points];
+        let end = ((chunk + 1) * TAIL_CHUNK_ROWS).min(n_rows);
+        for row in chunk * TAIL_CHUNK_ROWS..end {
+            let Some(law) =
+                row_law(classified.kinds[row], classified.mu_eff[row], classified.sd_eff[row], input.max_loss[row])
+            else {
+                continue;
+            };
+            let Some(density) = RowDensity::new(law, row)? else { continue };
+            let lam = input.rate[row];
+            let (lo, hi) = density.support();
+            let first = sorted.partition_point(|&v| v <= lo);
+            let last = sorted.partition_point(|&v| v < hi);
+            for k in first..last.max(first) {
+                let v = lam * density.at(sorted[k]);
+                if v == f64::INFINITY {
+                    infinite[k] = true;
+                } else if v != 0.0 {
+                    acc[k].add(v);
+                }
+            }
+        }
+        Ok((acc, infinite))
+    };
+    let n_chunks = n_rows.div_ceil(TAIL_CHUNK_ROWS);
+    let mut totals = vec![Neumaier::default(); n_points];
+    let mut infinite = vec![false; n_points];
+    let mut run = || -> Result<(), Error> {
+        for wave in (0..n_chunks).step_by(DENSITY_WAVE_CHUNKS) {
+            let partials: Vec<_> =
+                (wave..(wave + DENSITY_WAVE_CHUNKS).min(n_chunks)).into_par_iter().map(process).collect::<Result<_, _>>()?;
+            for (acc, inf) in partials {
+                for k in 0..n_points {
+                    totals[k].add(acc[k].value());
+                    infinite[k] |= inf[k];
+                }
+            }
+        }
+        Ok(())
+    };
+    match threads {
+        Some(threads) => rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|e| Error::ThreadPool(e.to_string()))?
+            .install(run)?,
+        None => run()?,
+    }
+    let mut out = vec![0.0; n_points];
+    for (k, &i) in order.iter().enumerate() {
+        out[i] = if infinite[k] { f64::INFINITY } else { totals[k].value() };
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +569,102 @@ mod tests {
         assert_eq!(tail.regimes.two_point, 1);
         assert_eq!(tail.rate_above[0], 0.0);
         assert!((tail.rate_above[1] - 0.4).abs() < 1e-16);
+    }
+
+    fn density_of(cols: &[Vec<f64>; 5], x: &[f64], threads: Option<usize>) -> Vec<f64> {
+        let input = EltInput { rate: &cols[0], max_loss: &cols[1], mean_loss: &cols[2], sd_indep: &cols[3], sd_corr: &cols[4] };
+        density(&input, &ClassifyOptions::default(), x, threads).unwrap()
+    }
+
+    // [Eltq-Density-Arrays] A rate-one-half Beta(2, 3) on [0, 10] has
+    // nu_c(x) = 0.5 * 12 y (1 - y)^2 / 10 at y = x / 10, in the caller's order;
+    // nothing at or outside the endpoints.
+    #[test]
+    fn density_of_one_beta() {
+        let (a, b) = (2.0_f64, 3.0_f64);
+        let p = a / (a + b);
+        let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
+        let cols = one_row(0.5, 10.0, 10.0 * p, 10.0 * sd);
+        let x = [7.5, -1.0, 2.5, 0.0, 10.0, 12.0, 5.0];
+        let got = density_of(&cols, &x, None);
+        for (&xi, &v) in x.iter().zip(&got) {
+            let y = xi / 10.0;
+            let want = if 0.0 < y && y < 1.0 { 0.5 * 12.0 * y * (1.0 - y) * (1.0 - y) / 10.0 } else { 0.0 };
+            // The shapes are rebuilt from (mu, sigma) to a few units in the last place.
+            assert!((v - want).abs() <= 1e-14 * want, "x={xi}: {v} vs {want}");
+        }
+    }
+
+    // The Stirling route agrees with the direct one where the direct one is
+    // still accurate (min(alpha, beta) of 100 to 300), and is used from 100.
+    #[test]
+    fn stirling_density_matches_direct_at_the_switch() {
+        for (a, b) in [(100.0, 100.0), (150.0, 3e3), (300.0, 120.0), (100.0, 1e7)] {
+            let bf = BetaFn::new(a, b);
+            let stirling = BetaDensity::new(&bf);
+            let mean = a / (a + b);
+            let s = (mean * (1.0 - mean) / (a + b + 1.0)).sqrt();
+            for k in [-4.0, -1.0, 0.0, 0.5, 2.0, 5.0] {
+                let y: f64 = mean + k * s;
+                let direct = bf.ln_pdf(y);
+                let got = stirling.ln_pdf(y, 1.0 - y);
+                // The direct route's own error, eps times the logarithms' size.
+                assert!((got - direct).abs() < 1e-12, "a={a} b={b} k={k}: {got} vs {direct}");
+            }
+        }
+    }
+
+    // Atoms and two-point rows add nothing; the poles of alpha < 1 at 0+ and
+    // beta < 1 at M- are large and finite one unit in the last place inside,
+    // the latter through 1 - y formed as (M - x) / M; a non-finite point is a
+    // typed error.
+    #[test]
+    fn density_atoms_poles_and_bad_points() {
+        let atoms = [vec![1.0, 1.0], vec![10.0, 10.0], vec![4.0, 4.0], vec![0.0, 9.0], vec![0.0, 0.0]];
+        assert!(density_of(&atoms, &[1.0, 4.0, 9.99], None).iter().all(|&v| v == 0.0));
+        let (a, b) = (3.0_f64, 0.5_f64);
+        let p = a / (a + b);
+        let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
+        let m = 1e6_f64;
+        let below = f64::from_bits(m.to_bits() - 1);
+        let v = density_of(&one_row(1.0, m, m * p, m * sd), &[below], None)[0];
+        let bf = BetaFn::new(a, b);
+        let q = (m - below) / m;
+        let want = ((a - 1.0) * (-q).ln_1p() + (b - 1.0) * q.ln() - bf.ln_beta()).exp() / m;
+        assert!(v.is_finite() && (v - want).abs() <= 1e-14 * want, "{v} vs {want}");
+        let (a, b) = (0.01_f64, 5.0_f64);
+        let p = a / (a + b);
+        let sd = (p * (1.0 - p) / (a + b + 1.0)).sqrt();
+        let near_zero = density_of(&one_row(1.0, 1.0, p, sd), &[1e-300, 0.0], None);
+        assert!(near_zero[0] > 1e290 && near_zero[1] == 0.0);
+        let input = EltInput { rate: &atoms[0], max_loss: &atoms[1], mean_loss: &atoms[2], sd_indep: &atoms[3], sd_corr: &atoms[4] };
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert!(matches!(density(&input, &ClassifyOptions::default(), &[1.0, bad], None), Err(Error::BadDensityPoint(_))));
+        }
+    }
+
+    // Three chunks and a partial one: bitwise identical for any thread count.
+    #[test]
+    fn density_bitwise_across_threads() {
+        let n = 3 * TAIL_CHUNK_ROWS + 17;
+        let mut cols: [Vec<f64>; 5] = Default::default();
+        for i in 0..n {
+            let u = (i as f64 * 0.618_033_988_749_895).fract();
+            let m = 1e3 * (1.0 + 99.0 * u);
+            let mu = m * (0.01 + 0.5 * u * u);
+            cols[0].push(1e-3 * (1.0 + u));
+            cols[1].push(m);
+            cols[2].push(mu);
+            cols[3].push(0.3 * mu * (1.0 - u));
+            cols[4].push(0.2 * mu * u);
+        }
+        let x: Vec<f64> = (0..40).map(|k| 1e3 * 1.15_f64.powi(k)).collect();
+        let all = density_of(&cols, &x, None);
+        assert!(all.iter().any(|&v| v > 0.0));
+        for threads in [1, 2, 7] {
+            let got = density_of(&cols, &x, Some(threads));
+            assert!(got.iter().zip(&all).all(|(g, a)| g.to_bits() == a.to_bits()), "threads={threads}");
+        }
     }
 
     // At the threshold 2e5 the continued fraction and the narrow kernel give

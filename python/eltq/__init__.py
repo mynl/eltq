@@ -37,7 +37,7 @@ from eltq._meta import (
 )
 from eltq.terms import VIEWS, Clause, TermsError, UnitTerms, parse_terms
 
-__version__ = "2.14.0"
+__version__ = "2.15.0"
 
 try:
     from eltq._eltq import (
@@ -74,6 +74,10 @@ try:
     except ImportError:  # extension older than 2.12.0
         _rust_tail_moments_arrays = None
     try:
+        from eltq._eltq import density_arrays as _rust_density_arrays
+    except ImportError:  # extension older than 2.15.0
+        _rust_density_arrays = None
+    try:
         from eltq._eltq import multiunit_moments as _rust_multiunit_moments
     except ImportError:  # extension older than 2.13.0
         _rust_multiunit_moments = None
@@ -101,6 +105,7 @@ except ImportError:
     _rust_exceedance_curve = None
     _rust_moments_arrays = None
     _rust_tail_moments_arrays = None
+    _rust_density_arrays = None
     _rust_multiunit_moments = None
     _rust_multiunit_tail_moments = None
 
@@ -136,6 +141,7 @@ __all__ = [
     "ModelMoments",
     "tail_moments_arrays",
     "TailMoments",
+    "density_arrays",
     "multiunit_moments",
     "multiunit_tail_moments",
     "CurveMeta",
@@ -519,6 +525,79 @@ def tail_moments_arrays(
     for name in ("moments_above", "excess_above", "top_half_excess"):
         out[name] = out[name].reshape(-1, 3)
     return TailMoments(diagnostics=diagnostics, moment_overflow=tuple(out.pop("moment_overflow")), **out)
+
+
+def density_arrays(
+    rate,
+    max_loss,
+    mean_loss,
+    sd_indep,
+    sd_corr,
+    *,
+    x,
+    mean_is_loss_rate=False,
+    variance_policy="bernoulli",
+    threads=None,
+    event_ids=None,
+) -> np.ndarray:
+    """The rate density of the continuous part of a one-row ELT's event-loss
+    measure at each loss ``x``, with no grid (spec section 4B, Density).
+
+    ``nu_c(x) = sum_j lambda_j f_j(x)`` over the beta rows of the
+    classification ``quantize_arrays`` makes, ``f_j`` the density of ``M_j``
+    times the row's beta; atoms and the two atoms of a Bernoulli row are
+    excluded. Wherever the tail rate ``R`` of ``tail_moments_arrays`` has no
+    atom, ``nu_c = -dR/dx``, so the pair describes the event-loss measure
+    exactly; divided by the total rate it is the severity's density, atoms
+    apart. Every row is exact by its law: the beta density (from
+    ``min(alpha, beta) = 100`` in a Stirling form that keeps full relative
+    precision), the narrow kernel's normalized density on its bulk from 2e5,
+    the normal law from 1e16.
+
+    Parameters
+    ----------
+    rate, max_loss, mean_loss, sd_indep, sd_corr : array_like
+        One-dimensional numeric columns of equal length, as
+        ``quantize_arrays`` takes them.
+    x : array_like
+        Losses, finite, any order and any sign.
+    mean_is_loss_rate, variance_policy : as ``quantize_arrays``.
+    threads : int, optional
+        Worker threads; None uses all cores. Results are bitwise identical
+        for any thread count. Ignored by the reference backend.
+    event_ids : sequence, optional
+        Per-row identifiers, accepted as ``tail_moments_arrays`` accepts
+        them; used only in the reference backend's error messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(len(x),)``, in the order of ``x``. A row adds nothing at
+        ``x <= 0`` or ``x >= M``; at a pole (``alpha < 1`` at ``0+``,
+        ``beta < 1`` at ``M-``) the value is ``+inf`` where it overflows.
+
+    Notes
+    -----
+    The cost is of the order of the rows times the points each row's support
+    covers: a row is visited only at the points inside ``(0, M)``.
+    """
+    cols = tuple(
+        _column(name, values)
+        for name, values in zip(
+            _CANONICAL_COLUMNS, (rate, max_loss, mean_loss, sd_indep, sd_corr)
+        )
+    )
+    points = np.ascontiguousarray(np.atleast_1d(np.asarray(x, dtype=np.float64)))
+    if points.ndim != 1:
+        raise EltqError(f"x must be one-dimensional, got shape {points.shape}")
+    ids = list(event_ids) if event_ids is not None else None
+    if _rust_density_arrays is None:
+        from eltq import reference as _ref
+
+        return _ref.density_reference(*cols, x=points, mean_is_loss_rate=mean_is_loss_rate,
+                                      variance_policy=variance_policy, event_ids=ids)
+    return _rust_density_arrays(*cols, x=points, mean_is_loss_rate=mean_is_loss_rate,
+                                variance_policy=variance_policy, threads=threads)
 
 
 def quantize_csv(

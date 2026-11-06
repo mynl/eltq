@@ -1400,6 +1400,96 @@ def tail_moments_reference(rate, max_loss, mean_loss, sd_indep, sd_corr, *, edge
     )
 
 
+def _beta_share_density(a: float, b: float, y: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """The density of ``Beta(a, b)`` at shares ``0 < y < 1`` with ``q = 1 -
+    y`` formed without cancellation: SciPy's ``beta.pdf`` (Boost), at ``y``
+    below one half and by the reflection ``f(y; a, b) = f(q; b, a)`` above,
+    so a pole at either end keeps its digits; an overflow (Boost raises
+    rather than return infinity at a subnormal share) is ``+inf``. From
+    ``NARROW_NORMAL_FROM``, and wherever SciPy returns no number, the normal
+    law, as ``_law`` takes it."""
+    if min(a, b) >= NARROW_NORMAL_FROM:
+        law = _NormalLaw(a, b)
+        z = law._z(y)
+        return np.exp(-0.5 * z * z) / (law.sd * math.sqrt(2.0 * math.pi))
+    low = y <= 0.5
+    out = np.empty_like(y)
+    for mask, share, first, second in ((low, y, a, b), (~low, q, b, a)):
+        if not mask.any():
+            continue
+        try:
+            out[mask] = beta_dist.pdf(share[mask], first, second)
+        except OverflowError:
+            values = []
+            for s in share[mask]:
+                try:
+                    values.append(float(beta_dist.pdf(s, first, second)))
+                except OverflowError:
+                    values.append(math.inf)
+            out[mask] = values
+    bad = np.isnan(out)
+    if bad.any():
+        law = _NormalLaw(a, b)
+        z = law._z(y[bad])
+        out[bad] = np.exp(-0.5 * z * z) / (law.sd * math.sqrt(2.0 * math.pi))
+    return out
+
+
+def density_reference(rate, max_loss, mean_loss, sd_indep, sd_corr, *, x, mean_is_loss_rate=False,
+                      variance_policy="bernoulli", event_ids=None) -> np.ndarray:
+    """The rate density of the continuous part of a one-row ELT's event-loss
+    measure at each ``x``, ``nu_c(x) = sum_j lambda_j f_j(x)`` over the beta
+    rows, atoms and two-point rows excluded (spec section 4B, Density).
+
+    The classification is ``quantize_reference``'s; each beta row adds
+    ``lambda f(x / M) / M`` on the open interval ``0 < x < M`` by SciPy's
+    density (``_beta_share_density``), and the sums are exact
+    (``math.fsum``), an infinite term making the point infinite.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(len(x),)``, in the order of ``x``.
+    """
+    rate = np.asarray(rate, dtype=np.float64)
+    max_loss = np.asarray(max_loss, dtype=np.float64)
+    mean_loss = np.asarray(mean_loss, dtype=np.float64)
+    sd_indep = np.asarray(sd_indep, dtype=np.float64)
+    sd_corr = np.asarray(sd_corr, dtype=np.float64)
+    n_rows = rate.size
+    for name, arr in (("max_loss", max_loss), ("mean_loss", mean_loss),
+                      ("sd_indep", sd_indep), ("sd_corr", sd_corr)):
+        if arr.size != n_rows:
+            raise EltqError(f"column {name} has {arr.size} rows, expected {n_rows}")
+    points = np.atleast_1d(np.asarray(x, dtype=np.float64))
+    if points.ndim != 1:
+        raise EltqError(f"x must be one-dimensional, got shape {points.shape}")
+    nonfinite = ~np.isfinite(points)
+    if nonfinite.any():
+        raise EltqError(f"density point {points[nonfinite][0]} must be finite")
+    if event_ids is None:
+        event_ids = list(range(n_rows))
+    _check_variance_policy(variance_policy)
+    kinds, mu_eff, sd_eff, _, _ = _classify_rows(
+        rate, max_loss, mean_loss, sd_indep, sd_corr, event_ids,
+        mean_is_loss_rate, variance_policy)
+    terms = [[] for _ in range(points.size)]
+    for j in range(n_rows):
+        if int(kinds[j]) != _BETA:
+            continue
+        lam, mu, m = float(rate[j]), float(mu_eff[j]), float(max_loss[j])
+        inside = np.flatnonzero((points > 0.0) & (points < m))
+        if inside.size == 0:
+            continue
+        a, b = beta_params(m, mu, float(sd_eff[j]))
+        share = points[inside]
+        values = lam * (_beta_share_density(a, b, share / m, (m - share) / m) / m)
+        for k, v in zip(inside, values):
+            if v != 0.0:
+                terms[k].append(float(v))
+    return np.array([math.inf if any(map(math.isinf, t)) else math.fsum(t) for t in terms], dtype=np.float64)
+
+
 def exceedance_curve_reference(
     rate,
     max_loss,
